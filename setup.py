@@ -26,7 +26,7 @@ base_requires = [
     "fsspec",
     "gcsfs",
     "absl-py",
-    "pyarrow",
+    "pyarrow>=14",
 ]
 docs_requires = [
     "myst-nb",
@@ -40,7 +40,7 @@ tests_requires = [
 ]
 setuptools.setup(
     name="weatherbenchX",
-    version="0.0.0",
+    version="v2025.03.1",
     license="Apache 2.0",
     author="Google LLC",
     author_email="weatherbenchX@google.com",
@@ -51,5 +51,5 @@ setuptools.setup(
     },
     url="https://github.com/google-research/weatherbenchX",
     packages=setuptools.find_packages(),
-    python_requires=">=3,<3.12",  # Because pyarrow won't compile with >3.11
+    python_requires=">=3"
 )
