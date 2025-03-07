@@ -1,0 +1,17 @@
+service: probabilistic
+runtime: python39
+instance_class: F4
+
+automatic_scaling:
+    max_instances: 1000
+    min_idle_instances: 1
+
+inbound_services:
+  - warmup
+
+resources:
+    cpu: 1
+    memory_gb: 4
+    disk_size_gb: 16
+
+entrypoint: gunicorn -b 0.0.0.0:8080 main_probabilistic:server

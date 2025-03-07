@@ -1,0 +1,7 @@
+# WeatherBench Interactive Graphics
+
+Make sure to install the packages in `requirements.txt`.
+
+To test the apps locally, run `python main_XXX.py local`.
+
+To deploy the apps use: `gcloud app deploy app_XXX.yaml`
