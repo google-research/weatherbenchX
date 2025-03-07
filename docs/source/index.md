@@ -50,5 +50,6 @@ pip install -e .
 wbx_quickstart.ipynb
 how_to.md
 beam_dataflow.md
+benchmark.md
 api.md
 ```
