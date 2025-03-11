@@ -40,7 +40,7 @@ tests_requires = [
 ]
 setuptools.setup(
     name="weatherbenchX",
-    version="v2025.03.1",
+    version="2025.03.1",
     license="Apache 2.0",
     author="Google LLC",
     author_email="weatherbenchX@google.com",
