@@ -20,7 +20,18 @@ from weatherbenchX import binning
 from weatherbenchX import weighting
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
+from weatherbenchX.metrics import deterministic
 import xarray as xr
+
+
+metric_name_to_statistic_mapping = {
+    deterministic.Bias: 'Error',
+    deterministic.MAE: 'AbsoluteError',
+    deterministic.MSE: 'SquaredError',
+    deterministic.RMSE: 'SquaredError',
+    deterministic.PredictionAverage: 'PredictionPassthrough',
+    deterministic.TargetAverage: 'TargetPassthrough',
+}
 
 
 def _combining_sum(
@@ -168,6 +179,38 @@ class AggregationState:
 
 
 @dataclasses.dataclass
+class UpslopeAggregationState(AggregationState):
+  """Upslope specific aggregation state."""
+
+  def return_sum_weighted_statistics(
+      self,
+  ) -> Mapping[str, Mapping[Hashable, xr.DataArray]]:
+    def normalize(sum_weights):
+      return sum_weights
+
+    return xarray_tree.map_structure(normalize, self.sum_weights)
+
+  def return_sum_weights(
+      self, metrics: Mapping[Hashable, metrics_base.Metric]
+  ) -> xr.Dataset:
+    """Returns the number of observations for each metric and variable."""
+    sum_weighted_statistics = self.return_sum_weighted_statistics()
+    values = xr.Dataset()
+    for metric_name, metric in metrics.items():
+      mapping_exist = metric_name_to_statistic_mapping.get(type(metric), None)
+      if mapping_exist is None:
+        raise ValueError(
+            f'Metric {metric} not found in metric_name_to_statistic_mapping.'
+        )
+      values_for_metric = sum_weighted_statistics[mapping_exist]
+
+      for var_name, da in values_for_metric.items():
+        values[f'{metric_name}.{var_name}'] = da
+
+    return values
+
+
+@dataclasses.dataclass
 class Aggregator:
   """Defines aggregation over set of dataset dimensions.
 
@@ -188,6 +231,7 @@ class Aggregator:
       passed to aggregate_statistics.
     skipna: If True, NaNs will be omitted in the aggregation. This option is not
       recommended, as it won't catch unexpected NaNs.
+    use_upslope_aggregation: If True, use upslope specific aggregation methods.
   """
 
   reduce_dims: Collection[str]
@@ -195,6 +239,7 @@ class Aggregator:
   weigh_by: Sequence[weighting.Weighting] | None = None
   masked: bool = False
   skipna: bool = False
+  use_upslope_aggregation: bool = False
 
   def aggregation_fn(
       self,
@@ -303,6 +348,8 @@ class Aggregator:
     )
 
     # Aggregator for every dataset in statistics
+    if self.use_upslope_aggregation:
+      return UpslopeAggregationState(sum_weighted_statistics, sum_weights)
     return AggregationState(sum_weighted_statistics, sum_weights)
 
 
