@@ -152,9 +152,13 @@ class EnsembleVariance(base.PerVariableStatistic):
 class UnbiasedEnsembleMeanSquaredError(base.PerVariableStatistic):
   """Computes the unbiased ensemble mean squared error.
 
-  This class estimates E(X - Y)² with no bias. This is done by subtracting the
-  sample variance divided by n. As such, you must have n > 1 or the result will
-  be NaN.
+  Let X be the ensemble mean of predictions.
+  If targets.dims contains self.ensemble_dim, then let Y be the ensemble mean
+  of the targets. Otherwise (the usual case), let Y be the targets.
+
+  This class estimates E(X - Y)² with no finite-ensemble bias. This is done by
+  subtracting the sample variance divided by ensemble size. As such, you must
+  have ensemble size > 1 or the result will be NaN.
   """
 
   def __init__(
@@ -172,15 +176,32 @@ class UnbiasedEnsembleMeanSquaredError(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-    unbiased_variance = predictions.var(
-        dim=self._ensemble_dim, ddof=1, skipna=self._skipna_ensemble
-    )
-    predictions_mean = predictions.mean(
-        dim=self._ensemble_dim, skipna=self._skipna_ensemble
-    )
-    biased_mse = (predictions_mean - targets) ** 2
-    n_ensemble = predictions.sizes[self._ensemble_dim]
-    return biased_mse - unbiased_variance / n_ensemble
+    if self._ensemble_dim in predictions.dims:
+      predictions_mean = predictions.mean(
+          dim=self._ensemble_dim, skipna=self._skipna_ensemble
+      )
+      predictions_var = predictions.var(
+          dim=self._ensemble_dim, ddof=1, skipna=self._skipna_ensemble
+      )
+      predictions_bias = predictions_var / predictions.sizes[self._ensemble_dim]
+    else:
+      raise ValueError(
+          f'Dimension {self._ensemble_dim} not found in {predictions.dims}'
+      )
+
+    if self._ensemble_dim in targets.dims:
+      targets_mean = targets.mean(
+          dim=self._ensemble_dim, skipna=self._skipna_ensemble
+      )
+      targets_var = targets.var(
+          dim=self._ensemble_dim, ddof=1, skipna=self._skipna_ensemble
+      )
+      targets_bias = targets_var / targets.sizes[self._ensemble_dim]
+    else:
+      targets_mean = targets
+      targets_bias = 0.0
+    biased_mse = (predictions_mean - targets_mean) ** 2
+    return biased_mse - predictions_bias - targets_bias
 
 
 ### Metrics

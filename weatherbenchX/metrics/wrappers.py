@@ -38,7 +38,7 @@ wrappers.WrappedMetric(
 
 import abc
 from collections.abc import Sequence
-from typing import Hashable, Iterable, Mapping, Union
+from typing import Any, Hashable, Iterable, Mapping, Union
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
@@ -157,6 +157,112 @@ class ContinuousToBinary(InputTransform):
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
+class Rename(InputTransform):
+  """Renames variables, coordinates and dimensions with xr.rename."""
+
+  def __init__(
+      self,
+      which: str,
+      renames: Mapping[Hashable, Hashable],
+  ):
+    """Initializes a Rename transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      renames: Map from OLD to NEW name.
+    """
+    super().__init__(which)
+    self._renames = renames
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'rename_{self._renames}'
+
+  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return da.rename(self._renames)
+
+
+class Select(InputTransform):
+  """Selects data by applying xr.sel and/or xr.isel."""
+
+  def __init__(
+      self,
+      which: str,
+      sel: Mapping[Hashable, Any] | None = None,
+      isel: Mapping[Hashable, Any] | None = None,
+      sel_kwargs: Mapping[Hashable, Any] | None = None,
+      isel_kwargs: Mapping[Hashable, Any] | None = None,
+  ):
+    """Initializes a Select transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      sel: Selector to pass to xr.sel.
+      isel: Selector to pass to xr.isel.
+      sel_kwargs: Additional kwargs to pass to xr.sel.
+      isel_kwargs: Additional kwargs to pass to xr.isel.
+    """
+    super().__init__(which)
+    self._isel = isel
+    self._sel = sel
+    self._isel_kwargs = isel_kwargs or {}
+    self._sel_kwargs = sel_kwargs or {}
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'select_isel={self._isel}_sel={self._sel}'
+
+  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    da = da.copy()
+    if self._sel is not None:
+      da = da.sel(self._sel, **self._sel_kwargs)
+    if self._isel is not None:
+      da = da.isel(self._isel, **self._isel_kwargs)
+    return da
+
+
+class StackToNewDimension(InputTransform):
+  """Stacks any number of existing dimensions into a "range" new dimension.
+
+  Similar to xr.stack, except StackToNewDimension...
+  * allows the new dimension name to be the same as one of the stacked dims.
+  * results in a dimension with values [0, 1, ...,]
+  """
+
+  def __init__(
+      self,
+      which: str,
+      dims_to_stack: Sequence[Hashable],
+      new_dim_name: Hashable,
+  ):
+    """Initializes a StackToNewDimension Transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      dims_to_stack: Sequence of dimensions to stack.
+      new_dim_name: Name of stacked dimension.
+    """
+    super().__init__(which)
+    self._dims_to_stack = dims_to_stack
+    self._temporary_new_dim_name = 'STACK_OF_' + '_AND_'.join(
+        (str(d) for d in self._dims_to_stack)
+    )
+    self._new_dim_name = new_dim_name
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'stack_{self._dims_to_stack}_to_{self._new_dim_name}'
+
+  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    stacked = da.stack({self._temporary_new_dim_name: self._dims_to_stack})
+    return stacked.drop_vars(self._dims_to_stack).rename(
+        {self._temporary_new_dim_name: self._new_dim_name}
+    )
+
+
 class WrappedStatistic(base.Statistic):
   """Wraps a statistic with an input transform.
 
@@ -204,8 +310,8 @@ class WrappedMetric(base.Metric):
     Args:
       metric: Metric to wrap.
       transforms: List of input transforms to apply. The transforms will be
-        applied in the order they are listed, i.e. the first transform in the
-        list will be applied first.
+        applied in the order they are added to the list. I.e. transforms
+        [f, g, h], transform x as h(g(f(x))).
     """
     self.metric = metric
     self.transforms = transforms
@@ -214,7 +320,9 @@ class WrappedMetric(base.Metric):
   def statistics(self) -> Mapping[Hashable, base.Statistic]:
     stats = {}
     for name, stat in self.metric.statistics.items():
-      # Apply wrappers in reverse order since the last one will be called first.
+      # Apply wrappers in reverse order since the last one will be called first
+      # in subsequent code...i.e., if stat = W(V(stat)), then the final stat is
+      # computed as x --> V(W(x)).
       for wrapper in self.transforms[::-1]:
         stat = WrappedStatistic(stat, wrapper)
       stats[name] = stat
