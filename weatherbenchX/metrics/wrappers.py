@@ -90,7 +90,7 @@ class InputTransform(abc.ABC):
     """Add a suffix to unique statistics name."""
 
   @abc.abstractmethod
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     """Function to apply to predictions and/or targets."""
 
 
@@ -114,7 +114,7 @@ class EnsembleMean(InputTransform):
   def unique_name_suffix(self) -> str:
     return 'ensemble_mean'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
@@ -153,7 +153,7 @@ class ContinuousToBinary(InputTransform):
     threshold_value_str = ','.join([str(t) for t in self._threshold_value])
     return f'{self._threshold_dim}={threshold_value_str}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
@@ -184,12 +184,12 @@ class WrappedStatistic(base.Statistic):
   ) -> Mapping[Hashable, xr.DataArray]:
     if self.transform.which in ('predictions', 'both'):
       predictions = xarray_tree.map_structure(
-          self.transform.tranform_fn,
+          self.transform.transform_fn,
           predictions,
       )
     if self.transform.which in ('targets', 'both'):
       targets = xarray_tree.map_structure(
-          self.transform.tranform_fn,
+          self.transform.transform_fn,
           targets,
       )
     return self.statistic.compute(predictions, targets)
