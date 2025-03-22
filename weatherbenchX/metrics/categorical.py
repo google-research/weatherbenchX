@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementations of categorical metrics."""
 
-from typing import Hashable, Mapping, Sequence, Union
+from typing import Hashable, Mapping, Sequence, Union, Collection
 import numpy as np
 from weatherbenchX.metrics import base
 import xarray as xr
@@ -487,3 +487,717 @@ class SEEPS(base.Metric):
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
     return statistic_values['SEEPSStatistic']
+
+
+class HSS(base.PerVariableMetric):
+  """Heidke skill score (HSS), Also called Cohen’s Kappa.
+
+  Definition in:
+  Heidke, P. (1926). Berechnung Des Erfolges Und Der Güte Der Windstärkevorhersagen Im Sturmwarnungsdienst. 
+      Geografiska Annaler, 8(4), 301–349. https://doi.org/10.1080/20014422.1926.11881138
+
+  exp_correct = ((TP + FP)*(TP + FN) + (FP + TN)*(FN + TN)) / (TP + FP + FN + TN)
+
+  HSS = ((TP + TN) - exp_correct) / (TP + FP + FN + TN - exp_correct).
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    exp_correct = (
+        (statistic_values['TruePositives'] + statistic_values['FalsePositives']) 
+        * (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+        + (statistic_values['FalsePositives'] + statistic_values['TrueNegatives'])
+        * (statistic_values['FalseNegatives'] + statistic_values['TrueNegatives'])
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']      
+    )
+
+    return (
+        statistic_values['TruePositives'] + statistic_values['TrueNegatives'] - exp_correct
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']
+        - exp_correct
+    )
+
+
+class GSS(base.PerVariableMetric):
+  """Gilbert skill score (GSS), Also called equitable threat score.
+  Definition in:
+  Gilbert, G. K. (1884). Finley’s tornado predictions. American Meteorological Journal. 
+      A Monthly Review of Meteorology and Allied Branches of Study (1884-1896), 1(5), 166.
+
+  a_r = (TP + FP)*(TP + FN)/(TP + FP + FN + TN)
+
+  HSS = (TP - a_r) / (TP + FP + FN - a_r).
+
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    exp_correct = (
+        (statistic_values['TruePositives'] + statistic_values['FalsePositives'])
+        * (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']      
+    )
+
+    return (
+        statistic_values['TruePositives'] - exp_correct
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives']
+        - exp_correct
+    )
+
+
+class EDS(base.PerVariableMetric):
+  """Extreme dependence score (EDS)
+  
+  Definition in:
+  Primo, C., & Ghelli, A. (2009). The affect of the base rate on the extreme dependency score. 
+      Meteorological Applications, 16(4), 533–535. https://doi.org/10.1002/met.152
+  Stephenson, D. B., Casati, B., Ferro, C. A. T., & Wilson, C. A. (2008). The extreme dependency score: 
+      a non‐vanishing measure for forecasts of rare events. Meteorological Applications, 15(1), 41–50. 
+      https://doi.org/10.1002/met.53
+
+
+  B = (TP + FN) / (TP + FP + FN + TN)
+  H = TP / (TP + FN)
+  
+  EDS = (lnB - lnH) / (lnB + lnH)
+
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    base_rate = (
+        (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']      
+    )
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+
+    return (
+      np.log(base_rate) - np.log(hit_rate)
+    ) / (
+       np.log(base_rate) + np.log(hit_rate)
+    )
+
+
+class SEDS(base.PerVariableMetric):
+  """Symmetric extreme dependence score (SEDS)
+  
+  Definition in:
+  Orozco López, E., Kaplan, D., Linhoss, A., Hogan, R. J., Ferro, C. A. T., Jolliffe, I. T., & Stephenson, D. B. (2010). 
+      Equitability Revisited: Why the “Equitable Threat Score” Is Not Equitable. Weather and Forecasting, 25(2), 710–726. 
+      https://doi.org/10.1175/2009WAF2222350.1
+
+
+  R = (TP + FP) / (TP + FP + FN + TN)
+  B = (TP + FN) / (TP + FP + FN + TN)
+  H = TP / (TP + FN)
+  
+  EDS = (lnR - lnH) / (lnB + lnH)
+
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    forecast_rate = (
+        (statistic_values['TruePositives'] + statistic_values['FalsePositives'])
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']      
+    )
+    base_rate = (
+        (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+    ) / (
+        statistic_values['TruePositives'] 
+        + statistic_values['FalsePositives'] 
+        + statistic_values['FalseNegatives'] 
+        + statistic_values['TrueNegatives']      
+    )
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+
+    return (
+      np.log(forecast_rate) - np.log(hit_rate)
+    ) / (
+       np.log(base_rate) + np.log(hit_rate)
+    )
+
+
+class F(base.PerVariableMetric):
+  """False alarm rate (F), Also called probability of false detection.
+
+  Definition in:
+  Donaldson, R. J., Dyer, R. M., & Kraus, M. J. (1975). An objective evaluator of techniques for predicting 
+      severe weather events. In Preprints, Ninth Conf. on Severe Local Storms, Norman, OK, Amer. Meteor. Soc (Vol. 321326).
+
+
+  F = FP / (FP + TN)
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'FalsePositives': FalsePositives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+
+
+class Specificity(base.PerVariableMetric):
+  """Specificity, Also called true negative rate (TNR).
+  Specificity = TN / (FP + TN)
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'FalsePositives': FalsePositives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['TrueNegatives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+
+
+class ORSS(base.PerVariableMetric):
+  """Odds ratio skill score (ORSS), Also called Yule’s Q.
+
+  Definition in:
+  Stephenson, D. B. (2000). Use of the “Odds Ratio” for Diagnosing Forecast Skill. 
+      Retrieved from https://journals.ametsoc.org/view/journals/wefo/15/2/1520-0434_2000_015_0221_uotorf_2_0_co_2.xml
+
+  ORSS = (TP * TN - FP * FN) / (TP * TN + FP * FN)
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['TruePositives'] * statistic_values['TrueNegatives']
+        - statistic_values['FalsePositives'] * statistic_values['FalseNegatives']
+    ) / (
+        statistic_values['TruePositives'] * statistic_values['TrueNegatives']
+        + statistic_values['FalsePositives'] * statistic_values['FalseNegatives']
+    )
+
+
+class PSS(base.PerVariableMetric):
+  """Peirce’s skill score (PSS), Also called Hanssen and Kuipers discriminant
+  
+  Definition in:
+  Peirce, C. S. (1884). The Numerical Measure of the Success of Predictions. Science, ns-4(93), 
+      453–454. https://doi.org/10.1126/science.ns-4.93.453.b
+
+  
+  H = TP / (TP + FN)
+  F = FP / (FP + TN)
+
+  PSS = H - F = TP / (TP + FN) - FP / (FP + TN)
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives']
+    ) - statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+
+class EDI(base.PerVariableMetric):
+  """Extremal dependence index (EDI)
+  
+  Definition in:
+  Ferro, C. A. T., & Stephenson, D. B. (2011). Extremal Dependence Indices: Improved Verification Measures 
+      for Deterministic Forecasts of Rare Binary Events. Weather and Forecasting, 26(5), 699–713. 
+      https://doi.org/10.1175/WAF-D-10-05030.1
+
+
+  H = TP / (TP + FN)
+  F = FP / (FP + TN)
+
+  EDI = (lnF - lnH) / (lnF + lnH)
+
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+    false_alarm_rate = statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+    return (
+      np.log(false_alarm_rate) - np.log(hit_rate)
+    ) / (
+       np.log(false_alarm_rate) + np.log(hit_rate)
+    )
+
+
+class SEDI(base.PerVariableMetric):
+  """Symmetric extremal dependence index (SEDI)
+
+  Definition in:
+  Ferro, C. A. T., & Stephenson, D. B. (2011). Extremal Dependence Indices: Improved Verification Measures 
+      for Deterministic Forecasts of Rare Binary Events. Weather and Forecasting, 26(5), 699–713. 
+      https://doi.org/10.1175/WAF-D-10-05030.1
+
+  H = TP / (TP + FN)
+  F = FP / (FP + TN)
+  
+  SEDI = (lnF - lnH + ln(1-H) - ln(1-F)) / (lnF + lnH + ln(1-H) + ln(1-F))
+
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+    false_alarm_rate = statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+    return (
+      np.log(false_alarm_rate) - np.log(hit_rate) + np.log(1-hit_rate) - np.log(1-false_alarm_rate)
+    ) / (
+       np.log(false_alarm_rate) + np.log(hit_rate) + np.log(1-hit_rate) + np.log(1-false_alarm_rate)
+    )
+
+
+class AUC(base.PerVariableMetric):
+  """Area under receiver operating characteristic (ROC) curve (AUC)
+
+  Definition in:
+  Swets, J. A. (1986). Indices of discrimination or diagnostic accuracy: Their ROCs and implied models. 
+      Psychological Bulletin, 99(1), 100–117. https://doi.org/10.1037/0033-2909.99.1.100
+
+  H = TP / (TP + FN)
+  F = FP / (FP + TN)
+  
+  AUC = np.trapezoid(H, F)
+
+  """
+  def __init__(
+      self,
+      threshold_probability_dim: str,
+  ):
+    """Init.
+
+    Args:
+      threshold_probability_dim: Name of dimension to use for threshold probability values
+    """
+    self._threshold_probability_dim = threshold_probability_dim
+  
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives']
+    )
+    false_alarm_rate = statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+    auc_dims = tuple(set(hit_rate.dims) - {self._threshold_probability_dim})
+
+    return -1 * xr.apply_ufunc(
+      np.trapezoid,
+      hit_rate,
+      false_alarm_rate,
+      input_core_dims=[hit_rate.dims, false_alarm_rate.dims],  # type: ignore
+      output_core_dims=[auc_dims],
+      dask="allowed",
+    )
+  
+
+class ROCSS(base.PerVariableMetric):
+  """Receiver operating characteristic skill score (ROCSS)
+
+  Definition in:
+  Swets, J. A., & Swets, J. A. (1986). Form of empirical ROCs in discrimination and diagnostic tasks: 
+      Implications for theory and measurement of performance. Psychological Bulletin, 99(2), 181–198. 
+      https://doi.org/10.1037/0033-2909.99.2.181
+
+  H = TP / (TP + FN)
+  F = FP / (FP + TN)
+  
+  AUC = np.trapezoid(H, F)
+
+  ROCSS = 2 * AUC - 1
+
+  """
+  def __init__(
+      self,
+      threshold_probability_dim: str,
+  ):
+    """Init.
+
+    Args:
+      threshold_probability_dim: Name of dimension to use for threshold probability values
+    """
+    self._threshold_probability_dim = threshold_probability_dim
+  
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    assert self._threshold_probability_dim in statistic_values['TruePositives'].dims, (
+        f"Threshold probability dim {self._threshold_probability_dim} not found in "
+        f"TruePositives statistic"
+    )
+    hit_rate = statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalseNegatives']
+    )
+    # print(hit_rate)
+    false_alarm_rate = statistic_values['FalsePositives'] / (
+        statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    )
+    # print(false_alarm_rate)
+    auc_dims = tuple(set(hit_rate.dims) - {self._threshold_probability_dim})
+
+    auc = -1 * xr.apply_ufunc(
+      np.trapezoid,
+      hit_rate,
+      false_alarm_rate,
+      input_core_dims=[hit_rate.dims, false_alarm_rate.dims],  # type: ignore
+      output_core_dims=[auc_dims],
+      dask="allowed",
+    )
+
+    return 2 * auc - 1
+
+
+class REV(base.PerVariableMetric):
+  """ Relative economic value (REV)
+
+  Definition in:
+  Richardson, D. S. (2000). Skill and relative economic value of the ECMWF ensemble prediction system. 
+      Quarterly Journal of the Royal Meteorological Society, 126(563), 649–667. https://doi.org/10.1002/qj.49712656313
+  Richardson, David S. (2006). Predictability and economic value. In T. Palmer & R. Hagedorn (Eds.), 
+      Predictability of Weather and Climate (1st ed., pp. 628–644). Cambridge University Press. https://doi.org/10.1017/CBO9780511617652.026
+  Wilks, D. S. (2001). A skill score based on economic value for probability forecasts. 
+      Meteorological Applications, 8(2), 209–219. https://doi.org/10.1017/S1350482701002092
+
+  total = TP + FP + FN + TN
+  e_clim = min{(TP + FN) / total, cost_loss_ratios}
+  e_fcst = (TP + FP) / total * cost_loss_ratios + FN / total
+  e_perfect = (TP + FN) / total * cost_loss_ratios
+
+  REV = (e_clim - e_fcst) / (e_clim - e_perfect)
+  """
+  def __init__(
+      self,
+      cost_loss_ratios: Union[float, Sequence[float]],
+  ):
+    """Init.
+
+    Args:
+      cost_loss_ratios: Cost loss ratios for calculating the REV.
+    """
+    self._cost_loss_ratios = xr.DataArray(
+        cost_loss_ratios, dims=["cost_loss_ratios"], 
+        coords={"cost_loss_ratios": cost_loss_ratios}
+    )
+  
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    event_count = statistic_values['TruePositives'] + statistic_values['FalseNegatives']
+    event_nonevent_count = event_count + statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    event_ratio = event_count / event_nonevent_count
+
+    e_clim = event_ratio.where(event_ratio < self._cost_loss_ratios, self._cost_loss_ratios)
+    e_fcst = (
+        statistic_values['TruePositives'] + statistic_values['FalsePositives']
+      ) / event_nonevent_count * self._cost_loss_ratios + statistic_values['FalseNegatives'] / event_nonevent_count
+    e_perfect = event_ratio * self._cost_loss_ratios
+    
+    return (e_clim - e_fcst) / (e_clim - e_perfect)
+
+
+class PREV(base.PerVariableMetric):
+  """ Potential relative economic value (PREV)
+
+  Definition in:
+  Richardson, D. S. (2000). Skill and relative economic value of the ECMWF ensemble prediction system. 
+      Quarterly Journal of the Royal Meteorological Society, 126(563), 649–667. https://doi.org/10.1002/qj.49712656313
+  Richardson, David S. (2006). Predictability and economic value. In T. Palmer & R. Hagedorn (Eds.), 
+      Predictability of Weather and Climate (1st ed., pp. 628–644). Cambridge University Press. https://doi.org/10.1017/CBO9780511617652.026
+  Wilks, D. S. (2001). A skill score based on economic value for probability forecasts. 
+      Meteorological Applications, 8(2), 209–219. https://doi.org/10.1017/S1350482701002092
+
+  total = TP + FP + FN + TN
+  e_clim = min{(TP + FN) / total, cost_loss_ratios}
+  e_fcst = (TP + FP) / total * cost_loss_ratios + FN / total
+  e_perfect = (TP + FN) / total * cost_loss_ratios
+
+  REV = (e_clim - e_fcst) / (e_clim - e_perfect)
+
+  PREV = max(REV) for threshold_probability in [0, 1]
+  """
+  def __init__(
+      self,
+      cost_loss_ratios: Union[float, Sequence[float]],
+      threshold_probability_dim: str,
+  ):
+    """Init.
+
+    Args:
+      cost_loss_ratios: Cost loss ratios for calculating the REV.
+    """
+    self._cost_loss_ratios = xr.DataArray(
+        cost_loss_ratios, dims=["cost_loss_ratios"], 
+        coords={"cost_loss_ratios": cost_loss_ratios}
+    )
+    self._threshold_probability_dim = threshold_probability_dim
+  
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    assert self._threshold_probability_dim in statistic_values['TruePositives'].dims, (
+        f"Threshold probability dim {self._threshold_probability_dim} not found in "
+        f"TruePositives statistic"
+    )
+
+    event_count = statistic_values['TruePositives'] + statistic_values['FalseNegatives']
+    event_nonevent_count = event_count + statistic_values['FalsePositives'] + statistic_values['TrueNegatives']
+    event_ratio = event_count / event_nonevent_count
+    
+    e_clim = event_ratio.where(event_ratio < self._cost_loss_ratios, self._cost_loss_ratios)
+    e_fcst = (
+        statistic_values['TruePositives'] + statistic_values['FalsePositives']
+      ) / event_nonevent_count * self._cost_loss_ratios + statistic_values['FalseNegatives'] / event_nonevent_count
+    e_perfect = event_ratio * self._cost_loss_ratios
+    
+    return ((e_clim - e_fcst) / (e_clim - e_perfect)).max(dim=self._threshold_probability_dim)
+
+
+class SquaredError(base.PerVariableStatistic):
+  """Squared error from binary or probabilistic predictions and targets."""
+
+  @property
+  def unique_name(self) -> str:
+    return 'SquaredError'
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+
+    return ((predictions - targets) ** 2).astype(np.float32)
+
+
+class BrierScore(base.PerVariableMetric):
+  """ Brier Score (BS)
+  
+  brier_score = mean((predictions - targets) ** 2)
+  """
+  def __init__(
+      self,
+      reduce_dims: Collection[str],
+  ):
+    """Init.
+
+    Args:
+      cost_loss_ratios: Cost loss ratios for calculating the REV.
+    """
+    self._reduce_dims = reduce_dims
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'SquaredError': SquaredError(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+
+    reduce_dims_set = set(self._reduce_dims)
+    eval_unit_dims = set(statistic_values['SquaredError'].dims)
+    assert reduce_dims_set.issubset(eval_unit_dims), (
+        "Can't reduce over dims that aren't present as evaluation unit dims."
+    )
+
+    return statistic_values['SquaredError'].mean(dim=reduce_dims_set)
+  
