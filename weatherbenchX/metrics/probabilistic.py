@@ -89,6 +89,9 @@ class CRPSSpread(base.PerVariableStatistic):
     if n_ensemble < 2:
       raise ValueError('Cannot estimate CRPS spread with n_ensemble < 2.')
 
+    # We only want to compute spread for any points that have valid targets,
+    # so we set anything else to NaN.
+    predictions = predictions.where(targets.notnull())
     if self._use_sort:
       # one_half_spread is ̂̂λ₂ from Zamo. That is, with n_ensemble = M,
       #   λ₂ = 1 / (2 M (M - 1)) Σ_{i,j=1}^M |Xi - Xj|
