@@ -157,6 +157,63 @@ class ContinuousToBinary(InputTransform):
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
+class ReLU(InputTransform):
+  """Transform data by passing through a (shifted) rectified linear unit.
+
+  Example:
+    truth = xr.Dataset(...)
+    forecast = xr.Dataset(...)
+    thresholds = xr.Dataset(...)  # Dataset with dims a subset of truth.dims
+    relu = ReLU(thresholds)
+
+    # Equivalent to xr.where(x > thresholds, x - thresholds, 0)
+    relu_truth = relu.transform_fn(truth)
+    relu_forecast = relu.transform_fn(forecast)
+
+    # Now, relu_truth and relu_forecast can be passed through CRPS to get a
+    # thresholded version of CRPS.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      threshold_value: Union[float, Iterable[float], xr.Dataset],
+      threshold_dim: str,
+  ):
+    """Initializes a ReLU transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      threshold_value: Threshold value, list of values or xarray.Dataset.
+      threshold_dim: Name of dimension to use for threshold values.
+    """
+    super().__init__(which)
+    self._threshold_value = (
+        threshold_value
+        if isinstance(threshold_value, (Iterable, xr.Dataset))
+        else [threshold_value]
+    )
+    self._threshold_dim = threshold_dim
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return 'relu'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    # Convert self._thresholds to a DataArray in all cases.
+    if isinstance(self._threshold_value, xr.Dataset):
+      thresholds = self._threshold_value[da.name]
+    else:
+      thresholds = xr.DataArray(
+          self._threshold_value,
+          dims=[self._threshold_dim],
+          coords={self._threshold_dim: self._threshold_value},
+      )
+
+    return xr.where(da > thresholds, da - thresholds, 0)
+
+
 class Rename(InputTransform):
   """Renames variables, coordinates and dimensions with xr.rename."""
 
