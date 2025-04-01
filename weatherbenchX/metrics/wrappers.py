@@ -47,7 +47,7 @@ import xarray as xr
 
 def binarize_thresholds(
     x: xr.DataArray,
-    thresholds: Iterable[float],
+    thresholds: Iterable[float] | xr.Dataset,
     threshold_dim: str,
 ) -> xr.DataArray:
   """Binarizes a continuous array using a threshold value or a list of values.
@@ -57,7 +57,7 @@ def binarize_thresholds(
 
   Args:
     x: Input DataArray.
-    thresholds: List of threshold values.
+    thresholds: List or xarray.Dataset of threshold values.
     threshold_dim: Name of dimension to use for threshold values.
 
   Returns:
