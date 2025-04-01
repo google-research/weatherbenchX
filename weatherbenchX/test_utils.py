@@ -36,12 +36,14 @@ def mock_target_data(
     dtype: npt.DTypeLike = np.float32,
     ensemble_size: Optional[int] = None,
     random: bool = False,
+    seed: Optional[int] = None,
 ) -> xr.Dataset:
   """Create a mock truth dataset with all zeros for testing."""
 
+  rng = np.random.default_rng(seed)
   def val_fn(shape):
     if random:
-      return np.random.rand(*shape)
+      return rng.random(size=shape)
     else:
       return np.zeros(shape, dtype=dtype)
 
