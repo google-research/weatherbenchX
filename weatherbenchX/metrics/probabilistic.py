@@ -38,7 +38,12 @@ class CRPSSkill(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-    return np.abs(predictions - targets).mean(self._ensemble_dim, skipna=False)
+    reduce_dims = [self._ensemble_dim]
+    if self._ensemble_dim in targets.dims:
+      pseudo_ensemble_dim = f'{self._ensemble_dim}_PSEUDO_FOR_TARGETS'
+      reduce_dims += [pseudo_ensemble_dim]
+      targets = targets.rename({self._ensemble_dim: pseudo_ensemble_dim})
+    return np.abs(predictions - targets).mean(reduce_dims, skipna=False)
 
 
 def _rankdata(x: np.ndarray, axis: int) -> np.ndarray:
@@ -72,20 +77,29 @@ class CRPSSpread(base.PerVariableStatistic):
       self,
       ensemble_dim: str = 'number',
       use_sort: bool = False,
+      which: str = 'predictions',
   ):
     self._ensemble_dim = ensemble_dim
     self._use_sort = use_sort
+    self._which = which
 
   @property
   def unique_name(self) -> str:
-    return f'CRPSSpread_{self._ensemble_dim}'
+    return f'CRPSSpread_{self._ensemble_dim}_{self._which}'
 
   def _compute_per_variable(
       self,
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-    n_ensemble = predictions.sizes[self._ensemble_dim]
+    if self._which == 'predictions':
+      da = predictions
+    elif self._which == 'targets':
+      da = targets
+    else:
+      raise ValueError(f'Unhandled {self._which=}')
+
+    n_ensemble = da.sizes[self._ensemble_dim]
     if n_ensemble < 2:
       raise ValueError('Cannot estimate CRPS spread with n_ensemble < 2.')
 
@@ -104,11 +118,11 @@ class CRPSSpread(base.PerVariableStatistic):
       # usage, but with a larger constant factor, whereas the first is O(M²) in
       # compute and memory but with a smaller constant factor due to being
       # easily parallelizable.
-      rank = _rank_da(predictions, self._ensemble_dim)
+      rank = _rank_da(da, self._ensemble_dim)
       return (
           2
           * (
-              ((2 * rank - n_ensemble - 1) * predictions).mean(
+              ((2 * rank - n_ensemble - 1) * da).mean(
                   self._ensemble_dim, skipna=False
               )
           )
@@ -116,11 +130,10 @@ class CRPSSpread(base.PerVariableStatistic):
       )
     else:
       second_ensemble_dim = 'ensemble_dim_2'
-      predictions_2 = predictions.rename(
-          {self._ensemble_dim: second_ensemble_dim})
-      return abs(predictions - predictions_2).sum(
-          dim=(self._ensemble_dim, second_ensemble_dim),
-          skipna=False) / (n_ensemble * (n_ensemble - 1))
+      da_2 = da.rename({self._ensemble_dim: second_ensemble_dim})
+      return abs(da - da_2).sum(
+          dim=(self._ensemble_dim, second_ensemble_dim), skipna=False
+      ) / (n_ensemble * (n_ensemble - 1))
 
 
 class EnsembleVariance(base.PerVariableStatistic):
@@ -222,8 +235,8 @@ class CRPSEnsemble(base.PerVariableMetric):
   members are drawn -- equivalently, the CRPS attained in the limit of an
   infinite ensemble.
 
-  [Zamo & Naveau, 2018] derive two equivalent ways to compute the same
-  fair estimator:
+  [Zamo & Naveau, 2018] derive two equivalent ways to compute the spread term in
+  their fair estimator:
 
   1. By averaging absolute differences of all pairs of distinct ensemble
   members. This is O(M^2) in compute and memory, but easy to parallelize and
@@ -270,6 +283,86 @@ class CRPSEnsemble(base.PerVariableMetric):
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['CRPSSkill'] - 0.5 * statistic_values['CRPSSpread']
+
+
+class CRPSEnsembleDistance(base.PerVariableMetric):
+  """Unbiased CRPS distance between forecast and targets.
+
+  Given ground truth scalar random variable Y, and two iid predictions X, X`,
+  the Continuously Ranked Probability Score distance is defined as
+    CRPS = E|X - Y| - 0.5 * E|X - X`| - 0.5 * E|Y - Y`|,
+  where `E` is mathematical expectation over X and Y, and | ⋅ | is the absolute
+  value. This version of CRPS has a unique minimum, equal to zero, when X is
+  distributed the same as Y. This uniqueness holds only for scalar variates. The
+  multi-dimensional generalization is the (squared) Energy Distance. See
+  [Szekely and Rizzo 2013].
+
+  Using this Metric requires that both forecasts and truth have an ensemble_dim,
+  and ensemble size >= 2. The ensemble sizes in forecasts and truth may be
+  different.
+
+  [Zamo & Naveau, 2018] derive two equivalent ways to compute the spread term in
+  their fair estimator:
+
+  1. By averaging absolute differences of all pairs of distinct ensemble
+  members. This is O(M^2) in compute and memory, but easy to parallelize and
+  hence generally cheaper for small-to-medium-sized ensembles. This is
+  CRPS_{Fair} in their paper, and is the default implementation here.
+
+  2. By sorting the ensemble members and using their ranks. This is O(M log M)
+  and will be more efficient for sufficiently large ensembles. This is
+  CRPS_{PWM} in their paper. It can be enabled by setting use_sort=True.
+
+  References:
+
+  - [Szekely and Rizzo 2013], Energy statistics: statistics based on
+    distances.
+  - [Gneiting & Raftery, 2012], Strictly Proper Scoring Rules, Prediction, and
+    Estimation
+  - [Zamo & Naveau, 2018], Estimation of the Continuous Ranked Probability Score
+    with Limited Information and Applications to Ensemble Weather Forecasts.
+  """
+
+  def __init__(
+      self, ensemble_dim: str = 'number', use_sort: bool = False,
+  ):
+    """Init.
+
+    Args:
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      use_sort: If True, use the sorted-rank method for computing the spread
+        estimates. This may be more efficient for large ensembles,
+        see class docstring for more details. Note that this is not used
+        for the skill estimate though, which this is O(M*N) in the two ensemble
+        sizes. Default: False.
+    """
+    self._ensemble_dim = ensemble_dim
+    self._use_sort = use_sort
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'CRPSSkill': CRPSSkill(ensemble_dim=self._ensemble_dim),
+        'CRPSSpread': CRPSSpread(
+            ensemble_dim=self._ensemble_dim, use_sort=self._use_sort
+        ),
+        'CRPSTargetSpread': CRPSSpread(
+            ensemble_dim=self._ensemble_dim,
+            use_sort=self._use_sort,
+            which='targets',
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['CRPSSkill']
+        - 0.5 * statistic_values['CRPSSpread']
+        - 0.5 * statistic_values['CRPSTargetSpread']
+    )
 
 
 class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
