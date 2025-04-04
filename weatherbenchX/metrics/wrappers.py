@@ -47,7 +47,7 @@ import xarray as xr
 
 def binarize_thresholds(
     x: xr.DataArray,
-    thresholds: Iterable[float],
+    thresholds: Iterable[float] | xr.Dataset,
     threshold_dim: str,
 ) -> xr.DataArray:
   """Binarizes a continuous array using a threshold value or a list of values.
@@ -57,16 +57,22 @@ def binarize_thresholds(
 
   Args:
     x: Input DataArray.
-    thresholds: List of threshold values.
+    thresholds: List or xarray.Dataset of threshold values.
     threshold_dim: Name of dimension to use for threshold values.
 
   Returns:
     binary_x: Binarized DataArray.
   """
-  threshold = xr.DataArray(
-      thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
-  )
-  return (x > threshold).where(~np.isnan(x))
+  if not isinstance(thresholds, xr.Dataset):
+    threshold = xr.DataArray(
+        thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
+    )
+  else:
+    assert threshold_dim in thresholds.dims, (
+        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+    )
+    threshold = thresholds[x.name]
+  return (x >= threshold).where(~np.isnan(x))
 
 
 # Transforms
@@ -128,7 +134,7 @@ class ContinuousToBinary(InputTransform):
   def __init__(
       self,
       which: str,
-      threshold_value: Union[float, Iterable[float]],
+      threshold_value: Union[float, Iterable[float], xr.Dataset],
       threshold_dim: str,
   ):
     """Init.
@@ -136,14 +142,14 @@ class ContinuousToBinary(InputTransform):
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      threshold_value: Threshold value or list of values.
+      threshold_value: Threshold value, list of values or xarray.Dataset.
       threshold_dim: Name of dimension to use for threshold values.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
     self._threshold_value = (
         threshold_value
-        if isinstance(threshold_value, Iterable)
+        if isinstance(threshold_value, (Iterable, xr.Dataset))
         else [threshold_value]
     )
     self._threshold_dim = threshold_dim
@@ -547,3 +553,31 @@ class SubselectVariables(base.Metric):
     return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
         statistic_values
     )
+
+
+class WeibullEnsembleToProbabilistic(InputTransform):
+  """
+  Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
+  The forecasts should be binarized before applying this wrapper and 
+  you can wrap the metric with the ContinuousToBinary firstly.
+
+  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology, 
+      45, 334–340, https://doi.org/10.1175/JAM2349.1, 2006.
+"""
+  def __init__(self, which, ensemble_dim='number'):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be 'predictions'.
+      ensemble_dim: Name of ensemble dimension. Default: 'number'.
+    """
+    assert which == 'predictions', 'Only predictions can be converted to probabilities'
+    super().__init__(which)
+    self._ensemble_dim = ensemble_dim
+  @property
+  def unique_name_suffix(self) -> str:
+    return 'ensemble_to_probabilistic_by_weibull_plotting_position'
+
+  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    ensemble_members = da.sizes[self._ensemble_dim]
+    return da.sum(self._ensemble_dim, skipna=False)/(ensemble_members+1)
