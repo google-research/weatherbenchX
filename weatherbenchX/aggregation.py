@@ -83,8 +83,18 @@ def _combining_sum(
   # This will extend each array to use the union of all the coordinates, padding
   # with zeros for any missing coordinates, and only sum after padding each
   # array. As such it may be quadratic in len(data_arrays) in the worst case.
-  data_arrays = xr.align(*data_arrays, join='outer', fill_value=0, copy=False)
-  return sum(data_arrays[1:], start=data_arrays[0])
+  # Some coordinates, namely valid_time, may be datetime64, so zero is not a
+  # valid fill value. We merge these separately.
+  coords = xr.merge([a.coords for a in data_arrays])
+  data_arrays = xr.align(
+      *[a.reset_coords(drop=True) for a in data_arrays],
+      join='outer',
+      fill_value=0,
+      copy=False,
+  )
+  summed: xr.DataArray = sum(data_arrays[1:], start=data_arrays[0])
+  summed.coords.update(coords.variables)
+  return summed
 
 
 @dataclasses.dataclass

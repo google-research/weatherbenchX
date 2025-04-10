@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from apache_beam.testing import test_pipeline
 import numpy as np
 from weatherbenchX import aggregation
@@ -25,9 +26,15 @@ from weatherbenchX.metrics import deterministic
 import xarray as xr
 
 
-class BeamPipelineTest(absltest.TestCase):
+class BeamPipelineTest(parameterized.TestCase):
 
-  def test_pipeline(self):
+  @parameterized.parameters(
+      {'reduce_dims': ['init_time', 'latitude', 'longitude']},
+      {'reduce_dims': ['init_time']},
+      {'reduce_dims': ['latitude', 'longitude']},
+      {'reduce_dims': []},
+  )
+  def test_pipeline(self, reduce_dims):
     """Test equivalence of pipeline results to directly computed results."""
     predictions_path = self.create_tempdir('predictions.zarr').full_path
     targets_path = self.create_tempdir('targets.zarr').full_path
@@ -72,9 +79,7 @@ class BeamPipelineTest(absltest.TestCase):
 
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
 
-    aggregation_method = aggregation.Aggregator(
-        reduce_dims=['init_time', 'latitude', 'longitude'],
-    )
+    aggregation_method = aggregation.Aggregator(reduce_dims=reduce_dims)
 
     # Compute results directly
     statistics = metrics_base.compute_unique_statistics_for_all_metrics(
