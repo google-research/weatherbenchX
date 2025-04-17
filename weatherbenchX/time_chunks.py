@@ -144,8 +144,43 @@ class TimeChunks(Iterable[TimeChunk]):
     else:
       raise ValueError('Lead times must be either np.ndarray or slice.')
 
+    self._init_times = init_times
+    self._lead_times = lead_times
+    self._init_time_chunk_size = init_time_chunk_size
+    self._lead_time_chunk_size = lead_time_chunk_size
+    self._num_init_chunks = len(self._init_time_chunks)
+    self._num_lead_chunks = len(self._lead_time_chunks)
+
+  @property
+  def init_times(self) -> np.ndarray:
+    return self._init_times
+
+  @property
+  def lead_times(self) -> Union[np.ndarray, slice]:
+    return self._lead_times
+
+  @property
+  def init_time_chunk_size(self) -> int:
+    return self._init_time_chunk_size
+
+  @property
+  def lead_time_chunk_size(self) -> int:
+    return self._lead_time_chunk_size
+
   def __iter__(self) -> Iterator[TimeChunk]:
     return itertools.product(self._init_time_chunks, self._lead_time_chunks)
 
   def __len__(self) -> int:
-    return len(self._init_time_chunks) * len(self._lead_time_chunks)
+    return self._num_init_chunks * self._num_lead_chunks
+
+  def __getitem__(self, index: int) -> TimeChunk:
+    if index < 0 or index >= len(self):
+      raise IndexError(f'TimeChunks index out of range: {index}')
+    init_chunk = self._init_time_chunks[index // self._num_lead_chunks]
+    lead_chunk = self._lead_time_chunks[index % self._num_lead_chunks]
+    return init_chunk, lead_chunk
+
+  def get_init_and_lead_index(self, index: int) -> tuple[int, int]:
+    init_index = self._init_time_chunk_size * (index // self._num_lead_chunks)
+    lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)
+    return init_index, lead_index

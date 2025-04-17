@@ -28,6 +28,7 @@ base_requires = [
     "absl-py",
     "pyarrow",
     "opt_einsum",
+    "xarray-beam",
 ]
 docs_requires = [
     "myst-nb",
