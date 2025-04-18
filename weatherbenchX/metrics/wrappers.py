@@ -459,10 +459,34 @@ class WrappedStatistic(base.Statistic):
     return self.statistic.compute(predictions, targets)
 
 
+class RenamedStatistic(base.Statistic):
+  """Wraps a statistic with a new unique name."""
+
+  def __init__(self, statistic: base.Statistic, unique_name: str):
+    self._statistic = statistic
+    self._unique_name = unique_name
+
+  @property
+  def unique_name(self) -> str:
+    return self._unique_name
+
+  def compute(
+      self,
+      predictions: Mapping[Hashable, xr.DataArray],
+      targets: Mapping[Hashable, xr.DataArray],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    return self._statistic.compute(predictions, targets)
+
+
 class WrappedMetric(base.Metric):
   """Wraps all statistics of a metric with input transforms."""
 
-  def __init__(self, metric: base.Metric, transforms: list[InputTransform]):
+  def __init__(
+      self,
+      metric: base.Metric,
+      transforms: list[InputTransform],
+      unique_name_suffix: str | None = None,
+  ):
     """Init.
 
     Args:
@@ -470,9 +494,13 @@ class WrappedMetric(base.Metric):
       transforms: List of input transforms to apply. The transforms will be
         applied in the order they are added to the list. I.e. transforms [f, g,
         h], transform x as h(g(f(x))).
+      unique_name_suffix: Optional suffix to use for uniquely naming all
+        associated statistics. By default, this is constructed automatically
+        from the transforms, which may be overly verbose.
     """
     self.metric = metric
     self.transforms = transforms
+    self.unique_name_suffix = unique_name_suffix
 
   @property
   def statistics(self) -> Mapping[Hashable, base.Statistic]:
@@ -481,8 +509,12 @@ class WrappedMetric(base.Metric):
       # Apply wrappers in reverse order since the last one will be called first
       # in subsequent code...i.e., if stat = W(V(stat)), then the final stat is
       # computed as x --> V(W(x)).
+      original_name = stat.unique_name
       for wrapper in self.transforms[::-1]:
         stat = WrappedStatistic(stat, wrapper)
+      if self.unique_name_suffix is not None:
+        unique_name = f'{original_name}_{self.unique_name_suffix}'
+        stat = RenamedStatistic(stat, unique_name)
       stats[name] = stat
     return stats
 
