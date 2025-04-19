@@ -28,6 +28,34 @@ import xarray as xr
 
 class BeamPipelineTest(parameterized.TestCase):
 
+  def setUp(self):
+    self.predictions_path = self.create_tempdir('predictions.zarr').full_path
+    self.targets_path = self.create_tempdir('targets.zarr').full_path
+
+    self.predictions = (
+        test_utils.mock_prediction_data(
+            time_start='2020-01-01T00',
+            time_stop='2020-01-03T00',
+            lead_start='0 days',
+            lead_stop='1 day',
+            random=True,
+            seed=0,
+        )
+        # + np.random.uniform()
+    )
+    self.targets = (
+        test_utils.mock_target_data(
+            time_start='2020-01-01T00',
+            time_stop='2020-01-05T00',
+            random=True,
+            seed=1,
+        )
+        # + np.random.uniform()
+    )
+
+    self.predictions.to_zarr(self.predictions_path)
+    self.targets.to_zarr(self.targets_path)
+
   @parameterized.parameters(
       {'reduce_dims': ['init_time', 'latitude', 'longitude']},
       {'reduce_dims': ['init_time']},
@@ -36,32 +64,9 @@ class BeamPipelineTest(parameterized.TestCase):
   )
   def test_pipeline(self, reduce_dims):
     """Test equivalence of pipeline results to directly computed results."""
-    predictions_path = self.create_tempdir('predictions.zarr').full_path
-    targets_path = self.create_tempdir('targets.zarr').full_path
-    results_path = self.create_tempfile('results.nc').full_path
 
-    predictions = (
-        test_utils.mock_prediction_data(
-            time_start='2020-01-01T00',
-            time_stop='2020-01-03T00',
-            lead_start='0 days',
-            lead_stop='1 day',
-        )
-        + np.random.uniform()
-    )
-    targets = (
-        test_utils.mock_target_data(
-            time_start='2020-01-01T00',
-            time_stop='2020-01-05T00',
-        )
-        + np.random.uniform()
-    )
-
-    predictions.to_zarr(predictions_path)
-    targets.to_zarr(targets_path)
-
-    init_times = predictions.time.values
-    lead_times = predictions.prediction_timedelta.values
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
 
     times = time_chunks.TimeChunks(
         init_times,
@@ -71,10 +76,10 @@ class BeamPipelineTest(parameterized.TestCase):
     )
 
     target_loader = xarray_loaders.TargetsFromXarray(
-        path=targets_path,
+        path=self.targets_path,
     )
     prediction_loader = xarray_loaders.PredictionsFromXarray(
-        path=predictions_path,
+        path=self.predictions_path,
     )
 
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
@@ -93,6 +98,7 @@ class BeamPipelineTest(parameterized.TestCase):
     direct_results = aggregation_state.metric_values(all_metrics).compute()
 
     # Compute results with pipeline
+    results_path = self.create_tempfile('results.nc').full_path
     with test_pipeline.TestPipeline() as root:
       beam_pipeline.define_pipeline(
           root,
@@ -106,7 +112,67 @@ class BeamPipelineTest(parameterized.TestCase):
     pipeline_results = xr.open_dataset(results_path).compute()
 
     # There can be small differences due to numerical errors.
-    xr.testing.assert_allclose(direct_results, pipeline_results, rtol=1e-3)
+    xr.testing.assert_allclose(direct_results, pipeline_results, atol=1e-5)
+
+  def test_unaggregated_pipeline(self):
+    """Test equivalence of unaggregated pipeline results."""
+
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+
+    # Compute results directly
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_results = xr.Dataset()
+    for stat_name, var_dict in statistics.items():
+      for var_name, da in var_dict.items():
+        direct_results[f'{stat_name}.{var_name}'] = da
+    direct_results = direct_results.transpose('init_time', 'lead_time', ...)
+
+    # Compute results with pipeline
+    results_path = self.create_tempdir('results.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_unaggregated_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          out_path=results_path,
+      )
+    pipeline_results = xr.open_dataset(results_path).compute()
+
+    # There can be small differences due to numerical errors.
+    np.testing.assert_allclose(
+        direct_results['SquaredError.2m_temperature'].values,
+        pipeline_results['SquaredError.2m_temperature'].values,
+    )
+    np.testing.assert_allclose(
+        direct_results['SquaredError.geopotential'].values,
+        pipeline_results['SquaredError.geopotential'].values,
+    )
+    print(direct_results)
+    print(pipeline_results)
+    xr.testing.assert_allclose(direct_results, pipeline_results, atol=1e-5)
 
 
 if __name__ == '__main__':
