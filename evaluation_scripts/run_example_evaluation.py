@@ -105,7 +105,7 @@ LEAD_TIME_CHUNK_SIZE = flags.DEFINE_integer(
 )
 LEVELS = flags.DEFINE_list(
     'levels',
-    _DEFAULT_LEVELS,
+    None,
     help='Comma delimited list of pressure levels to select for evaluation',
 )
 VARIABLES = flags.DEFINE_list(
@@ -152,17 +152,21 @@ def main(argv: Sequence[str]) -> None:
       lead_time_chunk_size=LEAD_TIME_CHUNK_SIZE.value,
   )
 
-  levels = [int(level) for level in LEVELS.value]
+  if LEVELS.value is not None:
+    sel_kwargs = {'level': [int(level) for level in LEVELS.value]}
+  else:
+    sel_kwargs = {}
+
   target_loader = xarray_loaders.TargetsFromXarray(
       path=TARGET_PATH.value,
       variables=VARIABLES.value,
-      sel_kwargs={'level': levels},
+      sel_kwargs=sel_kwargs,
   )
 
   prediction_loader = xarray_loaders.PredictionsFromXarray(
       path=PREDICTION_PATH.value,
       variables=VARIABLES.value,
-      sel_kwargs={'level': levels},
+      sel_kwargs=sel_kwargs,
   )
 
   all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}

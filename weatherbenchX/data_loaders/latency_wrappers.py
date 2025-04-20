@@ -19,6 +19,7 @@ from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base
 from weatherbenchX.data_loaders import xarray_loaders
 import xarray as xr
+from absl import logging
 
 
 class ConstantLatencyWrapper(base.DataLoader):
@@ -126,7 +127,13 @@ class ConstantLatencyWrapper(base.DataLoader):
       lead_time_offset = init_time - available_init_time
 
       adjusted_lead_times = lead_times + lead_time_offset
-      print(available_init_time, adjusted_lead_times.astype('timedelta64[h]'))
+      logging.info(
+          'LatencyWrapper: loading chunk for init time %s, using available init'
+          ' time %s, adjusted lead times %s',
+          init_time,
+          available_init_time,
+          adjusted_lead_times.astype('timedelta64[m]'),
+      )
       raw_chunk = self.data_loader._load_chunk_from_source(  # pystyle: disable=protected-access
           np.array([available_init_time]), adjusted_lead_times
       )
@@ -187,7 +194,10 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
   recent available init time across all data loaders.
 
   It works internally by wrapping load_chunk, determining the wrapped data
-  loader to call and then concatenating the results across init_time.
+  loader to call and then concatenating the results across init_time. If there
+  is a tie (i.e. multiple underling data loaders that have the same available
+  init time), ties will be broken by picking the data loader with the largest
+  latency, with the assumption that a larger latency implies a larger lookahead.
 
   As for the regular LatencyWrapper, the concatenation is done along the
   init_time dimension for non-sparse data and along the index dimension for
@@ -216,6 +226,36 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
         'This should only be called for the individual data loaders.'
     )
 
+  def _get_data_loader(self, init_time):
+    lead_time_offsets_and_latencies = []
+    for data_loader in self._data_loaders:
+      available_init_time = data_loader.get_available_init_time(init_time)
+      lead_time_offset = init_time - available_init_time
+      # Break ties by picking the data loader with largest latency -- note that
+      # we make latency negative here because we want the smallest
+      # lead_time_offset, but the largest data loader latency.
+      lead_time_offsets_and_latencies.append(
+          (lead_time_offset, -data_loader.latency)
+      )
+    lead_time_offsets_and_latencies = np.array(
+        lead_time_offsets_and_latencies,
+        dtype=[
+            ('lead_time_offset', 'timedelta64[s]'),
+            ('neg_latency', 'timedelta64[s]'),
+        ],
+    )
+    idx = np.argsort(
+        lead_time_offsets_and_latencies,
+        order=('lead_time_offset', 'neg_latency'),
+    )
+    most_recent_data_loader = self._data_loaders[idx[0]]
+    logging.info(
+        'Init time: %s, data loader latency: %s',
+        init_time,
+        most_recent_data_loader.latency,
+    )
+    return most_recent_data_loader
+
   def load_chunk(
       self,
       init_times: np.ndarray,
@@ -223,15 +263,12 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
       reference: Optional[Mapping[Hashable, xr.DataArray]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
     chunk = []
+    # TODO(srasp): Interpolation gets tricky here because the reference data
+    # may contain data for multiple init times. For dense data this is fine,
+    # because you are only interpolating spatially, but for sparse data this
+    # can cause issues. Need to add some checks here and document this better.
     for init_time in init_times:
-      lead_time_offsets = []
-      for data_loader in self._data_loaders:
-        available_init_time = data_loader.get_available_init_time(init_time)
-        lead_time_offset = init_time - available_init_time
-        lead_time_offsets.append(lead_time_offset)
-      most_recent_data_loader = self._data_loaders[
-          np.argmin(np.abs(lead_time_offsets))
-      ]
+      most_recent_data_loader = self._get_data_loader(init_time)
       chunk.append(
           most_recent_data_loader.load_chunk([init_time], lead_times, reference)
       )

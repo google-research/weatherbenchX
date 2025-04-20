@@ -83,8 +83,18 @@ def _combining_sum(
   # This will extend each array to use the union of all the coordinates, padding
   # with zeros for any missing coordinates, and only sum after padding each
   # array. As such it may be quadratic in len(data_arrays) in the worst case.
-  data_arrays = xr.align(*data_arrays, join='outer', fill_value=0, copy=False)
-  return sum(data_arrays[1:], start=data_arrays[0])
+  # Some coordinates, namely valid_time, may be datetime64, so zero is not a
+  # valid fill value. We merge these separately.
+  coords = xr.merge([a.coords for a in data_arrays])
+  data_arrays = xr.align(
+      *[a.reset_coords(drop=True) for a in data_arrays],
+      join='outer',
+      fill_value=0,
+      copy=False,
+  )
+  summed: xr.DataArray = sum(data_arrays[1:], start=data_arrays[0])
+  summed.coords.update(coords.variables)
+  return summed
 
 
 @dataclasses.dataclass
@@ -147,7 +157,7 @@ class AggregationState:
     )
 
   def metric_values(
-      self, metrics: Mapping[Hashable, metrics_base.Metric]
+      self, metrics: Mapping[str, metrics_base.Metric]
   ) -> xr.Dataset:
     """Returns metrics computed from the normalized statistics.
 
@@ -159,10 +169,13 @@ class AggregationState:
     """
 
     mean_statistics = self.mean_statistics()
+    metric_values = metrics_base.compute_metrics_from_statistics(
+        metrics, mean_statistics
+    )
     values = xr.Dataset()
-    for metric_name, metric in metrics.items():
-      values_for_metric = metric.values_from_mean_statistics(mean_statistics)
-      for var_name, da in values_for_metric.items():
+    for metric_name in metric_values:
+      for var_name in metric_values[metric_name]:
+        da = metric_values[metric_name][var_name]
         values[f'{metric_name}.{var_name}'] = da
     return values
 

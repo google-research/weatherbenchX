@@ -24,9 +24,13 @@ def _rename_dataset(
     ds: xr.Dataset,
     rename_dimensions: Optional[Union[Mapping[str, str], str]] = 'ecmwf',
     rename_variables: Optional[Mapping[str, str]] = None,
+    convert_lat_lon_to_latitude_longitude: bool = True,
 ) -> xr.Dataset:
   """Rename dimensions and variables of Zarr dataset."""
   # Rename dimensions
+  if convert_lat_lon_to_latitude_longitude:
+    if 'lat' in ds.coords and 'lon' in ds.coords:
+      ds = ds.rename({'lat': 'latitude', 'lon': 'longitude'})
   if rename_dimensions == 'ecmwf':  # ECMWF standard
     if 'prediction_timedelta' in ds.coords:  # Is forecast dataset
       ds = ds.rename({'time': 'init_time', 'prediction_timedelta': 'lead_time'})
@@ -56,6 +60,7 @@ class XarrayDataLoader(base.DataLoader):
       variables: Optional[Iterable[str]] = None,
       sel_kwargs: Optional[Mapping[str, Any]] = None,
       rename_dimensions: Optional[Union[Mapping[str, str], str]] = 'ecmwf',
+      automatically_convert_lat_lon_to_latitude_longitude: bool = True,
       rename_variables: Optional[Mapping[str, str]] = None,
       interpolation: Optional[interpolations.Interpolation] = None,
       compute: bool = True,
@@ -80,6 +85,9 @@ class XarrayDataLoader(base.DataLoader):
         standard names, {'time': 'init_time', 'prediction_timedelta':
         'lead_time'} for prediction datasets and {'time': 'valid_time'} for
         analysis datasets.
+      automatically_convert_lat_lon_to_latitude_longitude: (Optional) Whether to
+        automatically convert 'lat' and 'lon' dimensions to 'latitude' and
+        'longitude'. Default: True.
       rename_variables: (Optional) Dictionary of variables to rename.
       interpolation: (Optional) Interpolation instance.
       compute: Whether to load data into memory. Default: True.
@@ -103,7 +111,12 @@ class XarrayDataLoader(base.DataLoader):
       raise ValueError('Either path or ds must be specified.')
     if preprocessing_fn is not None:
       self._ds = preprocessing_fn(self._ds)
-    self._ds = _rename_dataset(self._ds, rename_dimensions, rename_variables)
+    self._ds = _rename_dataset(
+        self._ds,
+        rename_dimensions,
+        rename_variables,
+        automatically_convert_lat_lon_to_latitude_longitude,
+    )
     if variables is not None:
       self._ds = self._ds[list(variables)]
     if sel_kwargs is not None:

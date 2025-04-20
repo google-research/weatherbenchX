@@ -38,7 +38,7 @@ wrappers.WrappedMetric(
 
 import abc
 from collections.abc import Sequence
-from typing import Any, Hashable, Iterable, Mapping, Union
+from typing import Any, Callable, Hashable, Iterable, Mapping, Union
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
@@ -96,14 +96,14 @@ class InputTransform(abc.ABC):
     """Add a suffix to unique statistics name."""
 
   @abc.abstractmethod
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     """Function to apply to predictions and/or targets."""
 
 
 class EnsembleMean(InputTransform):
   """Compute ensemble mean."""
 
-  def __init__(self, which, ensemble_dim='number', skipna=False):
+  def __init__(self, which: str, ensemble_dim='number', skipna=False):
     """Init.
 
     Args:
@@ -118,9 +118,9 @@ class EnsembleMean(InputTransform):
 
   @property
   def unique_name_suffix(self) -> str:
-    return 'ensemble_mean'
+    return f'ensemble_mean_{self._ensemble_dim=}_{self._skipna=}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
@@ -159,8 +159,166 @@ class ContinuousToBinary(InputTransform):
     threshold_value_str = ','.join([str(t) for t in self._threshold_value])
     return f'{self._threshold_dim}={threshold_value_str}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
+
+
+class Inline(InputTransform):
+  """Transform data with a provided function.
+
+  Example:
+    # Negate values
+    x = xr.DataArray(...)
+    y = Inline('both', lambda da: -da, 'negate').transform_fn(x)
+    xr.testing.assert_equal(y, -x)
+  """
+
+  def __init__(
+      self,
+      which: str,
+      transform_fn: Callable[[xr.DataArray], xr.DataArray],
+      unique_name_suffix: str,
+  ):
+    """Initializes an Inline transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      transform_fn: Function to transform a dataarray.
+      unique_name_suffix: Name to give this transform. Should be different than
+        any other transform used. Should uniquely identify this class and all
+        init args (except `which`).
+    """
+    super().__init__(which)
+    self._transform_fn = transform_fn
+    self._unique_name_suffix = unique_name_suffix
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'{self._unique_name_suffix}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return self._transform_fn(da)
+
+
+class ReLU(InputTransform):
+  """Transform data by passing through a rectified linear unit."""
+
+  def __init__(  # pylint: disable=useless-parent-delegation
+      self,
+      which: str,
+  ):
+    """Initializes a ReLU transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+    """
+    super().__init__(which)
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return 'relu'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return xr.where(da > 0, da, 0).where(~np.isnan(da))
+
+
+class ShiftAlongNewDim(InputTransform):
+  """Transforms by shifting along a new dimension, possibly more than once.
+
+  This transform adds a new dimension `shift_dim` to the input DataArray, and
+  shifts the values along this dimension. The `shift_value` can be a constant,
+  a list of constants, or an xarray.Dataset.
+
+  Examples:
+
+    x = xr.DataArray(...)
+    x.sizes
+    ==> Frozen({'time': 366, 'latitude': 19, 'longitude': 36})
+
+    # Shift every value by a constant (=1), add a singleton dim.
+    y = ShiftAlongNewDim('both', shift_value=1, shift_dim='threshold')
+    y.sizes
+    ==> Frozen({'time': 366, 'latitude': 19, 'longitude': 36, 'threshold': 1})
+    y.threshold
+    ==> <xarray.DataArray 'threshold' (threshold: 1)> Size: 8B
+        array([0.5])
+        Coordinates:
+          * threshold  (threshold) float64 8B 0.5
+
+    # Shift by two different values, indexing the shift by dim 'threshold'.
+    y = ShiftAlongNewDim('both', shift_value=[10., 20.], shift_dim='threshold')
+    y.sizes
+    ==> Frozen({'time': 366, 'latitude': 19, 'longitude': 36, 'threshold': 2})
+    y.threshold
+    ==> <xarray.DataArray 'threshold' (threshold: 2)> Size: 16B
+        array([10., 20.])
+        Coordinates:
+          * threshold  (threshold) float64 8B 10.0 20.0
+
+    # Shift by adding a DataArray. In this case the quantiles of another Dataset
+    quantiles = xr.Dataset(...).quantile([0.2, 0.8])
+    y = ShiftAlongNewDim('both', shift_value=quantiles, shift_dim='threshold')
+    y.sizes
+    ==> Frozen({'time': 366, 'latitude': 19, 'longitude': 36, 'quantile': 2})
+    y['quantile']
+    ==> <xarray.DataArray 'quantile' (quantile: 2)> Size: 16B
+        array([0.2, 0.8])
+        Coordinates:
+          * quantile  (quantile) float64 8B 0.2 0.8
+  """
+
+  def __init__(
+      self,
+      which: str,
+      shift_value: Union[float, Iterable[float], xr.Dataset],
+      shift_dim: str,
+      unique_name_suffix: str,
+  ):
+    """Initializes a ShiftAlongNewDim transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      shift_value: Constant value, list of values or xarray.Dataset.
+      shift_dim: Name of dimension to use for the shift. The output will have a
+        new dimension, `shift_dim`.
+      unique_name_suffix: Name to give this transform. Should be different than
+        any other transform used. Should uniquely identify this class and all
+        init args (except `which`).
+    """
+    super().__init__(which)
+    self._shift_value = (
+        shift_value
+        if isinstance(shift_value, (Iterable, xr.Dataset))
+        else [shift_value]
+    )
+    self._shift_dim = shift_dim
+    self._unique_name_suffix = unique_name_suffix
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return self._unique_name_suffix
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    # Convert self._shifts to a DataArray in all cases.
+    if isinstance(self._shift_value, xr.Dataset):
+      shifts = self._shift_value[da.name]
+      if self._shift_dim not in shifts.dims:
+        raise RuntimeError(
+            f'Expected to find {self._shift_dim=} in {shifts.dims=} but did'
+            ' not. This is probably an error.'
+        )
+      shifts = self._shift_value[da.name]
+    else:
+      shifts = xr.DataArray(
+          self._shift_value,
+          dims=[self._shift_dim],
+          coords={self._shift_dim: self._shift_value},
+      )
+
+    return da + shifts
 
 
 class Rename(InputTransform):
@@ -185,7 +343,7 @@ class Rename(InputTransform):
   def unique_name_suffix(self) -> str:
     return f'rename_{self._renames}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return da.rename(self._renames)
 
 
@@ -218,9 +376,9 @@ class Select(InputTransform):
 
   @property
   def unique_name_suffix(self) -> str:
-    return f'select_isel={self._isel}_sel={self._sel}'
+    return f'select_{self._isel=}_{self._isel_kwargs=}_{self._sel=}_{self._sel_kwargs=}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     da = da.copy()
     if self._sel is not None:
       da = da.sel(self._sel, **self._sel_kwargs)
@@ -262,7 +420,7 @@ class StackToNewDimension(InputTransform):
   def unique_name_suffix(self) -> str:
     return f'stack_{self._dims_to_stack}_to_{self._new_dim_name}'
 
-  def tranform_fn(self, da: xr.DataArray) -> xr.DataArray:
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     stacked = da.stack({self._temporary_new_dim_name: self._dims_to_stack})
     return stacked.drop_vars(self._dims_to_stack).rename(
         {self._temporary_new_dim_name: self._new_dim_name}
@@ -296,12 +454,12 @@ class WrappedStatistic(base.Statistic):
   ) -> Mapping[Hashable, xr.DataArray]:
     if self.transform.which in ('predictions', 'both'):
       predictions = xarray_tree.map_structure(
-          self.transform.tranform_fn,
+          self.transform.transform_fn,
           predictions,
       )
     if self.transform.which in ('targets', 'both'):
       targets = xarray_tree.map_structure(
-          self.transform.tranform_fn,
+          self.transform.transform_fn,
           targets,
       )
     return self.statistic.compute(predictions, targets)
@@ -316,8 +474,8 @@ class WrappedMetric(base.Metric):
     Args:
       metric: Metric to wrap.
       transforms: List of input transforms to apply. The transforms will be
-        applied in the order they are added to the list. I.e. transforms
-        [f, g, h], transform x as h(g(f(x))).
+        applied in the order they are added to the list. I.e. transforms [f, g,
+        h], transform x as h(g(f(x))).
     """
     self.metric = metric
     self.transforms = transforms

@@ -216,6 +216,17 @@ def compute_unique_statistics_for_all_metrics(
   return statistic_values
 
 
+def compute_metrics_from_statistics(
+    metrics: Mapping[str, Metric],
+    statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
+) -> Mapping[str, Mapping[Hashable, xr.DataArray]]:
+  """Computes metrics from averaged statistics."""
+  return {
+      metric_name: metric.values_from_mean_statistics(statistic_values)
+      for metric_name, metric in metrics.items()
+  }
+
+
 class PerVariableStatisticWithClimatology(Statistic):
   """Base class for per-variable statistics with climatology.
 

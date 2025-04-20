@@ -59,13 +59,14 @@ def _is_uniformly_spaced(vector):
 
 
 def _latitude_cell_bounds(x: np.ndarray) -> np.ndarray:
-  assert _is_uniformly_spaced(x), 'Points must be uniformly spaced.'
   assert _is_increasing(x), 'Points must be increasing.'
   diff = np.diff(x)
+
+  # A reasonable guess for the left bound is x[0] - diff[0] / 2.
+  # Of course, if this is -90, then a better guess is -90.
+  # Similar for the upper bound.
   left_bound = x[0] - diff[0] / 2
   right_bound = x[-1] + diff[-1] / 2
-
-  # Bounds can't exceed -90 to 90 range.
   pi_over_2 = np.pi / 2
   left_bound = np.max([left_bound, -pi_over_2])
   right_bound = np.min([right_bound, pi_over_2])
