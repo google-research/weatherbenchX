@@ -13,8 +13,9 @@
 # limitations under the License.
 """Data loaders for tabular data stored in Parquet format."""
 
-from typing import Callable, Hashable, Mapping, Optional, Sequence, Union
+import functools
 import os
+from typing import Callable, Hashable, Mapping, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import pyarrow
@@ -54,9 +55,7 @@ def parquet_filename_for_time(path: str, time: np.datetime64, unit: str) -> str:
   year = time.item().year
   month = time.item().month
   if unit == 'M':
-    fn = (
-        f'year={year}/month={month}/{year}-{str(month).zfill(2)}.parquet'
-    )
+    fn = f'year={year}/month={month}/{year}-{str(month).zfill(2)}.parquet'
   elif unit == 'D':
     day = time.item().day
     fn = f'year={year}/month={month}/day={day}/{year}-{str(month).zfill(2)}-{str(day).zfill(2)}.parquet'
@@ -472,10 +471,17 @@ class METARFromParquet(SparseObservationsFromParquet):
       remove_duplicates: bool = False,
       pick_closest_duplicate_by: Optional[str] = None,
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
-      apply_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+      preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
       interpolation: Optional[interpolations.Interpolation] = None,
   ):
-    def metar_preprocessing_fn(df: pd.DataFrame):
+    def metar_preprocessing_fn(
+        df: pd.DataFrame,
+        preprocessing_fn: Optional[
+            Callable[[pd.DataFrame], pd.DataFrame]
+        ] = None,
+    ):
+      if preprocessing_fn is not None:
+        df = preprocessing_fn(df)
       df = set_bad_quality_to_nan(
           df,
           # Rename to raw variables since this happens before renaming.
@@ -506,6 +512,8 @@ class METARFromParquet(SparseObservationsFromParquet):
         remove_duplicates=remove_duplicates,
         pick_closest_duplicate_by=pick_closest_duplicate_by,
         file_tolerance=file_tolerance,
-        preprocessing_fn=metar_preprocessing_fn,
+        preprocessing_fn=functools.partial(
+            metar_preprocessing_fn, preprocessing_fn=preprocessing_fn
+        ),
         interpolation=interpolation,
     )
