@@ -268,6 +268,10 @@ class SparseObservationsFromParquet(base.DataLoader):
     if self._preprocessing_fn is not None:
       df = self._preprocessing_fn(df)
 
+    # Convert longitudes from [-180, 180] to [0, 360] to match the WB-X
+    # convention.
+    df = convert_longitude_to_0_to_360(df)
+
     if self._remove_duplicates:
       assert (
           lead_time_slice is None
