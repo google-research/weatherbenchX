@@ -14,8 +14,8 @@
 
 from absl.testing import absltest
 import numpy as np
-from weatherbenchX import interpolations
-from weatherbenchX import test_utils
+from weatherbenchAfrica import interpolations
+from weatherbenchAfrica import test_utils
 import xarray as xr
 
 

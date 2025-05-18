@@ -17,7 +17,7 @@ import dataclasses
 from typing import Hashable, Iterable, Mapping, Union
 import numpy as np
 from scipy import ndimage
-from weatherbenchX.metrics import base
+from weatherbenchAfrica.metrics import base
 import xarray as xr
 
 

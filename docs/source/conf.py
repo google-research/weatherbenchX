@@ -9,9 +9,9 @@
 # import subprocess
 # import sys
 
-import weatherbenchX  # verify this works
+import weatherbenchAfrica  # verify this works
 
-from weatherbenchX.data_loaders.xarray_loaders import PredictionsFromXarray
+from weatherbenchAfrica.data_loaders.xarray_loaders import PredictionsFromXarray
 # print("python exec:", sys.executable)
 # print("pip environment:")
 # subprocess.run([sys.executable, "-m", "pip", "list"])

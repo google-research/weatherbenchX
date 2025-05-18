@@ -15,7 +15,7 @@
 
 import abc
 from typing import Hashable, Mapping
-from weatherbenchX import xarray_tree
+from weatherbenchAfrica import xarray_tree
 import xarray as xr
 
 

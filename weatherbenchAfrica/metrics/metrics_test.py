@@ -19,15 +19,15 @@ from typing import Hashable, Mapping
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
-from weatherbenchX import aggregation
-from weatherbenchX import test_utils
-from weatherbenchX import xarray_tree
-from weatherbenchX.metrics import base as metrics_base
-from weatherbenchX.metrics import categorical
-from weatherbenchX.metrics import deterministic
-from weatherbenchX.metrics import probabilistic
-from weatherbenchX.metrics import spatial
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica import aggregation
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica import xarray_tree
+from weatherbenchAfrica.metrics import base as metrics_base
+from weatherbenchAfrica.metrics import categorical
+from weatherbenchAfrica.metrics import deterministic
+from weatherbenchAfrica.metrics import probabilistic
+from weatherbenchAfrica.metrics import spatial
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 

@@ -15,7 +15,7 @@
 
 from typing import Hashable, Mapping, Sequence, Union
 import numpy as np
-from weatherbenchX.metrics import base
+from weatherbenchAfrica.metrics import base
 import xarray as xr
 
 

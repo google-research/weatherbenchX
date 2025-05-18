@@ -15,7 +15,7 @@
 
 from absl.testing import absltest
 import numpy as np
-from weatherbenchX import xarray_tree
+from weatherbenchAfrica import xarray_tree
 import xarray
 
 

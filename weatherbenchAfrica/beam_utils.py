@@ -17,7 +17,7 @@ import math
 from typing import Sequence, Tuple, TypeVar
 
 import apache_beam as beam
-from weatherbenchX import aggregation
+from weatherbenchAfrica import aggregation
 
 
 class SumAggregationStates(beam.transforms.CombineFn):

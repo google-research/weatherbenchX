@@ -18,9 +18,9 @@ from collections.abc import Iterable
 import dataclasses
 from typing import Hashable, Mapping, Optional, Sequence, Union
 import numpy as np
-from weatherbenchX import xarray_tree
-from weatherbenchX.metrics import spatial
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica import xarray_tree
+from weatherbenchAfrica.metrics import spatial
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 

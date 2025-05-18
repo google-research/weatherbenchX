@@ -16,10 +16,10 @@
 import dataclasses
 from typing import Collection, Hashable, Mapping, Optional, Sequence
 
-from weatherbenchX import binning
-from weatherbenchX import weighting
-from weatherbenchX import xarray_tree
-from weatherbenchX.metrics import base as metrics_base
+from weatherbenchAfrica import binning
+from weatherbenchAfrica import weighting
+from weatherbenchAfrica import xarray_tree
+from weatherbenchAfrica.metrics import base as metrics_base
 import xarray as xr
 
 

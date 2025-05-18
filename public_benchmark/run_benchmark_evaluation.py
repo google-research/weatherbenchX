@@ -50,16 +50,16 @@ from absl import app
 from absl import flags
 import apache_beam as beam
 import numpy as np
-from weatherbenchX import aggregation
-from weatherbenchX import beam_pipeline
-from weatherbenchX import binning
-from weatherbenchX import time_chunks
-from weatherbenchX import weighting
-from weatherbenchX.data_loaders import xarray_loaders
-from weatherbenchX.metrics import categorical
-from weatherbenchX.metrics import deterministic
-from weatherbenchX.metrics import probabilistic
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica import aggregation
+from weatherbenchAfrica import beam_pipeline
+from weatherbenchAfrica import binning
+from weatherbenchAfrica import time_chunks
+from weatherbenchAfrica import weighting
+from weatherbenchAfrica.data_loaders import xarray_loaders
+from weatherbenchAfrica.metrics import categorical
+from weatherbenchAfrica.metrics import deterministic
+from weatherbenchAfrica.metrics import probabilistic
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 CONFIG = flags.DEFINE_string('config', None, 'beam.runners.Runner')

@@ -15,9 +15,9 @@
 
 from typing import Hashable, Mapping, Optional, Union
 import numpy as np
-from weatherbenchX import xarray_tree
-from weatherbenchX.data_loaders import base
-from weatherbenchX.data_loaders import xarray_loaders
+from weatherbenchAfrica import xarray_tree
+from weatherbenchAfrica.data_loaders import base
+from weatherbenchAfrica.data_loaders import xarray_loaders
 import xarray as xr
 from absl import logging
 

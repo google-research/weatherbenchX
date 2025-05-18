@@ -15,8 +15,8 @@
 
 from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Union
 import numpy as np
-from weatherbenchX import interpolations
-from weatherbenchX.data_loaders import base
+from weatherbenchAfrica import interpolations
+from weatherbenchAfrica.data_loaders import base
 import xarray as xr
 
 

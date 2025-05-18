@@ -16,14 +16,14 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from apache_beam.testing import test_pipeline
 import numpy as np
-from weatherbenchX import aggregation
-from weatherbenchX import beam_pipeline
-from weatherbenchX import test_utils
-from weatherbenchX import time_chunks
-from weatherbenchX.data_loaders import xarray_loaders
-from weatherbenchX.metrics import base as metrics_base
-from weatherbenchX.metrics import deterministic
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica import aggregation
+from weatherbenchAfrica import beam_pipeline
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica import time_chunks
+from weatherbenchAfrica.data_loaders import xarray_loaders
+from weatherbenchAfrica.metrics import base as metrics_base
+from weatherbenchAfrica.metrics import deterministic
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 

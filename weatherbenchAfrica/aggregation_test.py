@@ -13,13 +13,13 @@
 # limitations under the License.
 
 from absl.testing import absltest
-from weatherbenchX import aggregation
-from weatherbenchX import binning
-from weatherbenchX import test_utils
-from weatherbenchX import weighting
-from weatherbenchX.data_loaders import base as data_loaders_base
-from weatherbenchX.metrics import base as metrics_base
-from weatherbenchX.metrics import deterministic
+from weatherbenchAfrica import aggregation
+from weatherbenchAfrica import binning
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica import weighting
+from weatherbenchAfrica.data_loaders import base as data_loaders_base
+from weatherbenchAfrica.metrics import base as metrics_base
+from weatherbenchAfrica.metrics import deterministic
 import xarray as xr
 
 

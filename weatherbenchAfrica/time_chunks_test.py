@@ -14,7 +14,7 @@
 
 from absl.testing import absltest
 import numpy as np
-from weatherbenchX import time_chunks
+from weatherbenchAfrica import time_chunks
 
 
 class TimeChunksTest(absltest.TestCase):

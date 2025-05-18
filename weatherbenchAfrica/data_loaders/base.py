@@ -16,8 +16,8 @@
 import abc
 from typing import Collection, Hashable, Mapping, Optional, Union
 import numpy as np
-from weatherbenchX import interpolations
-from weatherbenchX import xarray_tree
+from weatherbenchAfrica import interpolations
+from weatherbenchAfrica import xarray_tree
 import xarray as xr
 
 

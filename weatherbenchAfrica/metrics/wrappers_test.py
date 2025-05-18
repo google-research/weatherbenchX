@@ -16,8 +16,8 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
-from weatherbenchX import test_utils
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 

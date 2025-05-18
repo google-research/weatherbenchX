@@ -16,9 +16,9 @@
 from typing import Hashable, Mapping
 import numpy as np
 import scipy.stats
-from weatherbenchX.metrics import base
-from weatherbenchX.metrics import deterministic
-from weatherbenchX.metrics import wrappers
+from weatherbenchAfrica.metrics import base
+from weatherbenchAfrica.metrics import deterministic
+from weatherbenchAfrica.metrics import wrappers
 import xarray as xr
 
 ### Statistics

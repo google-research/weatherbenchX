@@ -13,8 +13,8 @@
 # limitations under the License.
 
 from absl.testing import absltest
-from weatherbenchX import test_utils
-from weatherbenchX import weighting
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica import weighting
 import xarray as xr
 
 

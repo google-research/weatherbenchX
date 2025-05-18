@@ -19,11 +19,11 @@ from typing import Callable, Hashable, Iterable, Mapping, Optional, Tuple, Union
 import apache_beam as beam
 import fsspec
 import numpy as np
-from weatherbenchX import aggregation
-from weatherbenchX import beam_utils
-from weatherbenchX import time_chunks
-from weatherbenchX.data_loaders import base as data_loaders_base
-from weatherbenchX.metrics import base as metrics_base
+from weatherbenchAfrica import aggregation
+from weatherbenchAfrica import beam_utils
+from weatherbenchAfrica import time_chunks
+from weatherbenchAfrica.data_loaders import base as data_loaders_base
+from weatherbenchAfrica.metrics import base as metrics_base
 import xarray as xr
 import xarray_beam as xbeam
 

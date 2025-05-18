@@ -19,8 +19,8 @@ from typing import Callable, Hashable, Mapping, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import pyarrow
-from weatherbenchX import interpolations
-from weatherbenchX.data_loaders import base
+from weatherbenchAfrica import interpolations
+from weatherbenchAfrica.data_loaders import base
 import xarray as xr
 
 

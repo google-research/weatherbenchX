@@ -14,8 +14,8 @@
 
 from absl.testing import absltest
 import numpy as np
-from weatherbenchX import test_utils
-from weatherbenchX.data_loaders import xarray_loaders
+from weatherbenchAfrica import test_utils
+from weatherbenchAfrica.data_loaders import xarray_loaders
 import xarray as xr
 
 
