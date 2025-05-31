@@ -34,7 +34,7 @@ class TruePositives(base.PerVariableStatistic):
 
     return (predictions.astype(bool) * targets.astype(bool)).where(
         ~np.isnan(predictions * targets)
-    )
+    ).astype(np.float32)
 
 
 class TrueNegatives(base.PerVariableStatistic):
@@ -52,7 +52,7 @@ class TrueNegatives(base.PerVariableStatistic):
 
     return (~predictions.astype(bool) * ~targets.astype(bool)).where(
         ~np.isnan(predictions * targets)
-    )
+    ).astype(np.float32)
 
 
 class FalsePositives(base.PerVariableStatistic):
@@ -70,7 +70,7 @@ class FalsePositives(base.PerVariableStatistic):
 
     return (predictions.astype(bool) * ~targets.astype(bool)).where(
         ~np.isnan(predictions * targets)
-    )
+    ).astype(np.float32)
 
 
 class FalseNegatives(base.PerVariableStatistic):
@@ -87,7 +87,7 @@ class FalseNegatives(base.PerVariableStatistic):
   ) -> xr.DataArray:
     return (~predictions.astype(bool) * targets.astype(bool)).where(
         ~np.isnan(predictions * targets)
-    )
+    ).astype(np.float32)
 
 
 class SEEPSStatistic(base.Statistic):
@@ -438,11 +438,11 @@ class SEEPS(base.Metric):
 
     Args:
       variables: List of precipitation variables to compute SEEPS for.
-      climatology: Climatology containing `*_seeps_dry_fraction` and 
-        `*_seeps_threshold` for each of the precipitation variables with 
+      climatology: Climatology containing `*_seeps_dry_fraction` and
+        `*_seeps_threshold` for each of the precipitation variables with
         dimensions `dayofyear` and `hour`, as well as `latitude` and `longitude`
         corresponding to the predictions/targets coordinates, see example below.
-      dry_threshold_mm: Values smaller or equal are considered dry. Unit: mm. 
+      dry_threshold_mm: Values smaller or equal are considered dry. Unit: mm.
         Can be list for each variable. Must be same length. Default: 0.25
       min_p1: Mask out p1 values below this threshold. Can be list for each
         variable. Default: 0.1

@@ -79,8 +79,8 @@ def binarize_thresholds(
   else:
     threshold = xr.DataArray(
         thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
-    )  
-  return (x > threshold).where(~np.isnan(x))
+    )
+  return (x > threshold).where(~np.isnan(x)).astype(np.float32)
 
 
 # Transforms
@@ -174,10 +174,10 @@ class ContinuousToBinary(InputTransform):
 class WeibullEnsembleToProbabilistic(InputTransform):
   """
   Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
-  The forecasts should be binarized before applying this wrapper and 
+  The forecasts should be binarized before applying this wrapper and
   you can wrap the metric with the ContinuousToBinary firstly.
 
-  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology, 
+  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology,
       45, 334–340, https://doi.org/10.1175/JAM2349.1, 2006.
 """
   def __init__(self, which, ensemble_dim='number', skipna=False):
@@ -199,7 +199,7 @@ class WeibullEnsembleToProbabilistic(InputTransform):
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     ensemble_members = da.sizes[self._ensemble_dim]
     return da.sum(self._ensemble_dim, skipna=self._skipna)/(ensemble_members+1)
-  
+
 
 class Inline(InputTransform):
   """Transform data with a provided function.
