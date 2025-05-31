@@ -128,9 +128,14 @@ class DataLoader(abc.ABC):
       # and lead_time coordinate on reference.
       chunk = self._interpolation.interpolate(chunk, reference)
 
+    # A temporary workaround for https://github.com/pydata/xarray/issues/10325.
+    def _compute_and_keep_dtype(x: xr.DataArray) -> xr.DataArray:
+      dtype = x.dtype
+      return x.compute().astype(dtype)
+
     # Compute after interpolation avoids loading unnecessary data.
     if self._compute:
-      chunk = xarray_tree.map_structure(lambda x: x.compute(), chunk)
+      chunk = xarray_tree.map_structure(_compute_and_keep_dtype, chunk)
 
     # TODO: https://github.com/google-research/weatherbenchX/issues/67 - add
     # full functionality for computing derived variables, which would complement
