@@ -40,8 +40,8 @@ def convolve2d_wrap_longitude(
   # Implement 2d uniform convolution as two 1d convolutions which is much
   # faster. Need to convert to float since convolve will return bool for
   # bool inputs. Use wrap by default.
-  kernel = np.ones(neighborhood_size) / neighborhood_size
-  out = ndimage.convolve1d(x.astype(float), kernel, mode='wrap', axis=0)
+  kernel = np.ones(neighborhood_size, dtype=np.float32) / neighborhood_size
+  out = ndimage.convolve1d(x.astype(np.float32), kernel, mode='wrap', axis=0)
   out = ndimage.convolve1d(out, kernel, mode='wrap', axis=1)
 
   # Set non-valid regions, i.e. outermost half_n pixels, to zero.
