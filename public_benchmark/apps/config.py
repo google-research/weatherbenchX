@@ -111,12 +111,15 @@ COLORS = {
     # "GenCast 100m U/V (oper.) vs Analysis": "maroon",
     # "GenCast 100m U/V (oper.) (mean) vs Analysis": "maroon",
     # "GenCast 100m U/V (oper.) (1st member) vs Analysis": "maroon",
+    "Aurora (oper.) vs Analysis": husl[8],
     "Stormer ENS (mean) vs ERA5": husl[2],
     "ArchesWeather-Mx4 vs ERA5": husl[3],
     "ArchesWeatherGen vs ERA5": husl[3],
     "ArchesWeatherGen (mean) vs ERA5": husl[3],
     "Swin vs ERA5": husl[4],
     "Excarta (HEAL-ViT) vs ERA5": husl[5],
+    "Baguan vs ERA5": husl[6],
+    "WeatherMesh4 vs ERA5": husl[7],
 }
 
 SYMBOLS = {
@@ -161,10 +164,13 @@ SYMBOLS = {
     # "GenCast 100m U/V (oper.) vs Analysis": "circle",
     # "GenCast 100m U/V (oper.) (mean) vs Analysis": "circle",
     # "GenCast 100m U/V (oper.) (1st member) vs Analysis": "triangle-down",
+    "Aurora (oper.) vs Analysis": "triangle-down",
     "Stormer ENS (mean) vs ERA5": "circle",
     "ArchesWeather-Mx4 vs ERA5": "circle",
     "ArchesWeatherGen (mean) vs ERA5": "square",
     "ArchesWeatherGen vs ERA5": "circle",
     "Swin vs ERA5": "circle",
     "Excarta (HEAL-ViT) vs ERA5": "circle",
+    "Baguan vs ERA5": "circle",
+    "WeatherMesh4 vs ERA5": "circle",
 }
