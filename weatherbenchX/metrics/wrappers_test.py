@@ -153,7 +153,7 @@ class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
     ctb = wrappers.ContinuousToBinary(
         which='both', threshold_value=0.5, threshold_dim='threshold'
     )
-    
+
     em = wrappers.WeibullEnsembleToProbabilistic(
         which='predictions', ensemble_dim='realization'
     )
@@ -163,7 +163,7 @@ class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
     y = em.transform_fn(binary_y)
     ensemble_members = x.sizes['realization']
     xr.testing.assert_equal(
-      (x > 0.5).sum('realization', skipna=skipna)/(ensemble_members+1), 
+      (x > 0.5).sum('realization', skipna=skipna)/(ensemble_members+1),
       y.sel(threshold=0.5, drop=True))
 
 
@@ -242,6 +242,61 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
       thresh = shift_value.geopotential.sel(quantile=[q])
       expected = x + thresh
       xr.testing.assert_equal(y.sel(quantile=[q]), expected)
+
+
+class ContinuousToBinsTest(parameterized.TestCase):
+
+  def test_iterable_threshold(self):
+    target = test_utils.mock_target_data(random=True)
+    threshold_value = [0.2, 0.7]
+    ctb = wrappers.ContinuousToBins(
+        which='both',
+        threshold_value=threshold_value,
+        threshold_dim='bin_threshold'
+    )
+    x = target.geopotential
+    y = ctb.transform_fn(x)
+
+    # Expected coordinates: thresholds_value entries and np.inf for the last bin
+    # Bins: x <= 0.2; 0.2 < x <= 0.7; x > 0.7
+    # Coords: 0.2      ; 0.7          ; np.inf
+    expected_threshold_coords = [-np.inf, 0.2, 0.7]
+    xr.testing.assert_equal(
+        y.bin_threshold,
+        xr.DataArray(
+            expected_threshold_coords,
+            dims=['bin_threshold'],
+            coords={'bin_threshold': expected_threshold_coords},
+        ),
+    )
+
+    # Bin 0: x <= 0.2 (maps to bin_threshold coord 0.2)
+    expected_bin_0 = x <= 0.2
+    xr.testing.assert_equal(
+        y.sel(bin_threshold=-np.inf, drop=True),
+        expected_bin_0
+    )
+
+    # Bin 1: 0.2 < x <= 0.7 (maps to bin_threshold coord 0.7)
+    expected_bin_1 = (x > 0.2) & (x <= 0.7)
+    xr.testing.assert_equal(
+        y.sel(bin_threshold=0.2, drop=True),
+        expected_bin_1
+    )
+
+    # Bin 2: x > 0.7 (maps to bin_threshold coord np.inf)
+    expected_bin_2 = x > 0.7
+    xr.testing.assert_equal(
+        y.sel(bin_threshold=0.7, drop=True),
+        expected_bin_2
+    )
+
+  def test_non_monotonic_thresholds(self):
+    threshold_value = [0.7, 0.2] # Non-monotonic
+    with self.assertRaises(ValueError):
+      wrappers.ContinuousToBins(
+          which='both', threshold_value=threshold_value, threshold_dim='t'
+      )
 
 
 if __name__ == '__main__':

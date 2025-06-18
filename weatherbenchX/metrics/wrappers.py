@@ -65,15 +65,18 @@ def binarize_thresholds(
   """
   if isinstance(thresholds, xr.Dataset):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     assert x.name in thresholds.data_vars, (
-        f'Input DataArray name ({x.name}) not found in thresholds ({thresholds.data_vars})'
+        f'Input DataArray name ({x.name}) not found in thresholds'
+        f' ({thresholds.data_vars})'
     )
     threshold = thresholds[x.name]
   elif isinstance(thresholds, xr.DataArray):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     threshold = thresholds
   else:
@@ -150,7 +153,8 @@ class ContinuousToBinary(InputTransform):
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      threshold_value: Threshold value, list of values, xarray.DataArray or xarray.Dataset.
+      threshold_value: Threshold value, list of values, xarray.DataArray or
+        xarray.Dataset.
       threshold_dim: Name of dimension to use for threshold values.
     """
     super().__init__(which)
@@ -171,15 +175,94 @@ class ContinuousToBinary(InputTransform):
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
-class WeibullEnsembleToProbabilistic(InputTransform):
-  """
-  Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
-  The forecasts should be binarized before applying this wrapper and
-  you can wrap the metric with the ContinuousToBinary firstly.
+class ContinuousToBins(InputTransform):
+  """Converts a continuous input to a binned one.
 
-  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology,
+  Applies np.digitize to assign values to bins defined by `threshold_value`.
+  The bins are right-inclusive, i.e., `threshold[i-1] < x <= threshold[i]`.
+  A value of -np.inf is appended to the list of provided thresholds such that
+  the first bin contains values `x <= threshold[0]`. The output DataArray has a
+  new coordinate corresponding to `threshold_dim`, with values representing the
+  lower bound of each bin.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      threshold_value: Union[Iterable[float], xr.DataArray],
+      threshold_dim: str,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      threshold_value: Iterable of threshold values or xarray.DataArray. Must be
+        monotonically increasing.
+      threshold_dim: Name of dimension to use for threshold values.
+    """
+    super().__init__(which)
+    # Convert to list if it isn't already.
+    self._threshold_value = (
+        threshold_value
+        if isinstance(threshold_value, (Iterable, xr.DataArray, xr.Dataset))
+        else [threshold_value]
+    )
+    if not np.all(np.diff(self._threshold_value) > 0):
+      raise ValueError('Threshold values must be monotonically increasing.')
+    self._threshold_dim = threshold_dim
+
+  @property
+  def unique_name_suffix(self) -> str:
+    threshold_value_str = ','.join([str(t) for t in self._threshold_value])
+    return f'{self._threshold_dim}_binned_by_{threshold_value_str}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if isinstance(self._threshold_value, xr.DataArray):
+      thresholds_np = self._threshold_value.values
+    else:
+      thresholds_np = np.array(self._threshold_value)
+
+    # `np.digitize(x, bins, right=True)` returns index `i` such that:
+    #   `bins[i-1] < x <= bins[i]`
+    # Indices range from 0 (for x <= bins[0]) to len(bins) (for x > bins[-1]).
+    # `bins` for np.digitize will be `thresholds_np`.
+    digitized_indices = xr.apply_ufunc(
+        np.digitize,
+        da,
+        kwargs={'bins': thresholds_np, 'right': True},
+        dask='parallelized',
+        output_dtypes=[int],
+    )
+
+    # The coordinates for the new dimension will be the thresholds themselves,
+    # plus np.inf for the last bin (x > thresholds_np[-1]).
+    bin_coords = np.concatenate(([-np.inf], thresholds_np))
+
+    boolean_layers = []
+    # Iterate from 0 to len(thresholds_np) (inclusive, as digitized_indices
+    # can take these values).
+    for i in range(len(thresholds_np) + 1):
+      layer = digitized_indices == i
+      boolean_layers.append(layer)
+
+    concatenated = xr.concat(boolean_layers, dim=self._threshold_dim)
+    concatenated = concatenated.assign_coords({self._threshold_dim: bin_coords})
+    concatenated = concatenated.where(~np.isnan(da)).astype(np.float32)
+    return concatenated
+
+
+class WeibullEnsembleToProbabilistic(InputTransform):
+  """Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
+
+  The forecasts should be binarized before applying this wrapper and you can
+  wrap the metric with the ContinuousToBinary firstly.
+
+  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied
+  Meteorology and Climatology,
       45, 334–340, https://doi.org/10.1175/JAM2349.1, 2006.
-"""
+  """
+
   def __init__(self, which, ensemble_dim='number', skipna=False):
     """Init.
 
@@ -187,7 +270,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
       which: Which input to apply the wrapper to. Must be 'predictions'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
     """
-    assert which == 'predictions', 'Only predictions can be converted to probabilities'
+    assert (
+        which == 'predictions'
+    ), 'Only predictions can be converted to probabilities'
     super().__init__(which)
     self._ensemble_dim = ensemble_dim
     self._skipna = skipna
@@ -198,7 +283,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     ensemble_members = da.sizes[self._ensemble_dim]
-    return da.sum(self._ensemble_dim, skipna=self._skipna)/(ensemble_members+1)
+    return da.sum(self._ensemble_dim, skipna=self._skipna) / (
+        ensemble_members + 1
+    )
 
 
 class Inline(InputTransform):
