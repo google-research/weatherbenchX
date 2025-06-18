@@ -32,9 +32,11 @@ class TruePositives(base.PerVariableStatistic):
       targets: xr.DataArray,
   ) -> xr.DataArray:
 
-    return (predictions.astype(bool) * targets.astype(bool)).where(
-        ~np.isnan(predictions * targets)
-    ).astype(np.float32)
+    return (
+        (predictions.astype(bool) * targets.astype(bool))
+        .where(~np.isnan(predictions * targets))
+        .astype(np.float32)
+    )
 
 
 class TrueNegatives(base.PerVariableStatistic):
@@ -50,9 +52,11 @@ class TrueNegatives(base.PerVariableStatistic):
       targets: xr.DataArray,
   ) -> xr.DataArray:
 
-    return (~predictions.astype(bool) * ~targets.astype(bool)).where(
-        ~np.isnan(predictions * targets)
-    ).astype(np.float32)
+    return (
+        (~predictions.astype(bool) * ~targets.astype(bool))
+        .where(~np.isnan(predictions * targets))
+        .astype(np.float32)
+    )
 
 
 class FalsePositives(base.PerVariableStatistic):
@@ -68,9 +72,11 @@ class FalsePositives(base.PerVariableStatistic):
       targets: xr.DataArray,
   ) -> xr.DataArray:
 
-    return (predictions.astype(bool) * ~targets.astype(bool)).where(
-        ~np.isnan(predictions * targets)
-    ).astype(np.float32)
+    return (
+        (predictions.astype(bool) * ~targets.astype(bool))
+        .where(~np.isnan(predictions * targets))
+        .astype(np.float32)
+    )
 
 
 class FalseNegatives(base.PerVariableStatistic):
@@ -85,9 +91,11 @@ class FalseNegatives(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-    return (~predictions.astype(bool) * targets.astype(bool)).where(
-        ~np.isnan(predictions * targets)
-    ).astype(np.float32)
+    return (
+        (~predictions.astype(bool) * targets.astype(bool))
+        .where(~np.isnan(predictions * targets))
+        .astype(np.float32)
+    )
 
 
 class SEEPSStatistic(base.Statistic):
@@ -410,6 +418,31 @@ class FrequencyBias(base.PerVariableMetric):
     return (
         statistic_values['TruePositives'] + statistic_values['FalsePositives']
     ) / (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
+
+
+class Reliability(base.PerVariableMetric):
+  """Reliability / calibration.
+
+  I.e., fraction of predicted positives that is positive according to the
+  ground truth. The input data should be binned into buckets according to
+  predicted probability.
+  """
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[Hashable, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['TruePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalsePositives']
+    )
 
 
 class SEEPS(base.Metric):
