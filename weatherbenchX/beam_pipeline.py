@@ -182,6 +182,12 @@ class WriteMetrics(beam.DoFn):
     """
     logging.info('WriteMetrics inputs: %s', metrics)
     with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
+      # Since xarray==2025.06.1, serializing timedelta64[ns] with dtype=int64
+      # will fail, so we need to manually set the encoding to int32.
+      for coord in metrics.coords:
+        if metrics[coord].dtype == 'timedelta64[ns]':
+          # Make sure to also override all other existing encodings.
+          metrics[coord].encoding = {'dtype': 'int32'}
       f.write(metrics.to_netcdf())
     return None
 
