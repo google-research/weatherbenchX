@@ -14,11 +14,9 @@
 # ==============================================================================
 """WeatherBenchX utilities for working with command line flags."""
 import re
-from typing import Any, Union
+from typing import Any
 
 from absl import flags
-
-DimValueType = Union[int, float, str]
 
 
 def _chunks_string_is_valid(chunks_string: str) -> bool:
