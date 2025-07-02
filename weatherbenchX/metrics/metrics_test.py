@@ -196,6 +196,225 @@ class MetricsTest(parameterized.TestCase):
         np.isnan(compute_precipitation_metric(metrics, 'csi', ds, tmp))
     )
 
+  def test_FalseAlarmRate(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'false_alarm_rate': categorical.FalseAlarmRate()}
+    
+    # 1. Only False Negatives, should be NaN
+    tmp = ds.copy(deep=True) + 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'false_alarm_rate', ds, tmp))
+    )
+
+    # 2. Only False Positives, should be 1
+    self.assertEqual(compute_precipitation_metric(metrics, 'false_alarm_rate', tmp, ds), 1)
+
+    # 3. No False Positives, should be 0
+    self.assertEqual(compute_precipitation_metric(metrics, 'false_alarm_rate', ds, ds), 0)
+
+    # 4. Half False Positives, should be 0.5
+    tmp2 = ds.copy(deep=True)
+    # Time dimension is size 2 in position 1.
+    tmp2['total_precipitation_1hr'][{'time': 0}] = 1
+    self.assertEqual(
+        compute_precipitation_metric(metrics, 'false_alarm_rate', tmp2, ds), 0.5
+    )
+
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'false_alarm_rate', tmp, ds))
+    )
+
+  def test_TrueNegativeRate(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'true_negative_rate': categorical.TrueNegativeRate()}
+
+    # 1. Only True Positives, should be NaN
+    tmp = ds.copy(deep=True) + 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'true_negative_rate', tmp, tmp))
+    )
+
+    # 2. Only True Negatives, should be 1
+    self.assertEqual(compute_precipitation_metric(metrics, 'true_negative_rate', ds, ds), 1)
+
+    # 3. Only False Positives, should be 0
+    self.assertEqual(compute_precipitation_metric(metrics, 'true_negative_rate', tmp, ds), 0)
+
+    # 4. Half True Negatives, should be 0.5
+    tmp2 = ds.copy(deep=True)
+    # Time dimension is size 2 in position 1.
+    tmp2['total_precipitation_1hr'][{'time': 0}] = 1
+    self.assertEqual(
+        compute_precipitation_metric(metrics, 'true_negative_rate', tmp2, ds), 0.5
+    )
+    
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'true_negative_rate', ds, tmp))
+    )
+
+  def test_PeirceSkillScore(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-05T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'peirce_skill_score': categorical.PeirceSkillScore()}
+    # 1. If only True Positives and False Negatives, should be NaN
+    tmp = ds.copy(deep=True) + 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'peirce_skill_score', tmp, tmp))
+    )
+    # If only False Positives and True Negatives, should be NaN
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'peirce_skill_score', tmp, ds))
+    )
+
+    # 2. Only True Positives and True Negatives, should be 1
+    tmp2 = ds.copy(deep=True)
+    # Time dimension is size 4 in position 1.
+    tmp2['total_precipitation_1hr'][{'time': [0, 1]}] = 1    
+    self.assertEqual(compute_precipitation_metric(metrics, 'peirce_skill_score', tmp2, tmp2), 1)
+    
+    # 3. Only False Positives and False Negatives, should be -1
+    tmp = ds.copy(deep=True)
+    # Time dimension is size 4 in position 1.
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'peirce_skill_score', tmp2, tmp), -1)    
+
+    # 4. Only True Positives / (True Positives + False Negatives) =
+    #  False Positives / (False Positives + True Negatives), should be 0
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [1,3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'peirce_skill_score', tmp, tmp2), 0)
+
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'peirce_skill_score', ds, tmp))
+    )
+
+  def test_OddsRatioSkillScore(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-05T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'odds_ratio_skill_score': categorical.OddsRatioSkillScore()}
+
+    # Tests for Odds Ratio Skill Score are similar to those for Peirce Skill Score.
+    # 1. If only True Positives and False Negatives, should be NaN
+    tmp = ds.copy(deep=True) + 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', tmp, tmp))
+    )
+    # If only False Positives and True Negatives, should be NaN
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', tmp, ds))
+    )
+
+    # 2. Only True Positives and True Negatives, should be 1
+    tmp2 = ds.copy(deep=True)
+    # Time dimension is size 4 in position 1.
+    tmp2['total_precipitation_1hr'][{'time': [0, 1]}] = 1
+    self.assertEqual(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', tmp2, tmp2), 1)
+    
+    # 3. Only False Positives and False Negatives, should be -1
+    tmp = ds.copy(deep=True)
+    # Time dimension is size 4 in position 1.
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', tmp2, tmp), -1)    
+
+    # 4. Only True Positives / (True Positives + False Negatives) =
+    #  False Positives / (False Positives + True Negatives), should be 0
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [1,3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', tmp, tmp2), 0)
+
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'odds_ratio_skill_score', ds, tmp))
+    )
+
+  def test_ExtremalDependenceIndex(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-05T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'extremal_dependence_index': categorical.ExtremalDependenceIndex()}
+
+    # 1. If no True Positives, should be NaN
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [1]}] = 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'extremal_dependence_index', tmp, tmp))
+    )
+    # If no False Positives, should be NaN
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [0, 1, 3]}] = 1
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'extremal_dependence_index', tmp, ds))
+    )
+
+    # 2. If no False Negatives, should be 1
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [1, 2, 3]}] = 1   
+    self.assertEqual(compute_precipitation_metric(metrics, 'extremal_dependence_index', tmp2, tmp), 1)
+
+    # 3. If no True Negatives, should be -1
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [0, 1, 3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'extremal_dependence_index', tmp2, tmp), -1)
+
+    # 4. Only True Positives / (True Positives + False Negatives) =
+    #  False Positives / (False Positives + True Negatives), should be 0
+    tmp = ds.copy(deep=True)
+    tmp['total_precipitation_1hr'][{'time': [2,3]}] = 1  
+    tmp2 = ds.copy(deep=True)
+    tmp2['total_precipitation_1hr'][{'time': [1,3]}] = 1  
+    self.assertEqual(compute_precipitation_metric(metrics, 'extremal_dependence_index', tmp, tmp2), 0)
+
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'extremal_dependence_index', ds, tmp))
+    )
+
   def test_fss(self):
     prediction = xr.DataArray(
         [1, 0, 1, 0, 0, 1], dims=['longitude'], name='precipitation'
