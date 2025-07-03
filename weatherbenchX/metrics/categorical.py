@@ -271,7 +271,7 @@ class CSI(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -280,7 +280,7 @@ class CSI(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -297,7 +297,7 @@ class Accuracy(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -307,7 +307,7 @@ class Accuracy(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -327,7 +327,7 @@ class Recall(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalseNegatives': FalseNegatives(),
@@ -335,7 +335,7 @@ class Recall(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -350,7 +350,7 @@ class Precision(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -358,7 +358,7 @@ class Precision(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -374,7 +374,7 @@ class F1Score(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -383,7 +383,7 @@ class F1Score(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -404,7 +404,7 @@ class FrequencyBias(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -413,7 +413,7 @@ class FrequencyBias(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -454,7 +454,7 @@ class Reliability(base.PerVariableMetric):
     self._bin_dim = bin_dim
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     binned_prediction_wrapper = wrappers.ContinuousToBins(
         which='predictions',
         bin_values=self._bin_values,
@@ -471,7 +471,7 @@ class Reliability(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -538,7 +538,7 @@ class SEEPS(base.Metric):
     self._max_p1 = max_p1
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'SEEPSStatistic': SEEPSStatistic(
             self._variables,
