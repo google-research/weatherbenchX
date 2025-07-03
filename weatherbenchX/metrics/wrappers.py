@@ -659,13 +659,11 @@ class WrappedMetric(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)
 
 
 class SubselectVariablesForStatistic(base.Statistic):
@@ -719,10 +717,8 @@ class SubselectVariables(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)
