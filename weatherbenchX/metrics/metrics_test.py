@@ -68,7 +68,7 @@ class SampleMultivariateMetric(metrics_base.Metric):
         ),
     }
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
@@ -87,9 +87,8 @@ def compute_precipitation_metric(metrics, metric_name, prediction, target):
       ),
       stats,
   )
-  return metrics[metric_name].values_from_mean_statistics(stats)[
-      'total_precipitation_1hr'
-  ]
+  return metrics_base.compute_metric_from_statistics(
+      metrics[metric_name], stats)['total_precipitation_1hr']
 
 
 def compute_all_metrics(metrics, predictions, targets, reduce_dims):
@@ -151,12 +150,14 @@ class MetricsTest(parameterized.TestCase):
     # Dict of DataArrays.
     for v in stats['SquaredError']:
       xr.testing.assert_equal(
-          metrics['rmse'].values_from_mean_statistics(stats)[v],
+          metrics_base.compute_metric_from_statistics(
+              metrics['rmse'], stats)[v],
           stats['SquaredError'][v],
       )
     # 5. Test multivariate metric
     self.assertEqual(
-        list(metrics['multivariate_metric'].values_from_mean_statistics(stats)),
+        list(metrics_base.compute_metric_from_statistics(
+            metrics['multivariate_metric'], stats)),
         ['test'],
     )
 
@@ -219,12 +220,10 @@ class MetricsTest(parameterized.TestCase):
     stats = xarray_tree.map_structure(
         lambda x: x.mean(['latitude', 'longitude']), stats
     )
-    fss_no_wrap = metrics['fss_no_wrap'].values_from_mean_statistics(stats)[
-        'precipitation'
-    ]
-    fss_wrap = metrics['fss_wrap'].values_from_mean_statistics(stats)[
-        'precipitation'
-    ]
+    fss_no_wrap = metrics_base.compute_metric_from_statistics(
+        metrics['fss_no_wrap'], stats)['precipitation']
+    fss_wrap = metrics_base.compute_metric_from_statistics(
+        metrics['fss_wrap'], stats)['precipitation']
 
     # For n=1, both should be similar = 4/6 correct pixels
     np.testing.assert_allclose(

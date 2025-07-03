@@ -14,7 +14,7 @@
 """Spatial verification metrics."""
 
 import dataclasses
-from typing import Hashable, Iterable, Mapping, Union
+from typing import Iterable, Mapping, Union
 import numpy as np
 from scipy import ndimage
 from weatherbenchX.metrics import base
@@ -213,7 +213,7 @@ class FSS(base.PerVariableMetric):
   wrap_longitude: bool = False
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     # TODO(srasp): Currently this computes the target and prediction averages
     # twice. Since this is quite a large computation, we would ideally avoid
     # this. However, that would require some refactoring of the statistics
@@ -232,7 +232,7 @@ class FSS(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return 1 - (

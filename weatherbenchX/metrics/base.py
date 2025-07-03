@@ -69,7 +69,16 @@ class Statistic(abc.ABC):
       targets: Xarray Dataset or DataArray.
 
     Returns:
-      statistic: Corresponding statistic
+      statistic: Corresponding statistic, as a mapping of variable name to
+        DataArray.
+        For statistics whose values correspond to specific variables in the
+        predictions and targets, the variable names should be the same as the
+        relevant keys in the predictions and targets, and you should consider
+        subclassing from PerVariableStatistic if your metric can be computed
+        one variable at a time in a generic way.
+        For statistics whose values don't correspond to specific variables in
+        the predictions and targets, you'll need to make up new variable name(s)
+        to use here.
     """
 
 
@@ -103,43 +112,69 @@ class PerVariableStatistic(Statistic):
 class Metric(abc.ABC):
   """Abstract base class for metrics.
 
-  Metrics define one or more statistics to be computed. Their names can be
-  chosen freely inside the metric. Before the computation of the metrics from
-  the aggregated statistics, the unique statistic names will be renamed to the
-  internal names. Metrics computed for each variable independently should
-  be implemented as PerVariableMetric classes.
+  A `Metric` is defined by specifying:
+
+  * One or more `Statistic`s, which are functions of prediction/target pairs.
+    These are specified by implementing the `statistics` property, but are
+    implemented separately to the `Metric` to allow them to be reused across
+    multiple `Metric`s.
+  * A function to compute the metric's final value from (weighted) *means* of
+    the statistics, computed in aggregate over multiple prediction/target pairs.
+    This is specified by implementing `values_from_mean_statistics`.
+
+  As an example, the `RMSE` metric is defined by the specifying the
+  `SquaredError` statistic, which returns squared errors of prediction/target
+  pairs, and a function which takes the square root of the mean of the
+  `SquaredError` statistic.
+
+  The form of weighted mean(s) used to aggregate the statistics is not
+  determined by the Metric and can be chosen independently, for example to
+  achieve different types of disaggregation and weighting. See
+  `aggregation.Aggregator` for details.
+
+  `Metric`s computed for each variable independently should be implemented by
+  subclassing `PerVariableMetric`.
   """
 
   @property
   @abc.abstractmethod
   def statistics(self) -> Mapping[str, Statistic]:
-    """Dictionary of required statistics."""
+    """Statistics whose mean values are required to compute the metric.
 
+    The keys of this Mapping are internal names for the statistics which will
+    be used to pass the mean values of the requested statistics to you in your
+    `values_from_mean_statistics` method. They are not required to be unique
+    outside of a specific Metric instance; externally the .unique_name of the
+    Statistic will be used instead, the internal names can be chosen to be more
+    convenient for the Metric.
+    """
+
+  @abc.abstractmethod
   def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    """Computes metrics from averaged statistics."""
-    # Rename statistics from unique to internal names.
-    statistic_values = {
-        k: statistic_values[v.unique_name] for k, v in self.statistics.items()
-    }
-    return self._values_from_mean_statistics_with_internal_names(
-        statistic_values
-    )
+    """Computes metrics from mean statistics, given by their internal names.
 
-  @abc.abstractmethod
-  def _values_from_mean_statistics_with_internal_names(
-      self,
-      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
-  ) -> Mapping[Hashable, xr.DataArray]:
-    """Computes metric values from statistics after renaming to internal names."""
+    Args:
+      statistic_values: Mapping from your internal statistic names (the keys
+        of your self.statistics) to the mean values of the corresponding
+        statistics. These mean values consist of a mapping from variable
+        name to a DataArray of values.
+
+    Returns:
+      A Mapping from variable name to metric value DataArray. As with
+      statistics, the variable names don't have to correspond to variables in
+      the original predictions and targets, although they should where it makes
+      sense. If your Metric is defined on a per-variable basis, consider
+      subclassing PerVariableMetric.
+    """
 
 
 class PerVariableMetric(Metric):
   """Abstract base class for metrics that are computed per variable."""
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
@@ -159,20 +194,24 @@ class PerVariableMetric(Metric):
   @abc.abstractmethod
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
-    """Compute metric values for a single variable."""
+    """Compute metric values for a single variable.
+
+    Args:
+      statistic_values: Mapping from your internal statistic names (the keys
+        of your self.statistics) to the mean values of the statistics for a
+        single specific variable.
+
+    Returns:
+      The value of the metric for the given variable.
+    """
 
 
 class NoOpMetric(PerVariableMetric):
   """General metric wrapper that simply returns the mean statistics."""
 
   def __init__(self, statistic: Statistic):
-    """Init.
-
-    Args:
-      statistic: Statistic to be wrapped.
-    """
     self._statistic = statistic
 
   @property
@@ -181,7 +220,7 @@ class NoOpMetric(PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['statistic']
@@ -221,13 +260,46 @@ def compute_unique_statistics_for_all_metrics(
   return statistic_values
 
 
+def compute_metric_from_statistics(
+    metric: Metric,
+    statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
+) -> Mapping[Hashable, xr.DataArray]:
+  """Computes values of a metric from mean statistics keyed by .unique_name.
+
+  This handles re-keying the statistics by the internal names used by the
+  `metric`.
+
+  Args:
+    metric: A Metric.
+    statistic_values: Values of statistics keyed by their .unique_name,
+      for example as returned by compute_unique_statistics_for_all_metrics.
+
+  Returns:
+    The resulting values of the `metric`.
+  """
+  # Rename statistics from unique to internal names.
+  statistic_values = {
+      k: statistic_values[v.unique_name] for k, v in metric.statistics.items()
+  }
+  return metric.values_from_mean_statistics(statistic_values)
+
+
 def compute_metrics_from_statistics(
     metrics: Mapping[str, Metric],
     statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
 ) -> Mapping[str, Mapping[Hashable, xr.DataArray]]:
-  """Computes metrics from averaged statistics."""
+  """Computes multiple metrics from mean statistics keyed by .unique_name.
+
+  Args:
+    metrics: A mapping of multiple `Metric`s.
+    statistic_values: Values of statistics keyed by their .unique_name,
+      for example as returned by compute_unique_statistics_for_all_metrics.
+
+  Returns:
+    The resulting values of the `metrics`.
+  """
   return {
-      metric_name: metric.values_from_mean_statistics(statistic_values)
+      metric_name: compute_metric_from_statistics(metric, statistic_values)
       for metric_name, metric in metrics.items()
   }
 
