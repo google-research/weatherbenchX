@@ -197,121 +197,30 @@ class AnomalyCovariance(base.PerVariableStatisticWithClimatology):
 ### Metrics
 
 
-class Bias(base.PerVariableMetric):
-  """Mean error."""
+# The following metrics are just the mean of a Statistic defined above, and
+# so we can just use the Statistic directly as the Metric. We provide
+# convenience aliases here, however:
 
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'Error': Error()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['Error']
-
-
-class MAE(base.PerVariableMetric):
-  """Mean absolute error."""
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'AbsoluteError': AbsoluteError()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['AbsoluteError']
-
-
-class MSE(base.PerVariableMetric):
-  """Mean squared error.
-
-  Note that if applied to probability forecasts, this is the Brier Score.
-  """
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'SquaredError': SquaredError()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['SquaredError']
+Bias = Error  # Bias is the mean Error.
+MAE = AbsoluteError  # MAE is the Mean Absolute Error.
+MSE = SquaredError  # MSE is the Mean Squared Error.
+PredictionAverage = PredictionPassthrough
+TargetAverage = TargetPassthrough
 
 
 class RMSE(base.PerVariableMetric):
   """Root mean squared error."""
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {'SquaredError': SquaredError()}
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(statistic_values['SquaredError'])
-
-
-class PredictionAverage(base.PerVariableMetric):
-  """Average prediction values."""
-
-  def __init__(self, copy_nans_from_targets: bool = False):
-    """Init.
-
-    Args:
-      copy_nans_from_targets: If True, copy any nans from the targets to the
-        predictions.
-    """
-    self._copy_nans_from_targets = copy_nans_from_targets
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {
-        'PredictionPassthrough': PredictionPassthrough(
-            self._copy_nans_from_targets
-        )
-    }
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['PredictionPassthrough']
-
-
-class TargetAverage(base.PerVariableMetric):
-  """Average target values."""
-
-  def __init__(self, copy_nans_from_predictions: bool = False):
-    """Init.
-
-    Args:
-      copy_nans_from_predictions: If True, copy any nans from the predictions to
-        the predictions.
-    """
-    self._copy_nans_from_predictions = copy_nans_from_predictions
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {
-        'TargetPassthrough': TargetPassthrough(self._copy_nans_from_predictions)
-    }
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['TargetPassthrough']
 
 
 class WindVectorRMSE(base.Metric):
@@ -345,14 +254,14 @@ class WindVectorRMSE(base.Metric):
       )
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'WindVectorSquaredError': WindVectorSquaredError(
             self._u_name, self._v_name, self._vector_name
         )
     }
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
@@ -368,7 +277,7 @@ class ACC(base.PerVariableMetric):
     self._climatology = climatology
 
   @property
-  def statistics(self):
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'SquaredPredictionAnomaly': SquaredPredictionAnomaly(
             climatology=self._climatology
@@ -381,7 +290,7 @@ class ACC(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['AnomalyCovariance'] / (
@@ -400,7 +309,7 @@ class PredictionActivity(base.PerVariableMetric):
     self._climatology = climatology
 
   @property
-  def statistics(self):
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'SquaredPredictionAnomaly': SquaredPredictionAnomaly(
             climatology=self._climatology
@@ -409,7 +318,7 @@ class PredictionActivity(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(statistic_values['SquaredPredictionAnomaly'])

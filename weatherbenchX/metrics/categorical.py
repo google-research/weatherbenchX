@@ -99,8 +99,18 @@ class FalseNegatives(base.PerVariableStatistic):
     )
 
 
-class SEEPSStatistic(base.Statistic):
-  """Computes SEEPS statistic. See metric class for details."""
+class SEEPS(base.Statistic):
+  """Computes Stable Equitable Error in Probability Space.
+
+  Definition in Rodwell et al. (2010):
+  https://www.ecmwf.int/en/elibrary/76205-new-equitable-score-suitable-verifying-precipitation-nwp
+
+  Important: In most cases, the statistic will contain NaNs because of the
+  masking of high and low p1 values. For this reason, a `mask` coordinate will
+  be added to the resulting statistic to be used in combination with
+  `masked=True` in the aggregator. If a mask already exists in either the
+  predictions or targets, it will be combined with the p1 mask.
+  """
 
   def __init__(
       self,
@@ -110,6 +120,37 @@ class SEEPSStatistic(base.Statistic):
       min_p1: Union[float, Sequence[float]] = 0.1,
       max_p1: Union[float, Sequence[float]] = 0.85,
   ):
+    # pyformat: disable
+    """Init.
+
+    Args:
+      variables: List of precipitation variables to compute SEEPS for.
+      climatology: Climatology containing `*_seeps_dry_fraction` and
+        `*_seeps_threshold` for each of the precipitation variables with
+        dimensions `dayofyear` and `hour`, as well as `latitude` and `longitude`
+        corresponding to the predictions/targets coordinates, see example below.
+      dry_threshold_mm: Values smaller or equal are considered dry. Unit: mm.
+        Can be list for each variable. Must be same length. Default: 0.25
+      min_p1: Mask out p1 values below this threshold. Can be list for each
+        variable. Default: 0.1
+      max_p1: Mask out p1 values above this threshold. Can be list for each
+        variable. Default: 0.85
+
+    Example:
+        >>> climatology
+        <xarray.Dataset> Size: 24MB
+        Dimensions:                                     (hour: 4, dayofyear: 366,
+                                                        longitude: 64, latitude: 32)
+        Coordinates:
+          * dayofyear                                   (dayofyear) int64 3kB 1 ... 366
+          * hour                                        (hour) int64 32B 0 6 12 18
+          * latitude                                    (latitude) float64 256B -87.1...
+          * longitude                                   (longitude) float64 512B 0.0 ...
+        Data variables:
+            total_precipitation_6hr_seeps_dry_fraction  (hour, dayofyear, longitude, latitude) ...
+            total_precipitation_6hr_seeps_threshold     (hour, dayofyear, longitude, latitude) ...
+    """
+    # pyformat: enable
     self._variables = variables
     self._climatology = climatology
     self._dry_threshold_mm = (
@@ -271,7 +312,7 @@ class CSI(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -280,7 +321,7 @@ class CSI(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -297,7 +338,7 @@ class Accuracy(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -307,7 +348,7 @@ class Accuracy(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -327,7 +368,7 @@ class Recall(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalseNegatives': FalseNegatives(),
@@ -335,7 +376,7 @@ class Recall(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -350,7 +391,7 @@ class Precision(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -358,7 +399,7 @@ class Precision(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
@@ -374,7 +415,7 @@ class F1Score(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -383,7 +424,7 @@ class F1Score(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -404,7 +445,7 @@ class FrequencyBias(base.PerVariableMetric):
   """
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'TruePositives': TruePositives(),
         'FalsePositives': FalsePositives(),
@@ -413,7 +454,7 @@ class FrequencyBias(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -454,7 +495,7 @@ class Reliability(base.PerVariableMetric):
     self._bin_dim = bin_dim
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     binned_prediction_wrapper = wrappers.ContinuousToBins(
         which='predictions',
         bin_values=self._bin_values,
@@ -471,86 +512,9 @@ class Reliability(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TruePositives'] / (
         statistic_values['TruePositives'] + statistic_values['FalsePositives']
     )
-
-
-class SEEPS(base.Metric):
-  """Computes Stable Equitable Error in Probability Space.
-
-  Definition in Rodwell et al. (2010):
-  https://www.ecmwf.int/en/elibrary/76205-new-equitable-score-suitable-verifying-precipitation-nwp
-
-  Important: In most cases, the statistic will contain NaNs because of the
-  masking of high and low p1 values. For this reason, a `mask` coordinate will
-  be added to the resulting statistic to be used in combination with
-  `masked=True` in the aggregator. If a mask already exists in either the
-  predictions or targets, it will be combined with the p1 mask.
-  """
-
-  def __init__(
-      self,
-      variables: Sequence[str],
-      climatology: xr.Dataset,
-      dry_threshold_mm: Union[float, Sequence[float]] = 0.25,
-      min_p1: Union[float, Sequence[float]] = 0.1,
-      max_p1: Union[float, Sequence[float]] = 0.85,
-  ):
-    # pyformat: disable
-    """Init.
-
-    Args:
-      variables: List of precipitation variables to compute SEEPS for.
-      climatology: Climatology containing `*_seeps_dry_fraction` and
-        `*_seeps_threshold` for each of the precipitation variables with
-        dimensions `dayofyear` and `hour`, as well as `latitude` and `longitude`
-        corresponding to the predictions/targets coordinates, see example below.
-      dry_threshold_mm: Values smaller or equal are considered dry. Unit: mm.
-        Can be list for each variable. Must be same length. Default: 0.25
-      min_p1: Mask out p1 values below this threshold. Can be list for each
-        variable. Default: 0.1
-      max_p1: Mask out p1 values above this threshold. Can be list for each
-        variable. Default: 0.85
-
-    Example:
-        >>> climatology
-        <xarray.Dataset> Size: 24MB
-        Dimensions:                                     (hour: 4, dayofyear: 366,
-                                                        longitude: 64, latitude: 32)
-        Coordinates:
-          * dayofyear                                   (dayofyear) int64 3kB 1 ... 366
-          * hour                                        (hour) int64 32B 0 6 12 18
-          * latitude                                    (latitude) float64 256B -87.1...
-          * longitude                                   (longitude) float64 512B 0.0 ...
-        Data variables:
-            total_precipitation_6hr_seeps_dry_fraction  (hour, dayofyear, longitude, latitude) ...
-            total_precipitation_6hr_seeps_threshold     (hour, dayofyear, longitude, latitude) ...
-    """
-    # pyformat: enable
-    self._variables = variables
-    self._climatology = climatology
-    self._dry_threshold_mm = dry_threshold_mm
-    self._min_p1 = min_p1
-    self._max_p1 = max_p1
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {
-        'SEEPSStatistic': SEEPSStatistic(
-            self._variables,
-            self._climatology,
-            self._dry_threshold_mm,
-            self._min_p1,
-            self._max_p1,
-        )
-    }
-
-  def _values_from_mean_statistics_with_internal_names(
-      self,
-      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
-  ) -> Mapping[Hashable, xr.DataArray]:
-    return statistic_values['SEEPSStatistic']
