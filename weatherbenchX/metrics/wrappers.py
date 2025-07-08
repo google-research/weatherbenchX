@@ -114,7 +114,13 @@ class InputTransform(abc.ABC):
 class EnsembleMean(InputTransform):
   """Compute ensemble mean."""
 
-  def __init__(self, which: str, ensemble_dim='number', skipna=False):
+  def __init__(
+      self,
+      which: str,
+      ensemble_dim='number',
+      skipna=False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
     """Init.
 
     Args:
@@ -122,16 +128,21 @@ class EnsembleMean(InputTransform):
         'targets', or 'both'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
       skipna: If True, skip NaNs in the ensemble mean. Default: False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble mean if the
+        ensemble dimension is missing. Default: False.
     """
     super().__init__(which)
     self._ensemble_dim = ensemble_dim
     self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
 
   @property
   def unique_name_suffix(self) -> str:
     return f'ensemble_mean_{self._ensemble_dim=}_{self._skipna=}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
@@ -260,6 +271,30 @@ class ContinuousToBins(InputTransform):
     )
     concatenated = concatenated.where(~np.isnan(da)).astype(np.float32)
     return concatenated
+
+
+class CumulativeSum(InputTransform):
+  """Computes the cumulative sum."""
+
+  def __init__(self, which: str, cumsum_dim: str, skipna=False):
+    """Computes the cumulative sum.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      cumsum_dim: Name of dimension to use for the cumulative sum.
+      skipna: If True, skip NaNs in the cumulative sum. Default: False.
+    """
+    super().__init__(which)
+    self._cumsum_dim = cumsum_dim
+    self._skipna = skipna
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'cumulative_sum_{self._cumsum_dim=}_{self._skipna=}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return da.cumsum(self._cumsum_dim, skipna=self._skipna)
 
 
 class WeibullEnsembleToProbabilistic(InputTransform):

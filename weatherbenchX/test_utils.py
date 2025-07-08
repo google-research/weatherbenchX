@@ -88,3 +88,65 @@ def mock_prediction_data(
   ds = mock_target_data(**kwargs)
   ds = ds.expand_dims(prediction_timedelta=lead_time)
   return ds
+
+
+def compute_rps_xarray(
+    predictions: xr.Dataset,
+    targets: xr.Dataset,
+    bin_values: list[float],
+    fair: bool,
+    ensemble_dim: str = 'sample',
+) -> xr.Dataset:
+  """Computes RPS using xarray operations."""
+
+  # Helper to bin the data entries.
+  digitize = lambda x, bin_values: np.digitize(x, bin_values, right=True)
+
+  y_bin_idx = xr.apply_ufunc(digitize, predictions, bin_values)
+  t_bin_idx = xr.apply_ufunc(digitize, targets, bin_values)
+
+  # Convert data to one-hot representation.
+  bin_idx = np.arange(len(bin_values) + 1)
+  y_one_hot = (y_bin_idx == xr.DataArray(bin_idx, dims=['bins'])).astype(int)
+  t_one_hot = (t_bin_idx == xr.DataArray(bin_idx, dims=['bins'])).astype(int)
+
+  y_cmf = y_one_hot.cumsum(dim='bins')
+  t_cmf = t_one_hot.cumsum(dim='bins')
+
+  y_mean_per_bin = y_cmf.mean(dim=ensemble_dim)
+  rps = ((y_mean_per_bin - t_cmf) ** 2).sum(dim='bins')
+
+  if fair:
+
+    # Variance of predictions per bin
+    y_var_per_bin = y_cmf.var(dim=ensemble_dim, ddof=1)
+
+    # Sum variances across bins and apply correction term
+    summed_prediction_var = y_var_per_bin.sum(dim='bins')
+    rps -= summed_prediction_var / predictions.sizes[ensemble_dim]
+
+  return rps
+
+
+def make_small_datasets_for_hand_calculated_rps_test() -> (
+    tuple[xr.Dataset, xr.Dataset]
+):
+  """Creates a small dataset that makes it easy to hand-calculate metrics."""
+
+  # Create dummy data for variables
+  pred_temp = [0.1, 0.3, 0.3, 0.4, 0.9]
+  num_samples = len(pred_temp)
+
+  # Observed temperature value
+  targ_temp = 0.7
+
+  # Predictions dataset with a single "sample" dimension.
+  ds_pred_temp = xr.Dataset(
+      {'temperature': (('sample',), pred_temp)},
+      coords={'sample': np.arange(num_samples)},
+  )
+
+  # Targets dataset is just a scalar
+  ds_targ_temp = xr.Dataset({'temperature': ((), targ_temp)})
+
+  return ds_pred_temp, ds_targ_temp

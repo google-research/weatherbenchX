@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
-from typing import Mapping
+from typing import Mapping, Sequence
 import numpy as np
 import scipy.stats
 from weatherbenchX.metrics import base
@@ -396,6 +396,100 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
         statistic_values['CRPSSkill']
         - 0.5 * statistic_values['CRPSSpread']
         - 0.5 * statistic_values['CRPSTargetSpread']
+    )
+
+
+class RPS(base.PerVariableMetric):
+  """Unbiased ranked probability score for an ensemble prediction.
+
+  Given a ground truth scalar random variable Y, a prediction random variable X,
+  a sequence of bin boundaries b_0 < b_1 < ... < b_k, where b_0 = -inf and
+  b_K = +inf, the Ranked Probability Score is defined as
+
+    RPS = E[ Σk (CDF(Y)(b_k) - CDF(X)(b_k))^2 ]
+
+  where the sum over k is taken over k = 1, 2, ..., K, and CDF(X) and CDF(Y)
+  are the cumulative distribution functions of X and Y, respectively.
+
+  In practice the CDFs are estimated by binning samples from targets and
+  predictions in the bins defined by the bin boundaries, e.g. given N iid
+  prediction samples X1, ..., XN, we estimate
+
+    CDF(X)(b_k) ≈ count(Xn <= b_k) / N,
+
+  where the count is taken over n = 1, 2, ..., N, and similarly for CDF(Y).
+  Because we are using a finite-size sample to estimate the CDFs, this
+  approximation introduces bias due to the square operation in RPS. We implement
+  a 'fair' estimate of RPS that removes this bias, by using the unbiased mean
+  squared error estimator.
+  """
+
+  def __init__(
+      self,
+      bin_values: Sequence[float],
+      ensemble_dim: str = 'number',
+      skipna_ensemble: bool = False,
+      fair: bool = True,
+  ):
+    """Init.
+
+    Args:
+      bin_values: Sequence of bin boundaries.
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      skipna_ensemble: If True, NaN values will be ignored along the ensemble
+        dimension. Default: False.
+      fair: If True, use the fair estimate of RPS. If False, use the
+        conventional estimate. Default: True.
+    """
+    self._bin_values = bin_values
+    self._ensemble_dim = ensemble_dim
+    self._skipna_ensemble = skipna_ensemble
+    self._fair = fair
+    self._bin_dim = 'ranked_probability_score_temporary_bins'
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    if self._fair:
+      statistic = UnbiasedEnsembleMeanSquaredError(
+          ensemble_dim=self._ensemble_dim,
+          skipna_ensemble=self._skipna_ensemble,
+      )
+    else:
+      statistic = wrappers.WrappedStatistic(
+          deterministic.SquaredError(),
+          wrappers.EnsembleMean(
+              which='both',
+              ensemble_dim=self._ensemble_dim,
+              skipna=self._skipna_ensemble,
+              skip_if_ensemble_dim_missing=True,
+          ),
+      )
+
+    statistic = wrappers.WrappedStatistic(
+        statistic,
+        wrappers.CumulativeSum(
+            cumsum_dim=self._bin_dim,
+            which='both',
+        ),
+    )
+    statistic = wrappers.WrappedStatistic(
+        statistic,
+        wrappers.ContinuousToBins(
+            bin_values=self._bin_values,
+            # This dimension is internal and is then removed
+            bin_dim=self._bin_dim,
+            which='both',
+        ),
+    )
+    return {'PerBinRankedProbabilityScore': statistic}
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['PerBinRankedProbabilityScore'].sum(
+        dim=self._bin_dim
     )
 
 

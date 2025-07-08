@@ -599,6 +599,193 @@ class MetricsTest(parameterized.TestCase):
           check_dim_order=False,
       )
 
+  def test_rps_ensemble_dim_contraction(self):
+    ensemble_size = 4
+    num_bins = 6
+
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        # Ensure targets have different ensemble than forecast... to make
+        # dimension errors noisy.
+        ensemble_size=ensemble_size + 1,
+        seed=0,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=1,
+    )
+
+    bin_values = np.linspace(0., 1., num_bins)
+    metrics = dict(
+        rps=probabilistic.RPS(bin_values=bin_values, ensemble_dim='realization')
+    )
+
+    stats = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics,
+        predictions,
+        targets,
+    )
+    metrics_results = metrics_base.compute_metrics_from_statistics(
+        metrics, stats
+    )
+
+    for key, da in metrics_results['rps'].items():
+      da_dims = set(da.dims)
+      predictions_dims = set(predictions[key].dims)
+      self.assertSetEqual(da_dims, predictions_dims - {'realization'})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f'positive_offset_{positive_offset}_fair_{fair}',
+          positive_offset=positive_offset,
+          fair=fair,
+      )
+      for positive_offset, fair in itertools.product(
+          [True, False], [True, False]
+      )
+  )
+  def test_rps_bin_values_all_large(self, positive_offset: bool, fair: bool):
+
+    num_bins = 5
+    offset_value = 1e6
+    sign = 1 if positive_offset else -1
+    ensemble_size = 4
+
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        # Ensure targets have different ensemble than forecast... to make
+        # dimension errors noisy.
+        ensemble_size=ensemble_size + 1,
+        seed=0,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=1,
+    )
+
+    bin_values = np.linspace(0.2, 0.8, num_bins - 1) + sign * offset_value
+    metrics = dict(
+        rps=probabilistic.RPS(
+            bin_values=bin_values, ensemble_dim='realization', fair=fair
+        )
+    )
+
+    stats = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics,
+        predictions,
+        targets,
+    )
+    metrics = xr.Dataset(
+        metrics_base.compute_metrics_from_statistics(metrics, stats)['rps']
+    )
+    xr.testing.assert_allclose(metrics, xr.zeros_like(metrics))
+
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f'fair_{fair}',
+          fair=fair,
+          expected_rps=expected_rps,
+      )
+      # Expected values for the RPS metric were computed by hand on the
+      # dataset provided by test_utils.
+      for fair, expected_rps in [(True, 1.2), (False, 1.36)]
+  )
+  def test_rps_on_handwritten_small_data(self, expected_rps: float, fair: bool):
+
+    pred, targ = test_utils.make_small_datasets_for_hand_calculated_rps_test()
+    bin_values = np.linspace(0.2, 0.8, 4)
+
+    rps_gt = test_utils.compute_rps_xarray(
+        pred['temperature'],
+        targ['temperature'],
+        bin_values,
+        fair=fair,
+    )
+
+    metrics = {
+        'rps': probabilistic.RPS(
+            bin_values=bin_values, ensemble_dim='sample', fair=fair
+        )
+    }
+
+    stats = metrics_base.compute_unique_statistics_for_all_metrics(metrics, pred, targ)
+    metrics = metrics_base.compute_metrics_from_statistics(metrics, stats)
+    rps = metrics['rps']['temperature'].values
+
+    # Check that the RPS metric got the same answer as the compute_rps helper...
+    np.testing.assert_allclose(rps, rps_gt)
+
+    # ... but the main point is to test this matches the expected RPS, which has
+    # been determined by writing out the cacluation manually.
+    np.testing.assert_allclose(rps, expected_rps)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f'fair_{fair}',
+          fair=fair,
+      )
+      for fair in [True, False]
+  )
+  def test_rps_on_mock_data(self, fair: bool):
+    ensemble_size = 5
+    num_bins = 4
+    check_atol = 1e-6
+
+    targ = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=None,
+        seed=0,
+    )
+
+    pred = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=1,
+    )
+
+    bin_values = np.linspace(0., 1., num_bins)
+    metrics = {
+        'rps': probabilistic.RPS(
+            bin_values=bin_values, ensemble_dim='realization', fair=fair,
+        )
+    }
+    stats = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics, pred, targ
+    )
+    metrics = metrics_base.compute_metrics_from_statistics(metrics, stats)
+    rps = xr.Dataset(metrics['rps'])
+    rps_gt = test_utils.compute_rps_xarray(
+        pred,
+        targ,
+        bin_values,
+        fair=fair,
+        ensemble_dim='realization',
+    )
+    xr.testing.assert_allclose(rps, rps_gt, atol=check_atol)
+
+  def test_rps(self):
+    predictions_ds = xr.Dataset({'var1': ('realization', np.array([0.0, 1.0]))})
+    targets_ds = xr.Dataset({'var1': ('realization', np.array([1.0, 2.0]))})
+    statistic = probabilistic.WassersteinDistance(ensemble_dim='realization')
+    results = xr.Dataset(statistic.compute(predictions_ds, targets_ds))
+    expected = xr.Dataset({'var1': 1.0})
+    xr.testing.assert_allclose(results, expected)
+
   def test_wasserstein_distance_simple(self):
     predictions_ds = xr.Dataset({'var1': ('realization', np.array([0.0, 1.0]))})
     targets_ds = xr.Dataset({'var1': ('realization', np.array([1.0, 2.0]))})
