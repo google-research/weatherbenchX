@@ -178,9 +178,9 @@ class ContinuousToBinary(InputTransform):
 class ContinuousToBins(InputTransform):
   """Converts a continuous input to a binned one.
 
-  Applies np.digitize, with `right=True`, to assign values to bins defined by
-  `bin_values`. The bins are right-inclusive, i.e.,
-  `threshold[i-1] < x <= threshold[i]`. For example, if `bin_values` is
+  Bins data into open-closed intervals of the form (left, right] as defined by
+  `bin_thresholds`. The bins are right-inclusive, i.e.,
+  `threshold[i-1] < x <= threshold[i]`. For example, if `bin_thresholds` is
   [0.5, 1.0, 1.5], then the bins will be (-np.inf, 0.5], (0.5, 1.0], (1.0, 1.5],
   and (1.5, np.inf).
 
@@ -192,7 +192,7 @@ class ContinuousToBins(InputTransform):
   def __init__(
       self,
       which: str,
-      bin_values: Union[Iterable[float], xr.DataArray],
+      bin_thresholds: Union[Iterable[float], xr.DataArray, xr.Dataset],
       bin_dim: str,
   ):
     """Initialize the transform.
@@ -200,66 +200,147 @@ class ContinuousToBins(InputTransform):
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      bin_values: Iterable of threshold values or xarray.DataArray. Must be
-        monotonically increasing.
+      bin_thresholds: Iterable of threshold values, xarray.DataArray or
+        xarray.Dataset. If it a list or DataArray, the same bin thresholds are
+        applied regardless of the input to transform_fn. If it is a Dataset,
+        then transform_fn uses the bins in the data variable of bin_thresholds
+        corresponding to the name of the DataArray that is passed as input to
+        transform_fn, e.g. if the input to trasform_fn has name 'temperature'
+        then transform_fn will look for a DataArray called 'temperature' in the
+        bin_thresholds dataset, and raise an error if it is not found.
       bin_dim: Name of dimension to use for threshold values.
     """
     super().__init__(which)
-    # Convert to list if it isn't already.
-    self._bin_values = (
-        bin_values
-        if isinstance(bin_values, (Iterable, xr.DataArray, xr.Dataset))
-        else [bin_values]
-    )
-    if not np.all(np.diff(self._bin_values) > 0):
-      raise ValueError('Bin values must be monotonically increasing.')
+
+    if isinstance(bin_thresholds, (xr.DataArray, xr.Dataset)):
+      self._bin_thresholds = bin_thresholds
+
+    elif isinstance(bin_thresholds, Iterable):
+      # In this case, we can check that the bin_thresholds are monotonic
+      # increasing up front, since they are small. We can't do this in __init__
+      # in the case where bin_thresholds is a DataArray or Dataset, since the
+      # size of the data may actually be large. For those cases, we check
+      # monotonicity at runtime.
+      if tuple(sorted(bin_thresholds)) != tuple(bin_thresholds):
+        raise ValueError('bin_thresholds must be monotonic increasing')
+      self._bin_thresholds = xr.DataArray(
+          bin_thresholds,
+          dims=[bin_dim],
+          coords={bin_dim: bin_thresholds},
+      )
+
+    else:
+      raise ValueError(
+          'bin_thresholds must be an Iterable, DataArray, or Dataset, but found'
+          f' {type(bin_thresholds)}.'
+      )
+
     self._bin_dim = bin_dim
+
+    # Shift integer-coordinate of the bin values by one. This is because later
+    # we prepend the left (-inf) bin edge to the bin values so the coordinates
+    # need to be shifted by one to account for this.
+    self._bin_thresholds = self._bin_thresholds.assign_coords(
+        {bin_dim: self._bin_thresholds[self._bin_dim].values + 1}
+    )
+
+    self._num_bins = self._bin_thresholds.sizes[bin_dim] + 1
+    self._bin_indices = xr.DataArray(
+        np.arange(self._num_bins), {bin_dim: np.arange(self._num_bins)}
+    )
 
   @property
   def unique_name_suffix(self) -> str:
-    bin_values_str = ','.join([str(t) for t in self._bin_values])
-    return f'{self._bin_dim}_{bin_values_str}'
+    return self._bin_dim
+
+  def _check_bin_edges_non_nan_and_increasing(
+      self, bin_thresholds: xr.DataArray
+  ):
+    """Check that bin edges are non-nan and increasing."""
+    if bin_thresholds.isnull().any():
+      raise ValueError('Found nan bin edges, which is not allowed')
+
+    # Check that, if we have more than one bin threshold, the bin thresholds are
+    # monotonic increasing.
+    if bin_thresholds.size > 1:
+
+      # Slice out left and right edges
+      left_edges = bin_thresholds.isel(
+          {self._bin_dim: slice(None, -1)}
+      ).drop_vars(self._bin_dim)
+
+      right_edges = bin_thresholds.isel(
+          {self._bin_dim: slice(1, None)}
+      ).drop_vars(self._bin_dim)
+
+      if (left_edges >= right_edges).any():
+        raise ValueError('Found non-increasing bin edges, which is not allowed')
+
+  def _get_positive_and_negative_inf_bin_edges(
+      self, bin_thresholds: xr.DataArray
+  ):
+
+    pos_inf_edge = np.inf * xr.ones_like(
+        bin_thresholds.isel({self._bin_dim: 0})
+    )
+    pos_inf_edge = pos_inf_edge.assign_coords({self._bin_dim: self._num_bins})
+
+    neg_inf_edge = -np.inf * xr.ones_like(
+        bin_thresholds.isel({self._bin_dim: 0})
+    )
+    neg_inf_edge = neg_inf_edge.assign_coords({self._bin_dim: 0})
+
+    return pos_inf_edge, neg_inf_edge
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    if isinstance(self._bin_values, xr.DataArray):
-      thresholds_np = self._bin_values.values
+
+    if isinstance(self._bin_thresholds, xr.Dataset):
+      bin_thresholds = self._bin_thresholds[da.name]
     else:
-      thresholds_np = np.array(self._bin_values)
+      bin_thresholds = self._bin_thresholds.rename(da.name)
 
-    # `np.digitize(x, bins, right=True)` returns index `i` such that:
-    #   `bins[i-1] < x <= bins[i]`
-    # Indices range from 0 (for x <= bins[0]) to len(bins) (for x > bins[-1]).
-    # `bins` for np.digitize will be `thresholds_np`.
-    digitized_indices = xr.apply_ufunc(
-        np.digitize,
-        da,
-        kwargs={'bins': thresholds_np, 'right': True},
-        dask='parallelized',
-        output_dtypes=[int],
-    )
-    assert digitized_indices.max() <= len(thresholds_np)
+    if self._bin_dim in da:
+      raise ValueError(
+          f'ContinuousToBins has {self._bin_dim=} from __init__ which should '
+          'which was found as a variable in the input of transform_fn, which '
+          'is not allowed.'
+      )
+    for bin_coord in self._bin_thresholds.dims:
+      if bin_coord != self._bin_dim and bin_coord not in da.coords:
+        raise ValueError(
+            f'{bin_coord} is a coordinate in bin_thresholds, but not in the '
+            f'input of transform_fn, which has {da.coords=}.'
+        )
 
-    boolean_layers = []
-    for i in range(len(thresholds_np) + 1):
-      layer = digitized_indices == i
-      boolean_layers.append(layer)
+    self._check_bin_edges_non_nan_and_increasing(bin_thresholds)
 
-    concatenated = xr.concat(boolean_layers, dim=self._bin_dim)
-    left_edges = np.concatenate(([-np.inf], thresholds_np))
-    right_edges = np.concatenate((thresholds_np, [np.inf]))
-    bin_names = [
-        f'{left:.2f} < p <= {right:.2f}'
-        for left, right in zip(left_edges, right_edges)
-    ]
-    concatenated = concatenated.assign_coords({self._bin_dim: bin_names})
-    concatenated = concatenated.assign_coords(
-        {f'{self._bin_dim}_left': (self._bin_dim, left_edges)}
+    # Get positive and negative inf bin edges.
+    pos_inf_edge, neg_inf_edge = self._get_positive_and_negative_inf_bin_edges(
+        bin_thresholds
     )
-    concatenated = concatenated.assign_coords(
-        {f'{self._bin_dim}_right': (self._bin_dim, right_edges)}
+
+    # Add right inf bin edges to bin values.
+    bins_with_inf_edges: xr.DataArray = xr.concat(
+        [neg_inf_edge, bin_thresholds, pos_inf_edge],
+        dim=self._bin_dim,
     )
-    concatenated = concatenated.where(~np.isnan(da)).astype(np.float32)
-    return concatenated
+
+    is_less_than_left_bin_edge = (da <= bins_with_inf_edges).astype(np.float32)
+    binned = is_less_than_left_bin_edge.diff(dim=self._bin_dim)
+
+    # Add positive and negative inf bin edges to bin_thresholds to get the left
+    # and right edges of each bin
+    left_edges = xr.concat([neg_inf_edge, bin_thresholds], dim=self._bin_dim)
+    left_edges = left_edges.drop_vars(self._bin_dim)
+
+    right_edges = xr.concat([bin_thresholds, pos_inf_edge], dim=self._bin_dim)
+    right_edges = right_edges.drop_vars(self._bin_dim)
+
+    # Add left and right edges of the bins to binned value dataset as new coords
+    binned = binned.assign_coords({f'{self._bin_dim}_left': left_edges})
+    binned = binned.assign_coords({f'{self._bin_dim}_right': right_edges})
+
+    return binned.where(~np.isnan(da))
 
 
 class WeibullEnsembleToProbabilistic(InputTransform):
