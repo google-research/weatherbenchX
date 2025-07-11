@@ -244,7 +244,7 @@ class Aggregator:
         # Can't bin based on dims that aren't present as evaluation unit dims:
         return None
 
-    return xr.dot(stat, *weights, *bin_masks, dims=reduce_dims_set)
+    return xr.dot(stat, *weights, *bin_masks, dim=reduce_dims_set)
 
   def aggregate_statistics(
       self,
