@@ -65,15 +65,18 @@ def binarize_thresholds(
   """
   if isinstance(thresholds, xr.Dataset):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     assert x.name in thresholds.data_vars, (
-        f'Input DataArray name ({x.name}) not found in thresholds ({thresholds.data_vars})'
+        f'Input DataArray name ({x.name}) not found in thresholds'
+        f' ({thresholds.data_vars})'
     )
     threshold = thresholds[x.name]
   elif isinstance(thresholds, xr.DataArray):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     threshold = thresholds
   else:
@@ -150,7 +153,8 @@ class ContinuousToBinary(InputTransform):
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      threshold_value: Threshold value, list of values, xarray.DataArray or xarray.Dataset.
+      threshold_value: Threshold value, list of values, xarray.DataArray or
+        xarray.Dataset.
       threshold_dim: Name of dimension to use for threshold values.
     """
     super().__init__(which)
@@ -171,15 +175,104 @@ class ContinuousToBinary(InputTransform):
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
-class WeibullEnsembleToProbabilistic(InputTransform):
-  """
-  Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
-  The forecasts should be binarized before applying this wrapper and
-  you can wrap the metric with the ContinuousToBinary firstly.
+class ContinuousToBins(InputTransform):
+  """Converts a continuous input to a binned one.
 
-  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology,
+  Applies np.digitize, with `right=True`, to assign values to bins defined by
+  `bin_values`. The bins are right-inclusive, i.e.,
+  `threshold[i-1] < x <= threshold[i]`. For example, if `bin_values` is
+  [0.5, 1.0, 1.5], then the bins will be (-np.inf, 0.5], (0.5, 1.0], (1.0, 1.5],
+  and (1.5, np.inf).
+
+  The output DataArray will have two new coordinates: `{bin_dim}_left` and
+  `{bin_dim}_right`, which will contain the left and rin bin edges,
+  respectively.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_values: Union[Iterable[float], xr.DataArray],
+      bin_dim: str,
+  ):
+    """Initialize the transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_values: Iterable of threshold values or xarray.DataArray. Must be
+        monotonically increasing.
+      bin_dim: Name of dimension to use for threshold values.
+    """
+    super().__init__(which)
+    # Convert to list if it isn't already.
+    self._bin_values = (
+        bin_values
+        if isinstance(bin_values, (Iterable, xr.DataArray, xr.Dataset))
+        else [bin_values]
+    )
+    if not np.all(np.diff(self._bin_values) > 0):
+      raise ValueError('Bin values must be monotonically increasing.')
+    self._bin_dim = bin_dim
+
+  @property
+  def unique_name_suffix(self) -> str:
+    bin_values_str = ','.join([str(t) for t in self._bin_values])
+    return f'{self._bin_dim}_{bin_values_str}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if isinstance(self._bin_values, xr.DataArray):
+      thresholds_np = self._bin_values.values
+    else:
+      thresholds_np = np.array(self._bin_values)
+
+    # `np.digitize(x, bins, right=True)` returns index `i` such that:
+    #   `bins[i-1] < x <= bins[i]`
+    # Indices range from 0 (for x <= bins[0]) to len(bins) (for x > bins[-1]).
+    # `bins` for np.digitize will be `thresholds_np`.
+    digitized_indices = xr.apply_ufunc(
+        np.digitize,
+        da,
+        kwargs={'bins': thresholds_np, 'right': True},
+        dask='parallelized',
+        output_dtypes=[int],
+    )
+    assert digitized_indices.max() <= len(thresholds_np)
+
+    boolean_layers = []
+    for i in range(len(thresholds_np) + 1):
+      layer = digitized_indices == i
+      boolean_layers.append(layer)
+
+    concatenated = xr.concat(boolean_layers, dim=self._bin_dim)
+    left_edges = np.concatenate(([-np.inf], thresholds_np))
+    right_edges = np.concatenate((thresholds_np, [np.inf]))
+    bin_names = [
+        f'{left:.2f} < p <= {right:.2f}'
+        for left, right in zip(left_edges, right_edges)
+    ]
+    concatenated = concatenated.assign_coords({self._bin_dim: bin_names})
+    concatenated = concatenated.assign_coords(
+        {f'{self._bin_dim}_left': (self._bin_dim, left_edges)}
+    )
+    concatenated = concatenated.assign_coords(
+        {f'{self._bin_dim}_right': (self._bin_dim, right_edges)}
+    )
+    concatenated = concatenated.where(~np.isnan(da)).astype(np.float32)
+    return concatenated
+
+
+class WeibullEnsembleToProbabilistic(InputTransform):
+  """Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
+
+  The forecasts should be binarized before applying this wrapper and you can
+  wrap the metric with the ContinuousToBinary firstly.
+
+  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied
+  Meteorology and Climatology,
       45, 334–340, https://doi.org/10.1175/JAM2349.1, 2006.
-"""
+  """
+
   def __init__(self, which, ensemble_dim='number', skipna=False):
     """Init.
 
@@ -187,7 +280,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
       which: Which input to apply the wrapper to. Must be 'predictions'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
     """
-    assert which == 'predictions', 'Only predictions can be converted to probabilities'
+    assert (
+        which == 'predictions'
+    ), 'Only predictions can be converted to probabilities'
     super().__init__(which)
     self._ensemble_dim = ensemble_dim
     self._skipna = skipna
@@ -198,7 +293,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     ensemble_members = da.sizes[self._ensemble_dim]
-    return da.sum(self._ensemble_dim, skipna=self._skipna)/(ensemble_members+1)
+    return da.sum(self._ensemble_dim, skipna=self._skipna) / (
+        ensemble_members + 1
+    )
 
 
 class Inline(InputTransform):
@@ -562,13 +659,11 @@ class WrappedMetric(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)
 
 
 class SubselectVariablesForStatistic(base.Statistic):
@@ -622,10 +717,8 @@ class SubselectVariables(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)

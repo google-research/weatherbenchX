@@ -81,15 +81,16 @@ DETERMINISTIC_MODELS = {
     ),
     "neuralgcm_hres_vs_era5": "NeuralGCM 0.7 vs ERA5",
     "neuralgcm_ens_mean_vs_era5": "NeuralGCM ENS (mean) vs ERA5",
-    "neuralgcm_ens_single_member_vs_era5": (
-        "NeuralGCM ENS (1st member) vs ERA5"
-    ),
+    "neuralgcm_ens_single_member_vs_era5": "NeuralGCM ENS (1st member) vs ERA5",
     "fuxi_vs_era5": "FuXi vs ERA5",
     "stormer_ens_mean_vs_era5": "Stormer ENS (mean) vs ERA5",
     "arches_weather_mx4_vs_era5": "ArchesWeather-Mx4 vs ERA5",
     "arches_weather_gen_mean_vs_era5": "ArchesWeatherGen (mean) vs ERA5",
     "swin_vs_era5": "Swin vs ERA5",
     "excarta_vs_era5": "Excarta (HEAL-ViT) vs ERA5",
+    "aurora_vs_hres_t0": "Aurora (oper.) vs Analysis",
+    "baguan_vs_era5": "Baguan vs ERA5",
+    "weathermesh4_vs_era5": "WeatherMesh4 vs ERA5",
 }
 PROBABILISTIC_MODELS = {
     "ens_vs_hres_t0": "IFS ENS vs Analysis",
@@ -98,7 +99,7 @@ PROBABILISTIC_MODELS = {
     "probabilistic_climatology_vs_era5": "Probabilistic Climatology vs ERA5",
     "gencast_vs_era5": "GenCast vs ERA5",
     "gencast_operational_100m_uv_vs_era5": "GenCast (oper.) vs ERA5",
-    "gencast_operational_100m_uv_vs_hres_t0": ("GenCast (oper.) vs Analysis"),
+    "gencast_operational_100m_uv_vs_hres_t0": "GenCast (oper.) vs Analysis",
     "arches_weather_gen_vs_era5": "ArchesWeatherGen vs ERA5",
 }
 REGION_NAMES = {
@@ -184,7 +185,7 @@ RESOLUTIONS = ["64x32", "240x121", "1440x721"]
 def open_nc(filename: str, **kwargs) -> xr.Dataset:
   """Open NetCDF file from filesystem."""
   with fsspec.open(filename, "rb") as f:
-    ds = xr.open_dataset(f, **kwargs).compute()
+    ds = xr.open_dataset(f, decode_timedelta=True, **kwargs).compute()
   return ds
 
 

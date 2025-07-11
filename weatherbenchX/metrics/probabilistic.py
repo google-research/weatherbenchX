@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
-from typing import Hashable, Mapping
+from typing import Mapping
 import numpy as np
 import scipy.stats
 from weatherbenchX.metrics import base
@@ -204,7 +204,11 @@ class UnbiasedEnsembleMeanSquaredError(base.PerVariableStatistic):
       predictions_var = predictions.var(
           dim=self._ensemble_dim, ddof=1, skipna=self._skipna_ensemble
       )
-      predictions_bias = predictions_var / predictions.sizes[self._ensemble_dim]
+      if self._skipna_ensemble:
+        num_predictions = predictions.count(self._ensemble_dim)
+      else:
+        num_predictions = predictions.sizes[self._ensemble_dim]
+      predictions_bias = predictions_var / num_predictions
     else:
       raise ValueError(
           f'Dimension {self._ensemble_dim} not found in {predictions.dims}'
@@ -217,7 +221,11 @@ class UnbiasedEnsembleMeanSquaredError(base.PerVariableStatistic):
       targets_var = targets.var(
           dim=self._ensemble_dim, ddof=1, skipna=self._skipna_ensemble
       )
-      targets_bias = targets_var / targets.sizes[self._ensemble_dim]
+      if self._skipna_ensemble:
+        num_targets = targets.count(self._ensemble_dim)
+      else:
+        num_targets = targets.sizes[self._ensemble_dim]
+      targets_bias = targets_var / num_targets
     else:
       targets_mean = targets
       targets_bias = 0.0
@@ -284,7 +292,7 @@ class CRPSEnsemble(base.PerVariableMetric):
     self._fair = fair
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'CRPSSkill': CRPSSkill(ensemble_dim=self._ensemble_dim),
         'CRPSSpread': CRPSSpread(
@@ -296,7 +304,7 @@ class CRPSEnsemble(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['CRPSSkill'] - 0.5 * statistic_values['CRPSSpread']
@@ -363,7 +371,7 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
     self._fair = fair
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'CRPSSkill': CRPSSkill(ensemble_dim=self._ensemble_dim),
         'CRPSSpread': CRPSSpread(
@@ -381,7 +389,7 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return (
@@ -443,7 +451,7 @@ class WassersteinDistance(base.PerVariableStatistic):
 
 
 class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
-  """Unbiased estimate of the ensemble mean RMSE."""
+  """Square root of the unbiased estimate of the ensemble mean MSE."""
 
   def __init__(
       self, ensemble_dim: str = 'number', skipna_ensemble: bool = False
@@ -459,7 +467,7 @@ class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
     self._skipna_ensemble = skipna_ensemble
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'UnbiasedEnsembleMeanSquaredError': UnbiasedEnsembleMeanSquaredError(
             ensemble_dim=self._ensemble_dim,
@@ -469,7 +477,7 @@ class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
@@ -496,7 +504,7 @@ class SpreadSkillRatio(base.PerVariableMetric):
     self._skipna_ensemble = skipna_ensemble
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'EnsembleVariance': EnsembleVariance(
             ensemble_dim=self._ensemble_dim,
@@ -514,12 +522,12 @@ class SpreadSkillRatio(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(
-        statistic_values['EnsembleMeanSquaredError']
-        / statistic_values['EnsembleVariance']
+        statistic_values['EnsembleVariance']
+        / statistic_values['EnsembleMeanSquaredError']
     )
 
 
@@ -548,7 +556,7 @@ class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
     self._skipna_ensemble = skipna_ensemble
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'EnsembleVariance': EnsembleVariance(
             ensemble_dim=self._ensemble_dim,
@@ -562,12 +570,12 @@ class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(
-        statistic_values['UnbiasedEnsembleMeanSquaredError']
-        / statistic_values['EnsembleVariance']
+        statistic_values['EnsembleVariance']
+        / statistic_values['UnbiasedEnsembleMeanSquaredError']
     )
 
 
@@ -592,7 +600,7 @@ class EnsembleRootMeanVariance(base.PerVariableMetric):
     self._skipna_ensemble = skipna_ensemble
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'EnsembleVariance': EnsembleVariance(
             ensemble_dim=self._ensemble_dim,
@@ -602,6 +610,6 @@ class EnsembleRootMeanVariance(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      mean_statistic_values: Mapping[Hashable, xr.DataArray],
+      mean_statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     return np.sqrt(mean_statistic_values['EnsembleVariance'])

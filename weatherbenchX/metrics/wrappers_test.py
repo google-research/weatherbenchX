@@ -153,7 +153,7 @@ class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
     ctb = wrappers.ContinuousToBinary(
         which='both', threshold_value=0.5, threshold_dim='threshold'
     )
-    
+
     em = wrappers.WeibullEnsembleToProbabilistic(
         which='predictions', ensemble_dim='realization'
     )
@@ -163,7 +163,7 @@ class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
     y = em.transform_fn(binary_y)
     ensemble_members = x.sizes['realization']
     xr.testing.assert_equal(
-      (x > 0.5).sum('realization', skipna=skipna)/(ensemble_members+1), 
+      (x > 0.5).sum('realization', skipna=skipna)/(ensemble_members+1),
       y.sel(threshold=0.5, drop=True))
 
 
@@ -242,6 +242,57 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
       thresh = shift_value.geopotential.sel(quantile=[q])
       expected = x + thresh
       xr.testing.assert_equal(y.sel(quantile=[q]), expected)
+
+
+class ContinuousToBinsTest(parameterized.TestCase):
+
+  def test_iterable_threshold(self):
+    target = test_utils.mock_target_data(random=True)
+    bin_values = [0.2, 0.7]
+    ctb = wrappers.ContinuousToBins(
+        which='both',
+        bin_values=bin_values,
+        bin_dim='bin_values'
+    )
+    x = target.geopotential
+    y = ctb.transform_fn(x)
+
+    np.testing.assert_array_equal(
+        y.bin_values_left.data,
+        np.array([-np.inf, 0.2, 0.7])
+    )
+    np.testing.assert_array_equal(
+        y.bin_values_right.data,
+        np.array([0.2, 0.7, np.inf])
+    )
+
+    # Bin 0: x <= 0.2 (maps to bin_values coord 0.2)
+    expected_bin_0 = x <= 0.2
+    xr.testing.assert_equal(
+        y.isel(bin_values=0, drop=True),
+        expected_bin_0
+    )
+
+    # Bin 1: 0.2 < x <= 0.7 (maps to bin_values coord 0.7)
+    expected_bin_1 = (x > 0.2) & (x <= 0.7)
+    xr.testing.assert_equal(
+        y.isel(bin_values=1, drop=True),
+        expected_bin_1
+    )
+
+    # Bin 2: x > 0.7 (maps to bin_values coord np.inf)
+    expected_bin_2 = x > 0.7
+    xr.testing.assert_equal(
+        y.isel(bin_values=2, drop=True),
+        expected_bin_2
+    )
+
+  def test_non_monotonic_thresholds(self):
+    bin_values = [0.7, 0.2] # Non-monotonic
+    with self.assertRaises(ValueError):
+      wrappers.ContinuousToBins(
+          which='both', bin_values=bin_values, bin_dim='t'
+      )
 
 
 if __name__ == '__main__':

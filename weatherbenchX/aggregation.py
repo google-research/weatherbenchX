@@ -67,7 +67,7 @@ def _combining_sum(
       if dim not in a.coords:
         raise ValueError(
             'All dimensions must have coordinates to ensure alignment when '
-            f'summing statistics, but dimemsion {dim} lacked coordinates.'
+            f'summing statistics, but dimension "{dim}" lacked coordinates.'
         )
 
   # Fast path when index coordinates are all the same.

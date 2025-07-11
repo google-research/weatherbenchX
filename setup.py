@@ -21,7 +21,7 @@ base_requires = [
     "pandas>=2.2.3",
     "scipy",
     "scikit-learn",
-    "xarray>=2024.11.0",
+    "xarray>=2024.11.0,<2025.6.0",
     "zarr",
     "fsspec",
     "gcsfs",

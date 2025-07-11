@@ -321,17 +321,25 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
   This is used as a probablistic baseline for the WeatherBench website.
   """
 
-  def __init__(self, start_year: int, end_year: int, **kwargs):
+  def __init__(
+      self,
+      start_year: int,
+      end_year: int,
+      ensemble_dim: str = 'number',
+      **kwargs
+  ):
     """Init.
 
     Args:
       start_year: The first year to include in the climatology.
       end_year: The last year (incl.) to include in the climatology.
+      ensemble_dim: The dimension to use for the ensemble. Default: 'number'.
       **kwargs: Other arguments to pass to XarrayDataLoader.
     """
     super().__init__(**kwargs)
     self._start_year = start_year
     self._end_year = end_year
+    self._ensemble_dim = ensemble_dim
 
   def _load_chunk_from_source(
       self,
@@ -358,6 +366,6 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
           + ((doy - 1) * 24 + hod)
           * np.timedelta64(1, 'h').astype('timedelta64[ns]')
       )
-    cat_times = xr.concat(cat_times, dim='number')
+    cat_times = xr.concat(cat_times, dim=self._ensemble_dim)
     chunk = self._ds.sel(valid_time=cat_times)
     return chunk
