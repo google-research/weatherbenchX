@@ -248,50 +248,37 @@ class ContinuousToBinsTest(parameterized.TestCase):
 
   def test_iterable_threshold(self):
     target = test_utils.mock_target_data(random=True)
-    bin_values = [0.2, 0.7]
+    bin_thresholds = [0.2, 0.7]
     ctb = wrappers.ContinuousToBins(
-        which='both',
-        bin_values=bin_values,
-        bin_dim='bin_values'
+        which='both', bin_thresholds=bin_thresholds, bin_dim='bin_thresholds'
     )
     x = target.geopotential
     y = ctb.transform_fn(x)
 
     np.testing.assert_array_equal(
-        y.bin_values_left.data,
-        np.array([-np.inf, 0.2, 0.7])
+        y.bin_thresholds_left.data, np.array([-np.inf, 0.2, 0.7])
     )
     np.testing.assert_array_equal(
-        y.bin_values_right.data,
-        np.array([0.2, 0.7, np.inf])
+        y.bin_thresholds_right.data, np.array([0.2, 0.7, np.inf])
     )
 
-    # Bin 0: x <= 0.2 (maps to bin_values coord 0.2)
+    # Bin 0: x <= 0.2 (maps to bin_thresholds coord 0.2)
     expected_bin_0 = x <= 0.2
-    xr.testing.assert_equal(
-        y.isel(bin_values=0, drop=True),
-        expected_bin_0
-    )
+    xr.testing.assert_equal(y.isel(bin_thresholds=0, drop=True), expected_bin_0)
 
-    # Bin 1: 0.2 < x <= 0.7 (maps to bin_values coord 0.7)
+    # Bin 1: 0.2 < x <= 0.7 (maps to bin_thresholds coord 0.7)
     expected_bin_1 = (x > 0.2) & (x <= 0.7)
-    xr.testing.assert_equal(
-        y.isel(bin_values=1, drop=True),
-        expected_bin_1
-    )
+    xr.testing.assert_equal(y.isel(bin_thresholds=1, drop=True), expected_bin_1)
 
-    # Bin 2: x > 0.7 (maps to bin_values coord np.inf)
+    # Bin 2: x > 0.7 (maps to bin_thresholds coord np.inf)
     expected_bin_2 = x > 0.7
-    xr.testing.assert_equal(
-        y.isel(bin_values=2, drop=True),
-        expected_bin_2
-    )
+    xr.testing.assert_equal(y.isel(bin_thresholds=2, drop=True), expected_bin_2)
 
   def test_non_monotonic_thresholds(self):
-    bin_values = [0.7, 0.2] # Non-monotonic
+    bin_thresholds = [0.7, 0.2]  # Non-monotonic
     with self.assertRaises(ValueError):
       wrappers.ContinuousToBins(
-          which='both', bin_values=bin_values, bin_dim='t'
+          which='both', bin_thresholds=bin_thresholds, bin_dim='t'
       )
 
 
