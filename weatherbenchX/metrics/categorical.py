@@ -478,7 +478,7 @@ class Reliability(base.PerVariableMetric):
 
   def __init__(
       self,
-      bin_values: Sequence[float] = (
+      bin_thresholds: Sequence[float] = (
           0.1,
           0.2,
           0.3,
@@ -491,14 +491,14 @@ class Reliability(base.PerVariableMetric):
       ),
       bin_dim: str = 'reliability_bin',
   ):
-    self._bin_values = bin_values
+    self._bin_thresholds = bin_thresholds
     self._bin_dim = bin_dim
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
     binned_prediction_wrapper = wrappers.ContinuousToBins(
         which='predictions',
-        bin_values=self._bin_values,
+        bin_thresholds=self._bin_thresholds,
         bin_dim=self._bin_dim,
     )
     return {
