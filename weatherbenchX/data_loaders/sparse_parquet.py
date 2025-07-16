@@ -22,6 +22,7 @@ import pyarrow
 from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
+from google3.pyglib import gfile_base
 
 
 def get_parquet_files_subset(
@@ -101,6 +102,7 @@ class SparseObservationsFromParquet(base.DataLoader):
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
       interpolation: Optional[interpolations.Interpolation] = None,
+      return_empty_data: bool = False,
   ):
     """Init.
 
@@ -149,6 +151,8 @@ class SparseObservationsFromParquet(base.DataLoader):
       preprocessing_fn: (Optional) Function to apply to the dataframe after
         reading.
       interpolation: (Optional) Interpolation to be applied to the data.
+      return_empty_data: (Optional) Whether to return empty dataframe if any
+        timestamp's raw data is missing.
     """
 
     super().__init__(
@@ -182,6 +186,7 @@ class SparseObservationsFromParquet(base.DataLoader):
     self._observation_dim = observation_dim
     self._file_tolerance = file_tolerance
     self._preprocessing_fn = preprocessing_fn
+    self._return_empty_data = return_empty_data
 
   def _pick_closest_from_duplicates(
       self, df: pd.DataFrame, valid_time: np.datetime64
@@ -261,9 +266,17 @@ class SparseObservationsFromParquet(base.DataLoader):
       except pyarrow.lib.ArrowTypeError:
         df = pd.read_parquet(fn)
         assert len(df) == 0, 'This should only happen if the file is empty.'  # pylint: disable=g-explicit-length-test
+      except gfile_base.GOSError as exc:
+        if self._return_empty_data:
+          df = pd.DataFrame()
+        else:
+          raise exc
       return df
 
     df = pd.concat([_read_single_file(fn) for fn in files], ignore_index=True)
+
+    if self._return_empty_data and df.empty:
+      return df
 
     if self._preprocessing_fn is not None:
       df = self._preprocessing_fn(df)
