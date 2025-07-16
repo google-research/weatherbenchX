@@ -22,6 +22,8 @@ from weatherbenchX.metrics import wrappers
 import xarray as xr
 
 ### Statistics
+# TODO(srasp): NaN mask seem to get lost in some probabilistic metrics.
+# Investigate and fix this.
 
 
 class CRPSSkill(base.PerVariableStatistic):

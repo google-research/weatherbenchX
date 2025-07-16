@@ -366,6 +366,13 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
           + ((doy - 1) * 24 + hod)
           * np.timedelta64(1, 'h').astype('timedelta64[ns]')
       )
-    cat_times = xr.concat(cat_times, dim=self._ensemble_dim)
+    cat_times = xr.concat(
+        cat_times,
+        dim=xr.DataArray(
+            range(len(cat_times)),
+            dims=[self._ensemble_dim],
+            coords={self._ensemble_dim: range(len(cat_times))},
+        ),
+    )
     chunk = self._ds.sel(valid_time=cat_times)
     return chunk
