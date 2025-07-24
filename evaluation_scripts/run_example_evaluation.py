@@ -123,11 +123,6 @@ OUTPUT_PATH = flags.DEFINE_string(
     None,
     help='File to save evaluation results in netCDF format',
 )
-MAX_CHUNKS_PER_AGGREGATION_STAGE = flags.DEFINE_integer(
-    'max_chunks_per_aggregation_stage',
-    None,
-    help='Max number of chunks per aggregation stage.',
-)
 RUNNER = flags.DEFINE_string('runner', None, 'beam.runners.Runner')
 
 
