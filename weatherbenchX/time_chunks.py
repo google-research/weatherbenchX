@@ -17,13 +17,20 @@ Chunks can be defined in init_time and lead_time dimensions.
 """
 
 from collections.abc import Iterable, Iterator
+import dataclasses
 import itertools
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 import numpy as np
 
 
 # Tuple of (init_times, lead_times).
-TimeChunk = Tuple[np.ndarray, Union[np.ndarray, slice]]
+TimeChunk = tuple[np.ndarray, Union[np.ndarray, slice]]
+
+
+@dataclasses.dataclass(frozen=True)
+class TimeChunkOffsets:
+  init_time: int
+  lead_time: int
 
 
 class TimeChunks(Iterable[TimeChunk]):
@@ -180,8 +187,16 @@ class TimeChunks(Iterable[TimeChunk]):
     lead_chunk = self._lead_time_chunks[index % self._num_lead_chunks]
     return init_chunk, lead_chunk
 
-  def get_init_and_lead_chunk_starts(self, index: int) -> tuple[int, int]:
-    """Returns starting positions along init and lead dimensions for a chunk."""
-    init_index = self._init_time_chunk_size * (index // self._num_lead_chunks)
-    lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)
-    return init_index, lead_index
+  def iter_with_chunk_offsets(self) -> Iterator[
+      tuple[TimeChunkOffsets, TimeChunk]]:
+    """Yields time chunks with keys describing the offsets of the chunk.
+
+    Yields:
+      (offsets, (init_chunk, lead_chunk)) where offsets refers to offsets of
+      the chunk within the full arrays of init_time and lead_time values.
+    """
+    for index, (init_chunk, lead_chunk) in enumerate(self):
+      init_index = self._init_time_chunk_size * (index // self._num_lead_chunks)
+      lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)
+      offsets = TimeChunkOffsets(init_time=init_index, lead_time=lead_index)
+      yield offsets, (init_chunk, lead_chunk)

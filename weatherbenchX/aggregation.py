@@ -14,7 +14,7 @@
 """Definition of aggregation methods and AggregationState."""
 
 import dataclasses
-from typing import Collection, Hashable, Mapping, Optional, Sequence
+from typing import Any, Collection, Hashable, Mapping, Sequence
 
 from weatherbenchX import binning
 from weatherbenchX import weighting
@@ -23,95 +23,21 @@ from weatherbenchX.metrics import base as metrics_base
 import xarray as xr
 
 
-def _combining_sum(
-    data_arrays: Sequence[Optional[xr.DataArray]],
-) -> Optional[xr.DataArray]:
-  """A sum which combines / aligns coordinates in case they don't match.
-
-  It's semantically equivalent to
-
-  sum(xarray.align(data_arrays, join='outer', fill_value=0))
-
-  but when all summands have the same coordinates it's just a plain sum.
-
-  Args:
-    data_arrays: To be summed/combined. All must all have the same set of
-      dimensions and must have coordinates for all dimensions so we can be sure
-      we have aligned them correctly. None values are allowed and will be
-      dropped from the sum (treated as empty/zero).
-
-  Returns:
-    A data_array whose index coordinates along each dimension are the union of
-    the index coordinates of all the arguments along that dimension, or None
-    if there were no non-None arguments.
-  """
-  # Arrays for individual statistics can be None if an AggregationMethod wasn't
-  # able to handle that statistic (e.g. aggregation.Aggregator will return None
-  # for statistics that don't contain the requested preserve_dims).
-  data_arrays = [s for s in data_arrays if s is not None]
-  if not data_arrays:
-    return None
-
-  if len(data_arrays) == 1:
-    return data_arrays[0]
-
-  dims = set(data_arrays[0].dims)
-  for a in data_arrays[1:]:
-    if set(a.dims) != dims:
-      raise ValueError(
-          f'Different dims encountered by _combining_sum: {a.dims} vs {dims}.'
-      )
-
-  for a in data_arrays:
-    for dim in dims:
-      if dim not in a.coords:
-        raise ValueError(
-            'All dimensions must have coordinates to ensure alignment when '
-            f'summing statistics, but dimension "{dim}" lacked coordinates.'
-        )
-
-  # Fast path when index coordinates are all the same.
-  with xr.set_options(arithmetic_join='exact'):
-    try:
-      return sum(data_arrays[1:], start=data_arrays[0])
-    except ValueError:
-      # Coordinates were not exactly aligned.
-      pass
-
-  # Potentially-slow but general path, the other paths above do the same thing
-  # as this but may be faster.
-  # This will extend each array to use the union of all the coordinates, padding
-  # with zeros for any missing coordinates, and only sum after padding each
-  # array. As such it may be quadratic in len(data_arrays) in the worst case.
-  # Some coordinates, namely valid_time, may be datetime64, so zero is not a
-  # valid fill value. We merge these separately.
-  coords = xr.merge([a.coords for a in data_arrays])
-  data_arrays = xr.align(
-      *[a.reset_coords(drop=True) for a in data_arrays],
-      join='outer',
-      fill_value=0,
-      copy=False,
-  )
-  summed: xr.DataArray = sum(data_arrays[1:], start=data_arrays[0])
-  summed.coords.update(coords.variables)
-  return summed
-
-
 @dataclasses.dataclass
 class AggregationState:
-  """An object that contains sum of weighted statistics and sum of weights.
+  """An object that contains a sum of weighted statistics and a sum of weights.
 
-  Allows for aggregation over multiple chunks, e.g. in a Beam pipeline.
+  Allows for aggregation over multiple chunks before computing a final weighted
+  mean.
 
   Attributes:
-    sum_weighted_statistics: Structure containing summed/aggregated statistics.
-    sum_weights: Structure containing the corresponding summed weights.
+    sum_weighted_statistics: Structure containing summed/aggregated statistics,
+      as a DataArray or nested dictionary of DataArrays, or None.
+    sum_weights: Similar structure containing the corresponding summed weights.
   """
 
-  sum_weighted_statistics: Optional[
-      Mapping[str, Mapping[Hashable, xr.DataArray]]
-  ]
-  sum_weights: Optional[Mapping[str, Mapping[Hashable, xr.DataArray]]]
+  sum_weighted_statistics: Any
+  sum_weights: Any
 
   @classmethod
   def zero(cls) -> 'AggregationState':
@@ -140,13 +66,13 @@ class AggregationState:
 
     # Sum over each element in the nested dictionaries
     sum_weighted_statistics, sum_weights = xarray_tree.map_structure(
-        lambda *a: _combining_sum(a),
+        lambda *a: sum(a),
         *sum_weighted_statistics_and_sum_weights_tuples,
     )
 
     return cls(sum_weighted_statistics, sum_weights)
 
-  def mean_statistics(self) -> Mapping[str, Mapping[Hashable, xr.DataArray]]:
+  def mean_statistics(self) -> Any:
     """Returns the statistics normalized by their corresponding weights."""
 
     def normalize(sum_weighted_statistics, sum_weights):
@@ -160,6 +86,11 @@ class AggregationState:
       self, metrics: Mapping[str, metrics_base.Metric]
   ) -> xr.Dataset:
     """Returns metrics computed from the normalized statistics.
+
+    This requires sum_weighted_statistics and sum_weights to be nested mappings
+    of statistic_name -> variable_name -> DataArray, which is a stronger
+    assumption than the rest of this class. (TODO(matthjw): split it off as a
+    helper function instead.)
 
     Args:
       metrics: Dictionary of metric names and instances.
@@ -246,11 +177,58 @@ class Aggregator:
 
     return xr.dot(stat, *weights, *bin_masks, dims=reduce_dims_set)
 
+  def aggregate_stat_var(self, stat: xr.DataArray) -> AggregationState | None:
+    """Aggregate one statistic DataArray for one variable."""
+    if self.masked and hasattr(stat, 'mask'):
+      mask = stat.mask
+      if self.skipna:
+        mask = mask & ~stat.isnull()
+
+      # Set masked values to Zero for stat and weights, which will therefore
+      # be ignored in mean_statistics(). this is equivalent to multiplying by
+      # the mask, but avoids NaN * 0 -> NaN in cases where there are NaNs in
+      # masked positions. Only for variables with a mask attribute.
+      stat = stat.where(mask, 0)
+
+      # We need to broadcast the mask to the same shape as the stat, so that
+      # reductions over it behave the same as reductions over the full stat.
+      mask = mask.broadcast_like(stat)
+    elif self.skipna:
+      mask = ~stat.isnull()
+      stat = stat.where(mask, 0)
+    else:
+      mask = xr.ones_like(stat)
+
+    assert mask.sizes == stat.sizes
+
+    sum_weighted_statistics = self.aggregation_fn(stat)
+    sum_weights = self.aggregation_fn(mask.astype(stat.dtype))
+    if sum_weighted_statistics is None or sum_weights is None:
+      return None
+    else:
+      return AggregationState(sum_weighted_statistics, sum_weights)
+
+  def aggregate_stat_vars(
+      self, stats: Mapping[Hashable, xr.DataArray]) -> AggregationState:
+    """Aggregate per-variable DataArrays of a single statistic."""
+    per_var = {var_name: self.aggregate_stat_var(stat)
+               for var_name, stat in stats.items() if stat is not None}
+    return AggregationState(
+        sum_weighted_statistics={
+            var_name: agg_state.sum_weighted_statistics
+            for var_name, agg_state in per_var.items()
+            if agg_state is not None},
+        sum_weights={
+            var_name: agg_state.sum_weights
+            for var_name, agg_state in per_var.items()
+            if agg_state is not None},
+    )
+
   def aggregate_statistics(
       self,
       statistics: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> AggregationState:
-    """Aggregate all statistics for a batch.
+    """Aggregate multiple statistics, each defined for multiple variables.
 
     Args:
       statistics: Full statistics for a batch.
@@ -261,62 +239,16 @@ class Aggregator:
       and then used to compute weighted mean statistics, and from these the
       final values of the metrics.
     """
-
-    # Different aggregator for each variable
-    def batch_aggregator_for_var_and_stat(stat):
-      if self.skipna:
-        # Set NaNs to zero, so that they will be ignored in the sum.
-        stat = stat.where(~stat.isnull(), 0)
-
-      if self.masked and hasattr(stat, 'mask'):
-        # Set masked values to Zero for stat and weights, which will therefore
-        # be ignored in mean_statistics(). this is equivalent to multiplying by
-        # the mask, but avoids NaN * 0 -> NaN in cases where there are NaNs in
-        # masked positions. Only for variables with a mask attribute.
-        stat = stat.where(stat.mask, 0)
-
-      return self.aggregation_fn(stat)
-
-    def batch_aggregator_weights_for_var_and_stat(stat):
-      # Avoid use of DataArray.where here which is much slower than casting
-      # of booleans and/or element-wise logical operations on booleans.
-      if self.masked and hasattr(stat, 'mask'):
-        mask = stat.mask
-        if self.skipna:
-          mask = mask & ~stat.isnull()
-        mask = mask.astype(stat.dtype)
-        # We need to broadcast the mask to the same shape as the stat, so that
-        # reductions over it behave the same as reductions over the full stat.
-        mask = mask.broadcast_like(stat)
-      elif self.skipna:
-        mask = (~stat.isnull()).astype(stat.dtype)
-      else:
-        mask = xr.ones_like(stat)
-
-      return self.aggregation_fn(mask)
-
-    def filter_nones(x):
-      result = {}
-      for name, values in x.items():
-        if isinstance(values, xr.Dataset):
-          # Dataset has already had None's filtered out by xarray_tree,
-          # but we want to preserve its type:
-          result[name] = values
-        else:
-          result[name] = {k: v for k, v in values.items() if v is not None}
-      return result
-
-    sum_weighted_statistics = filter_nones(
-        xarray_tree.map_structure(batch_aggregator_for_var_and_stat, statistics)
+    per_stat = {stat_name: self.aggregate_stat_vars(stats)
+                for stat_name, stats in statistics.items()}
+    return AggregationState(
+        sum_weighted_statistics={
+            stat_name: agg_state.sum_weighted_statistics
+            for stat_name, agg_state in per_stat.items()},
+        sum_weights={
+            stat_name: agg_state.sum_weights
+            for stat_name, agg_state in per_stat.items()},
     )
-    sum_weights = filter_nones(
-        xarray_tree.map_structure(
-            batch_aggregator_weights_for_var_and_stat, statistics
-        )
-    )
-
-    # Aggregator for every dataset in statistics
-    return AggregationState(sum_weighted_statistics, sum_weights)
 
 
 def compute_metric_values_for_single_chunk(
