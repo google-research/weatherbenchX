@@ -15,7 +15,6 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 from apache_beam.testing import test_pipeline
-import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
 from weatherbenchX import test_utils
@@ -30,6 +29,7 @@ import xarray as xr
 class BeamPipelineTest(parameterized.TestCase):
 
   def setUp(self):
+    super().setUp()
     self.predictions_path = self.create_tempdir('predictions.zarr').full_path
     self.targets_path = self.create_tempdir('targets.zarr').full_path
 
@@ -54,6 +54,7 @@ class BeamPipelineTest(parameterized.TestCase):
   @parameterized.parameters(
       {'reduce_dims': ['init_time', 'latitude', 'longitude']},
       {'reduce_dims': ['init_time']},
+      {'reduce_dims': ['lead_time']},
       {'reduce_dims': ['latitude', 'longitude']},
       {'reduce_dims': []},
   )
@@ -69,6 +70,10 @@ class BeamPipelineTest(parameterized.TestCase):
         init_time_chunk_size=1,
         lead_time_chunk_size=1,
     )
+    # We're testing something non-trivial here because there are multiple chunks
+    # along each of these dimensions that the beam job chunks over.
+    assert len(times.init_times) > 1
+    assert len(times.lead_times) > 1
 
     target_loader = xarray_loaders.TargetsFromXarray(
         path=self.targets_path,

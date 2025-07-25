@@ -14,7 +14,8 @@
 """Base metrics class."""
 
 import abc
-from typing import Hashable, Mapping, final
+from collections.abc import Iterator, Mapping
+from typing import Hashable, final
 from weatherbenchX import xarray_tree
 import xarray as xr
 
@@ -244,6 +245,26 @@ class PerVariableMetric(Metric):
 NoOpMetric = lambda statistic: statistic
 
 
+def generate_unique_statistics_for_all_metrics(
+    metrics: Mapping[str, Metric],
+    predictions: Mapping[Hashable, xr.DataArray],
+    targets: Mapping[Hashable, xr.DataArray],
+) -> Iterator[tuple[str, Mapping[Hashable, xr.DataArray]]]:
+  """Like compute_unique_statistics_for_all_metrics, but yields k/v pairs."""
+  unique_statistics = {}
+  for m in metrics.values():
+    for _, stat in m.statistics.items():
+      unique_statistics[stat.unique_name] = stat
+  for k, stat in unique_statistics.items():
+    try:
+      yield k, stat.compute(predictions, targets)
+    except Exception as e:
+      raise ValueError(
+          'Failed to compute statistic'
+          f' {k}={stat} from:\n{predictions=}\n{targets=}'
+      ) from e
+
+
 def compute_unique_statistics_for_all_metrics(
     metrics: Mapping[str, Metric],
     predictions: Mapping[Hashable, xr.DataArray],
@@ -262,20 +283,8 @@ def compute_unique_statistics_for_all_metrics(
       Dataset; if inputs are dictionaries, returns a nested dictionary of
       statistic_name to variable to statistic DataArrays.
   """
-  unique_statistics = {}
-  for m in metrics.values():
-    for _, stat in m.statistics.items():
-      unique_statistics[stat.unique_name] = stat
-  statistic_values = {}
-  for k, stat in unique_statistics.items():
-    try:
-      statistic_values[k] = stat.compute(predictions, targets)
-    except Exception as e:
-      raise ValueError(
-          'Failed to compute statistic'
-          f' {k}={stat} from:\n{predictions=}\n{targets=}'
-      ) from e
-  return statistic_values
+  return {k: stat for k, stat in generate_unique_statistics_for_all_metrics(
+      metrics, predictions, targets)}
 
 
 def compute_metric_from_statistics(
