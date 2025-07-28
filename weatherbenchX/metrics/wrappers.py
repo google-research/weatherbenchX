@@ -432,13 +432,12 @@ class ContinuousToCDF(InputTransform):
     return f'ContinuousToCDF_{self._threshold_dim}_{unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    cdf = compute_cdf(
+    result = compute_cdf(
         threshold_values=self._threshold_values,
         da=da,
         threshold_dim=self._threshold_dim,
         enforce_monotonicity=self._enforce_monotonicity,
     )
-    result = cdf#.isel({self._threshold_dim: slice(1, -1)})
     return result
 
 
@@ -746,6 +745,7 @@ class WrappedStatistic(base.Statistic):
   """Wraps a statistic with an input transform.
 
   Also adds suffix to unique name.
+  TODO(srasp): Add option for multiple transforms.
   """
 
   def __init__(self, statistic: base.Statistic, transform: InputTransform):

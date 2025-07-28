@@ -236,51 +236,7 @@ class UnbiasedEnsembleMeanSquaredError(base.PerVariableStatistic):
     return biased_mse - predictions_bias - targets_bias
 
 
-def select_bin_thresholds_by_time_from_target_or_prediction(
-    bin_thresholds: xr.DataArray,
-    da: xr.DataArray,
-) -> xr.DataArray:
-  """Selects bin thresholds by time from target or prediction data array.
-
-  This function is used to select bin thresholds using the time coordinates of
-  the target / prediction data array da. It handles two cases:
-  1. The bin thresholds have valid_time dimension. In this case, we select the
-     bin thresholds corresponding to the init_time + lead_time of da.
-  2. The bin thresholds have init_time and lead_time dimensions. In this case,
-     we simply select the bin thresholds corresponding to the init_time and
-     lead_time of da.
-
-  Args:
-    bin_thresholds: Data array containing bin thresholds.
-    da: Data array of targets or predictions to use for selecting bin thresholds
-      according to their time coordinates.
-
-  Returns:
-    Data array containing bin thresholds selected by time.
-  """
-
-  # For now only support cases where init and lead times are present in chunk.
-  if not {'init_time', 'lead_time'}.issubset(da.dims):
-    raise ValueError('Chunk must have init_time and lead_time dimensions.')
-
-  if 'valid_time' in bin_thresholds.dims:
-    bin_thresholds = bin_thresholds.sel(valid_time=da.init_time + da.lead_time)
-
-  elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
-    bin_thresholds = bin_thresholds.sel(
-        init_time=da.init_time, lead_time=da.lead_time
-    )
-
-  # TODO(srasp, stratismarkou): add day of year support.
-  else:
-    raise ValueError(
-        'Thresholds must have valid_time or (init_time, lead_time) dimensions.'
-    )
-
-  return bin_thresholds.compute()
-
-
-class RankedProbabilityScore(base.PerVariableStatistic):
+class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
   """Ranked probability score for an ensemble prediction.
 
   The RPS implemented here is either biased if fair=False, or unbiased if
@@ -309,6 +265,9 @@ class RankedProbabilityScore(base.PerVariableStatistic):
   only applicable (and only applied) for ensembles. So, in the typical case
   where the predictions are ensembles and the targets are not, the fair estimate
   applies debiasing for the predictions, not for the targets.
+
+  For computing the RPS directly from CDFs, see
+  `categorical.RankedProbabilityScore`.
   """
 
   def __init__(
@@ -320,35 +279,23 @@ class RankedProbabilityScore(base.PerVariableStatistic):
       ensemble_dim: str = 'number',
       skipna_ensemble: bool = False,
       fair: bool = True,
-      prediction_bin_preprocess_fn: (
-          Callable[[xr.DataArray, xr.DataArray], xr.DataArray] | None
-      ) = select_bin_thresholds_by_time_from_target_or_prediction,
-      target_bin_preprocess_fn: (
-          Callable[[xr.DataArray, xr.DataArray], xr.DataArray] | None
-      ) = select_bin_thresholds_by_time_from_target_or_prediction,
+      enforce_monotonicity: bool = True,
   ):
     """Init.
 
     Args:
-      prediction_bin_thresholds: Dataset of bin boundaries. These are applied
-        only to the predictions.
-      target_bin_thresholds: Dataset of bin boundaries. These are applied only
-        to the targets.
-      bin_dim: Name of the bin dimension in the bin thresholds.
-      unique_name_suffix: Optional suffix to add to the unique name.
+      prediction_bin_thresholds: Binning thresholds for the predictions.
+      target_bin_thresholds: Binning thresholds for the targets.
+      bin_dim: Name of the binning dimension.
+      unique_name_suffix: Suffix to add to the unique name.
       ensemble_dim: Name of the ensemble dimension. Default: 'number'.
-      skipna_ensemble: If True, NaN values will be ignored along the ensemble
-        dimension. Default: False.
-      fair: If True, use the fair estimate of RPS. If False, use the
-        conventional estimate. Default: True.
-      prediction_bin_preprocess_fn: Function to preprocess the prediction bin
-        thresholds. The select_bin_thresholds_by_time_from_target_or_prediction
-        default value selects the bin thresholds corresponding to the prediction
-        data array by time, see its docstring for more details.
-      target_bin_preprocess_fn: Function to preprocess the target bin
-        thresholds. The select_bin_thresholds_by_time_from_target_or_prediction
-        default value selects the bin thresholds corresponding to the target
-        data array by time, see its docstring for more details.
+      skipna_ensemble: If True, skip NaN values when computing the ensemble
+        mean. Default: False.
+      fair: If True, use the fair estimate of RPS. If False, use the biased
+        estimate. Default: True.
+      enforce_monotonicity: If True (default), enforce monotonicity of the
+        binning thresholds. If bin thresholds contain NaNs, this will raise an
+        error.
     """
     self._prediction_bin_thresholds = prediction_bin_thresholds
     self._target_bin_thresholds = target_bin_thresholds
@@ -356,18 +303,32 @@ class RankedProbabilityScore(base.PerVariableStatistic):
     self._skipna_ensemble = skipna_ensemble
     self._fair = fair
     self._bin_dim = bin_dim
-    self._prediction_bin_preprocess_fn = prediction_bin_preprocess_fn
-    self._target_bin_preprocess_fn = target_bin_preprocess_fn
     self._unique_name_suffix = unique_name_suffix
 
+    binned_prediction_wrapper = wrappers.ContinuousToCDF(
+        which='predictions',
+        threshold_values=self._prediction_bin_thresholds,
+        threshold_dim=bin_dim,
+        unique_name_suffix=self._unique_name_suffix,
+        enforce_monotonicity=enforce_monotonicity,
+    )
+    binned_target_wrapper = wrappers.ContinuousToCDF(
+        which='targets',
+        threshold_values=self._target_bin_thresholds,
+        threshold_dim=bin_dim,
+        unique_name_suffix=self._unique_name_suffix,
+        enforce_monotonicity=enforce_monotonicity,
+    )
+
     if self._fair:
-      self._mse_fn = UnbiasedEnsembleMeanSquaredError(
+      se_stat = UnbiasedEnsembleMeanSquaredError(
           ensemble_dim=self._ensemble_dim,
           skipna_ensemble=self._skipna_ensemble,
       )
 
     else:
-      self._mse_fn = wrappers.WrappedStatistic(
+      # This wrapper will be appled after the binning wrappers below.
+      se_stat = wrappers.WrappedStatistic(
           deterministic.SquaredError(),
           wrappers.EnsembleMean(
               which='both',
@@ -380,6 +341,11 @@ class RankedProbabilityScore(base.PerVariableStatistic):
               skip_if_ensemble_dim_missing=True,
           ),
       )
+    # Wrap the statistic with binning wrappers for predictions and targets.
+    self._se_stat = wrappers.WrappedStatistic(
+        wrappers.WrappedStatistic(se_stat, binned_target_wrapper),
+        binned_prediction_wrapper,
+    )
 
   @property
   def unique_name(self) -> str:
@@ -396,29 +362,11 @@ class RankedProbabilityScore(base.PerVariableStatistic):
       targets: xr.DataArray,
   ) -> xr.DataArray:
 
-    pred_bin_thresholds = self._prediction_bin_thresholds[predictions.name]
-    if self._prediction_bin_preprocess_fn is not None:
-      pred_bin_thresholds = self._prediction_bin_preprocess_fn(
-          pred_bin_thresholds, predictions
-      )
-
-    targ_bin_thresholds = self._target_bin_thresholds[targets.name]
-    if self._target_bin_preprocess_fn is not None:
-      targ_bin_thresholds = self._target_bin_preprocess_fn(
-          targ_bin_thresholds, targets
-      )
-
-    # Note: this way of computing the CDF does not include the rightmost bin
-    # but this is always 1. (since any entry is < inf) and will be the same
-    # between predictions and targets, so they won't contribute to the sum.
-    pred_cdf = predictions <= pred_bin_thresholds
-    targ_cdf = targets <= targ_bin_thresholds
-
-    # Compute the mean squared error, noting that the "mean" is referring to
-    # the ensemble dimension (if applicable), not the bin dimension.
     # TODO(stratismarkou, matthjw): make _compute_per_variable into a public
     # method so we can reuse it in cases like the one below.
-    cdf_mse = self._mse_fn.compute({'cdf': pred_cdf}, {'cdf': targ_cdf})['cdf']
+    cdf_mse = self._se_stat.compute({'tmp': predictions}, {'tmp': targets})[
+        'tmp'
+    ]
 
     # RPS is the sum of squared errors over the bin dimension.
     return cdf_mse.sum(self._bin_dim, skipna=self._skipna_ensemble)
@@ -814,16 +762,15 @@ class RelativeEconomicValue(base.PerVariableMetric):
   decision thresholds for a given ensemble size.
   """
 
-  def __init__(self,
-               ensemble_size: int,
-               cost_loss_ratios: Optional[np.ndarray] = None
-               ):
+  def __init__(
+      self, ensemble_size: int, cost_loss_ratios: Optional[np.ndarray] = None
+  ):
 
     thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
 
     self._thresholds = xr.DataArray(
-        thresholds,
-        dims=['threshold'], coords={'threshold': thresholds})
+        thresholds, dims=['threshold'], coords={'threshold': thresholds}
+    )
 
     if cost_loss_ratios is None:
       cost_loss_ratios = np.geomspace(0.005, 1, 51)[:-1]
@@ -831,7 +778,8 @@ class RelativeEconomicValue(base.PerVariableMetric):
     self._cost_loss_ratio = xr.DataArray(
         cost_loss_ratios,
         dims=['cost_loss_ratio'],
-        coords={'cost_loss_ratio': cost_loss_ratios})
+        coords={'cost_loss_ratio': cost_loss_ratios},
+    )
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -841,23 +789,28 @@ class RelativeEconomicValue(base.PerVariableMetric):
         threshold_dim='threshold',
     )
 
-    return {'TruePositives': wrappers.WrappedStatistic(
-                categorical.TruePositives(), binarize),
-            'TrueNegatives': wrappers.WrappedStatistic(
-                categorical.TrueNegatives(), binarize),
-            'FalsePositives': wrappers.WrappedStatistic(
-                categorical.FalsePositives(), binarize),
-            'FalseNegatives': wrappers.WrappedStatistic(
-                categorical.FalseNegatives(), binarize)
-            }
+    return {
+        'TruePositives': wrappers.WrappedStatistic(
+            categorical.TruePositives(), binarize
+        ),
+        'TrueNegatives': wrappers.WrappedStatistic(
+            categorical.TrueNegatives(), binarize
+        ),
+        'FalsePositives': wrappers.WrappedStatistic(
+            categorical.FalsePositives(), binarize
+        ),
+        'FalseNegatives': wrappers.WrappedStatistic(
+            categorical.FalseNegatives(), binarize
+        ),
+    }
 
   def _add_constant_threshold_results(
       self, tp: xr.DataArray, fp: xr.DataArray, fn: xr.DataArray
-      ) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
-    base_rate = (
-        tp.isel(threshold=0, drop=True) + fn.isel(threshold=0, drop=True)
+  ) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+    base_rate = tp.isel(threshold=0, drop=True) + fn.isel(
+        threshold=0, drop=True
     )
-    zero = xr.full_like(base_rate, 0.)
+    zero = xr.full_like(base_rate, 0.0)
 
     def at(x, threshold):
       return x.expand_dims(threshold=[threshold])
@@ -865,12 +818,11 @@ class RelativeEconomicValue(base.PerVariableMetric):
     # At probability threshold 0: always positive. fn = 0, tp = base_rate,
     # fp = 1-base_rate. At probability threshold 1: predict positive if p > 1,
     # so always negative. fn = base_rate, tp = 0, fp = 0.
-    tp = xr.concat(
-        [at(base_rate, 0.), tp, at(zero, 1.)], dim='threshold')
+    tp = xr.concat([at(base_rate, 0.0), tp, at(zero, 1.0)], dim='threshold')
     fp = xr.concat(
-        [at(1. - base_rate, 0.), fp, at(zero, 1.)], dim='threshold')
-    fn = xr.concat(
-        [at(zero, 0.), fn, at(base_rate, 1.)], dim='threshold')
+        [at(1.0 - base_rate, 0.0), fp, at(zero, 1.0)], dim='threshold'
+    )
+    fn = xr.concat([at(zero, 0.0), fn, at(base_rate, 1.0)], dim='threshold')
     return tp, fp, fn
 
   def _values_from_mean_statistics_per_variable(
