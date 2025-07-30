@@ -17,7 +17,7 @@ from collections.abc import Hashable
 import dataclasses
 import logging
 import typing
-from typing import Callable, Iterable, Iterator, Literal, Mapping, Optional, Union
+from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
 
 import apache_beam as beam
 import fsspec
@@ -78,13 +78,13 @@ class LoadPredictionsAndTargets(beam.DoFn):
     Returns:
       (time_chunk_offsets, (predictions_chunk, targets_chunk))
     """
-    logging.info('LoadPredictionsAndTargets inputs: %s', all_inputs)
+    logging.debug('LoadPredictionsAndTargets inputs: %s', all_inputs)
     time_chunk_offsets, (init_times, lead_times) = all_inputs
     targets_chunk = self.targets_loader.load_chunk(init_times, lead_times)
     predictions_chunk = self.predictions_loader.load_chunk(
         init_times, lead_times, targets_chunk
     )
-    logging.info(
+    logging.debug(
         'LoadPredictionsAndTargets outputs: %s',
         (time_chunk_offsets, (predictions_chunk, targets_chunk)),
     )
@@ -145,8 +145,8 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
       Multiple key/value pairs (aggregation_key, data_array), where the
       aggregation_key identifying the scope for further aggregation.
     """
-    logging.info('ComputeStatisticsAggregateAndPrepareForCombine inputs: %s',
-                 all_inputs)
+    logging.debug('ComputeStatisticsAggregateAndPrepareForCombine inputs: %s',
+                  all_inputs)
     time_chunk_offsets, (predictions_chunk, targets_chunk) = all_inputs
     for stat_name, stats in (
         metrics_base.generate_unique_statistics_for_all_metrics(
@@ -269,50 +269,41 @@ class ComputeMetrics(beam.DoFn):
   """Computes the metrics from the aggregated statistics."""
 
   def __init__(self, metrics: Mapping[str, metrics_base.Metric]):
-    """Init.
-
-    Args:
-      metrics: A dictionary of metrics to compute. Same as passed to the
-        ComputeStatisticsAndAggregateChunks.
-    """
     self.metrics = metrics
 
   def process(
       self, aggregation_state: aggregation.AggregationState
   ) -> Iterable[xr.Dataset]:
-    """Returns results Dataset from AggregationState.
-
-    Args:
-      aggregation_state: The AggregationState to compute the metrics from.
-
-    Returns:
-      A Dataset with the metrics (in a list for Beam).
-    """
-    logging.info('ComputeMetrics inputs: %s', aggregation_state)
+    """Computes a metrics Dataset from the final AggregationState."""
+    logging.debug('ComputeMetrics inputs: %s', aggregation_state)
     return [aggregation_state.metric_values(self.metrics)]
 
 
 class WriteMetrics(beam.DoFn):
-  """Writes the metrics to a file."""
+  """Writes the metrics to a NetCDF file."""
 
   def __init__(self, out_path: str):
-    """Init.
-
-    Args:
-      out_path: The full path to write the metrics to.
-    """
     self.out_path = out_path
 
   def process(self, metrics: xr.Dataset) -> None:
-    """Writes the metrics to a NetCDF file.
-
-    Args:
-      metrics: Metrics dataset to write to disc.
-    """
-    logging.info('WriteMetrics inputs: %s', metrics)
+    logging.debug('WriteMetrics inputs: %s', metrics)
     with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
       f.write(metrics.to_netcdf())
     return None
+
+
+class WriteAggregationState(beam.DoFn):
+  """Writes the final AggregationState to a NetCDF file."""
+
+  def __init__(self, out_path: str):
+    self.out_path = out_path
+
+  def process(
+      self, aggregation_state: aggregation.AggregationState) -> Iterable[Never]:
+
+    with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
+      f.write(aggregation_state.to_dataset().to_netcdf())
+    return []
 
 
 def define_pipeline(
@@ -322,7 +313,8 @@ def define_pipeline(
     targets_loader: data_loaders_base.DataLoader,
     metrics: Mapping[str, metrics_base.Metric],
     aggregator: aggregation.Aggregator,
-    out_path: str,
+    out_path: str | None = None,
+    aggregation_state_out_path: str | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
@@ -335,11 +327,15 @@ def define_pipeline(
     metrics: A dictionary of metrics to compute.
     aggregator: Aggregation instance.
     out_path: The full path to write the metrics to.
+    aggregation_state_out_path: The full path to write the final aggregation
+      state to. This can be useful if you want to compute further metrics from
+      it later, and if you are preserving init_time, it can be useful to
+      compute confidence intervals from later too.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
   """
 
-  _ = (
+  agg_state_pipeline = (
       root
       | 'CreateTimeChunks' >> beam.Create(times.iter_with_chunk_offsets())
       | beam.ParDo(
@@ -369,9 +365,26 @@ def define_pipeline(
       # statistics and variables and reconstitute the full AggregationState
       # from them, which we can use to compute the final values of metrics.
       | ReconstructAggregationState()
-      | 'ComputeMetrics' >> beam.ParDo(ComputeMetrics(metrics))
-      | 'WriteMetrics' >> beam.ParDo(WriteMetrics(out_path))
   )
+
+  if out_path is None and aggregation_state_out_path is None:
+    raise ValueError(
+        'At least one of (metrics) out_path or aggregation_state_out_path must '
+        'be specified.'
+    )
+
+  if out_path is not None:
+    _ = (
+        agg_state_pipeline
+        | beam.ParDo(ComputeMetrics(metrics))
+        | beam.ParDo(WriteMetrics(out_path))
+    )
+
+  if aggregation_state_out_path is not None:
+    _ = (
+        agg_state_pipeline
+        | beam.ParDo(WriteAggregationState(aggregation_state_out_path))
+    )
 
 
 class ComputeAndFormatStatistics(beam.DoFn):

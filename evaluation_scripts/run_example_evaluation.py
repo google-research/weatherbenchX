@@ -123,6 +123,11 @@ OUTPUT_PATH = flags.DEFINE_string(
     None,
     help='File to save evaluation results in netCDF format',
 )
+AGGREGATION_STATE_OUTPUT_PATH = flags.DEFINE_string(
+    'aggregation_state_output_path',
+    None,
+    help='File to save the final aggregation state in netCDF format',
+)
 RUNNER = flags.DEFINE_string('runner', None, 'beam.runners.Runner')
 
 
@@ -188,6 +193,7 @@ def main(argv: Sequence[str]) -> None:
         all_metrics,
         aggregation_method,
         out_path=OUTPUT_PATH.value,
+        aggregation_state_out_path=AGGREGATION_STATE_OUTPUT_PATH.value,
     )
 
 

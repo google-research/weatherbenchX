@@ -19,6 +19,7 @@ from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
 from weatherbenchX import test_utils
 from weatherbenchX import time_chunks
+from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import xarray_loaders
 from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.metrics import deterministic
@@ -86,19 +87,23 @@ class BeamPipelineTest(parameterized.TestCase):
 
     aggregation_method = aggregation.Aggregator(reduce_dims=reduce_dims)
 
-    # Compute results directly
+    # Compute results directly, reading all the `times` as a single chunk:
     statistics = metrics_base.compute_unique_statistics_for_all_metrics(
         all_metrics,
         prediction_loader.load_chunk(init_times, lead_times),
         target_loader.load_chunk(init_times, lead_times),
     )
 
-    aggregation_state = aggregation_method.aggregate_statistics(statistics)
+    direct_aggregation_state = aggregation_method.aggregate_statistics(
+        statistics)
 
-    direct_results = aggregation_state.metric_values(all_metrics).compute()
+    direct_metrics = direct_aggregation_state.metric_values(
+        all_metrics).compute()
 
     # Compute results with pipeline
-    results_path = self.create_tempfile('results.nc').full_path
+    metrics_path = self.create_tempfile('metrics.nc').full_path
+    aggregation_state_path = self.create_tempfile(
+        'aggregation_state.nc').full_path
     with test_pipeline.TestPipeline() as root:
       beam_pipeline.define_pipeline(
           root,
@@ -107,12 +112,23 @@ class BeamPipelineTest(parameterized.TestCase):
           target_loader,
           all_metrics,
           aggregation_method,
-          out_path=results_path,
+          out_path=metrics_path,
+          aggregation_state_out_path=aggregation_state_path,
       )
-    pipeline_results = xr.open_dataset(results_path).compute()
+    metrics_results = xr.open_dataset(metrics_path).compute()
 
     # There can be small differences due to numerical errors.
-    xr.testing.assert_allclose(direct_results, pipeline_results, atol=1e-5)
+    xr.testing.assert_allclose(direct_metrics, metrics_results, atol=1e-5)
+
+    aggregation_state_results = aggregation.AggregationState.from_dataset(
+        xr.open_dataset(aggregation_state_path).compute())
+    xarray_tree.map_structure(
+        lambda x, y: xr.testing.assert_allclose(x, y, atol=1e-5),
+        (direct_aggregation_state.sum_weighted_statistics,
+         direct_aggregation_state.sum_weights),
+        (aggregation_state_results.sum_weighted_statistics,
+         aggregation_state_results.sum_weights),
+    )
 
   def test_unaggregated_pipeline(self):
     """Test equivalence of unaggregated pipeline results."""
