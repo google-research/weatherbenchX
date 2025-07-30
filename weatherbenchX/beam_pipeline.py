@@ -311,7 +311,7 @@ class WriteMetrics(beam.DoFn):
     """
     logging.info('WriteMetrics inputs: %s', metrics)
     with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
-      f.write(metrics.to_netcdf())
+      metrics.to_netcdf(f, engine="netcdf4")
     return None
 
 
