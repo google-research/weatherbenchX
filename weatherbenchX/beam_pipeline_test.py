@@ -142,7 +142,7 @@ class BeamPipelineTest(parameterized.TestCase):
             deterministic.Bias(),
             [
                 wrappers.Select(
-                    which='both',
+                    which='predictions',
                     sel={'lead_time': slice('5D', '10D')},
                 ),
                 wrappers.EnsembleMean(
