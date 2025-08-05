@@ -88,6 +88,7 @@ class ConstantLatencyWrapper(base.DataLoader):
         interpolation=data_loader._interpolation,
         compute=data_loader._compute,
         add_nan_mask=data_loader._add_nan_mask,
+        process_chunk_fn=data_loader._process_chunk_fn,
     )
 
   def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
