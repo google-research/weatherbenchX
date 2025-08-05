@@ -98,7 +98,7 @@ class _AggregationKey:
   """Key under which statistics are aggregated (summed or combine_by_coords)."""
   type: Literal['sum_weighted_statistics', 'sum_weights']
   statistic_name: str
-  variable_name: Hashable
+  variable_name: str
   # Offsets for the chunk in the result of the aggregation. Should be None if
   # the relevant dimension is being aggregated over.
   init_time_offset: int | None
@@ -168,7 +168,7 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
         aggregation_key = _AggregationKey(
             type='sum_weighted_statistics',
             statistic_name=stat_name,
-            variable_name=var_name,
+            variable_name=str(var_name),
             init_time_offset=init_time_offset,
             lead_time_offset=lead_time_offset,
         )
@@ -176,7 +176,7 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
         aggregation_key = _AggregationKey(
             type='sum_weights',
             statistic_name=stat_name,
-            variable_name=var_name,
+            variable_name=str(var_name),
             init_time_offset=init_time_offset,
             lead_time_offset=lead_time_offset,
         )
