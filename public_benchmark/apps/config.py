@@ -55,18 +55,20 @@ UNITS = {
 DEFAULT_MODELS = [
     "IFS HRES vs Analysis",
     "IFS ENS (mean) vs Analysis",
-    "GraphCast vs ERA5",
-    "NeuralGCM 0.7 vs ERA5",
+    "Aurora (oper.) vs Analysis",
+    "GraphCast (oper.) vs Analysis",
+    "FGN (oper.) (mean) vs Analysis"
 ]
 DEFAULT_MODELS_PRECIP = [
     "IFS HRES vs ERA5",
     "IFS ENS (mean) vs ERA5",
-    "GraphCast vs ERA5",
+    "GraphCast (oper.) vs ERA5",
+    "FGN (oper.) vs ERA5"
 ]
 DEFAULT_MODELS_PROB = [
     "IFS ENS vs Analysis",
-    "GenCast vs ERA5",
-    "NeuralGCM ENS vs ERA5",
+    "GenCast (oper.) vs Analysis",
+    "FGN (oper.) vs Analysis"
 ]
 
 # Pobabilistic + deterministic
@@ -94,7 +96,6 @@ COLORS = {
     "NeuralGCM ENS vs ERA5": "orange",
     "NeuralGCM ENS (mean) vs ERA5": orange,
     "NeuralGCM ENS (1st member) vs ERA5": orange,
-    # "sphericalcnn_vs_era": lightblue,
     "FuXi vs ERA5": brown,
     "GenCast vs ERA5": "firebrick",
     "GenCast (mean) vs ERA5": "firebrick",
@@ -105,12 +106,12 @@ COLORS = {
     "GenCast (oper.) vs Analysis": "maroon",
     "GenCast (oper.) (mean) vs Analysis": "maroon",
     "GenCast (oper.) (1st member) vs Analysis": "maroon",
-    # "GenCast 100m U/V (oper.) vs ERA5": "maroon",
-    # "GenCast 100m U/V (oper.) (mean) vs ERA5": "maroon",
-    # "GenCast 100m U/V (oper.) (1st member) vs ERA5": "maroon",
-    # "GenCast 100m U/V (oper.) vs Analysis": "maroon",
-    # "GenCast 100m U/V (oper.) (mean) vs Analysis": "maroon",
-    # "GenCast 100m U/V (oper.) (1st member) vs Analysis": "maroon",
+    "FGN (oper.) vs ERA5": husl[9],
+    "FGN (oper.) (mean) vs ERA5": husl[9],
+    "FGN (oper.) (1st member) vs ERA5": husl[9],
+    "FGN (oper.) vs Analysis": husl[9],
+    "FGN (oper.) (mean) vs Analysis": husl[9],
+    "FGN (oper.) (1st member) vs Analysis": husl[9],
     "Aurora (oper.) vs Analysis": husl[8],
     "Stormer ENS (mean) vs ERA5": husl[2],
     "ArchesWeather-Mx4 vs ERA5": husl[3],
@@ -120,6 +121,7 @@ COLORS = {
     "Excarta (HEAL-ViT) vs ERA5": husl[5],
     "Baguan vs ERA5": husl[6],
     "WeatherMesh4 vs ERA5": husl[7],
+    
 }
 
 SYMBOLS = {
@@ -143,11 +145,9 @@ SYMBOLS = {
     "Keisler (2022) vs ERA5": "circle",
     "ERA5-Forecasts vs ERA5": "circle",
     "NeuralGCM 0.7 vs ERA5": "circle",
-    "neuralgcm_hres_vs_era": "circle",
     "NeuralGCM ENS vs ERA5": "square",
     "NeuralGCM ENS (mean) vs ERA5": "square",
     "NeuralGCM ENS (1st member) vs ERA5": "triangle-down",
-    # "sphericalcnn_vs_era": "circle",
     "FuXi vs ERA5": "circle",
     "GenCast vs ERA5": "circle",
     "GenCast (mean) vs ERA5": "circle",
@@ -158,12 +158,6 @@ SYMBOLS = {
     "GenCast (oper.) vs Analysis": "circle",
     "GenCast (oper.) (mean) vs Analysis": "circle",
     "GenCast (oper.) (1st member) vs Analysis": "triangle-down",
-    # "GenCast 100m U/V (oper.) vs ERA5": "triangle-up",
-    # "GenCast 100m U/V (oper.) (mean) vs ERA5": "triangle-up",
-    # "GenCast 100m U/V (oper.) (1st member) vs ERA5": "square",
-    # "GenCast 100m U/V (oper.) vs Analysis": "circle",
-    # "GenCast 100m U/V (oper.) (mean) vs Analysis": "circle",
-    # "GenCast 100m U/V (oper.) (1st member) vs Analysis": "triangle-down",
     "Aurora (oper.) vs Analysis": "triangle-down",
     "Stormer ENS (mean) vs ERA5": "circle",
     "ArchesWeather-Mx4 vs ERA5": "circle",
@@ -173,4 +167,10 @@ SYMBOLS = {
     "Excarta (HEAL-ViT) vs ERA5": "circle",
     "Baguan vs ERA5": "circle",
     "WeatherMesh4 vs ERA5": "circle",
+    "FGN (oper.) vs ERA5": "triangle-up",
+    "FGN (oper.) (mean) vs ERA5": "triangle-up",
+    "FGN (oper.) (1st member) vs ERA5": "square",
+    "FGN (oper.) vs Analysis": "circle",
+    "FGN (oper.) (mean) vs Analysis": "circle",
+    "FGN (oper.) (1st member) vs Analysis": "triangle-down",
 }

@@ -140,7 +140,7 @@ def make_app(ds, det_or_prob):
                                 dbc.Label("Year"),
                                 dcc.Dropdown(
                                     list(ds.year.values), 
-                                    "2020", 
+                                    "2022", 
                                     id="year",
                                     clearable=False,
                                 ),

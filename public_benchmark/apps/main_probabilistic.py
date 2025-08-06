@@ -15,7 +15,7 @@ from dash_app import make_app
 import xarray as xr
 import sys
 
-ds = xr.open_zarr('gs://wb2-app-data/v4/probabilistic.zarr')
+ds = xr.open_zarr('gs://wb2-app-data/v5/probabilistic.zarr')
 app = make_app(ds, 'probabilistic')
 server = app.server
 
