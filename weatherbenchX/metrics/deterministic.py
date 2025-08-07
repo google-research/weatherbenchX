@@ -13,7 +13,8 @@
 # limitations under the License.
 """Implementation of deterministic metrics and assiciated statistics."""
 
-from typing import Hashable, Mapping, Sequence, Union
+from collections.abc import Hashable
+from typing import Iterable, Mapping, Sequence, Union
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
@@ -192,6 +193,42 @@ class AnomalyCovariance(base.PerVariableStatisticWithClimatology):
     prediction_anom = predictions - aligned_climatology
     target_anom = targets - aligned_climatology
     return prediction_anom * target_anom
+
+
+class ErrorExceedance(base.PerVariableStatistic):
+  """Computes absolute errors exceeding thresholds."""
+
+  def __init__(self, thresholds: Sequence[float] | xr.DataArray):
+    """Init.
+
+    Args:
+      thresholds: The thresholds to use for error exceedance. If a list is given
+        then it will be converted to an xr.DataArray with dim
+        `error_exceedance_thresholds`.
+    """
+    if isinstance(thresholds, Sequence):
+      thresholds = xr.DataArray(
+          thresholds,
+          dims='error_exceedance_thresholds',
+          coords={'error_exceedance_thresholds': thresholds},
+      )
+    self._thresholds = thresholds
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    abs_error = abs(predictions - targets)
+    if isinstance(self._thresholds, xr.Dataset):
+      thresholds = self._thresholds[abs_error.name]
+    else:
+      thresholds = self._thresholds
+    out = (abs_error > thresholds).astype(float)
+    # Make sure NaNs are preserved
+    out = out.where(~abs_error.isnull())
+    out = out.where(~thresholds.isnull())
+    return out
 
 
 ### Metrics

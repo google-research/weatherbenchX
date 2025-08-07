@@ -88,7 +88,8 @@ def compute_precipitation_metric(metrics, metric_name, prediction, target):
       stats,
   )
   return metrics_base.compute_metric_from_statistics(
-      metrics[metric_name], stats)['total_precipitation_1hr']
+      metrics[metric_name], stats
+  )['total_precipitation_1hr']
 
 
 def compute_all_metrics(metrics, predictions, targets, reduce_dims):
@@ -150,14 +151,18 @@ class MetricsTest(parameterized.TestCase):
     # Dict of DataArrays.
     for v in stats['SquaredError']:
       xr.testing.assert_equal(
-          metrics_base.compute_metric_from_statistics(
-              metrics['rmse'], stats)[v],
+          metrics_base.compute_metric_from_statistics(metrics['rmse'], stats)[
+              v
+          ],
           stats['SquaredError'][v],
       )
     # 5. Test multivariate metric
     self.assertEqual(
-        list(metrics_base.compute_metric_from_statistics(
-            metrics['multivariate_metric'], stats)),
+        list(
+            metrics_base.compute_metric_from_statistics(
+                metrics['multivariate_metric'], stats
+            )
+        ),
         ['test'],
     )
 
@@ -221,9 +226,11 @@ class MetricsTest(parameterized.TestCase):
         lambda x: x.mean(['latitude', 'longitude']), stats
     )
     fss_no_wrap = metrics_base.compute_metric_from_statistics(
-        metrics['fss_no_wrap'], stats)['precipitation']
+        metrics['fss_no_wrap'], stats
+    )['precipitation']
     fss_wrap = metrics_base.compute_metric_from_statistics(
-        metrics['fss_wrap'], stats)['precipitation']
+        metrics['fss_wrap'], stats
+    )['precipitation']
 
     # For n=1, both should be similar = 4/6 correct pixels
     np.testing.assert_allclose(
@@ -773,6 +780,23 @@ class MetricsTest(parameterized.TestCase):
     )._compute_per_variable(predictions, targets)
     expected_result = xr.DataArray(
         np.array([[1.0, np.nan], [np.nan, 4.0]]), dims=['x', 'y']
+    )
+    xr.testing.assert_allclose(result, expected_result)
+
+  def test_error_exceedance(self):
+    predictions = xr.DataArray(np.array([0, -1, 1, np.nan]), dims=['x'])
+    targets = xr.DataArray(np.array([0, 0, 0, 0]), dims=['x'])
+    result = deterministic.ErrorExceedance(
+        thresholds=xr.DataArray([0, 0.5, 1, np.nan], dims=['y'])
+    )._compute_per_variable(predictions, targets)
+    expected_result = xr.DataArray(
+        np.array([
+            [0, 0, 0, np.nan],
+            [1, 1, 0, np.nan],
+            [1, 1, 0, np.nan],
+            [np.nan, np.nan, np.nan, np.nan],
+        ]),
+        dims=['x', 'y'],
     )
     xr.testing.assert_allclose(result, expected_result)
 
