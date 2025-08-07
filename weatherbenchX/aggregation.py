@@ -13,6 +13,7 @@
 # limitations under the License.
 """Definition of aggregation methods and AggregationState."""
 
+import collections
 import dataclasses
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
@@ -109,6 +110,104 @@ class AggregationState:
         da = metric_values[metric_name][var_name]
         values[f'{metric_name}.{var_name}'] = da
     return values
+
+  def sum_along_dims(self, dims: Collection[str]) -> 'AggregationState':
+    """Further sum aggregated statistics over the given dimensions.
+
+    This can be useful in cases where we want a two-stage reduction, e.g.
+    when computing confidence intervals we want to postpone a final reduction
+    over separate experimental units (typically initialization times) but
+    perform all other reductions (e.g. over lat/lon) beforehand.
+
+    The first reduction would generally be done via an Aggregator (perhaps
+    followed by further aggregation over multiple batches/chunks). Further
+    reduction can then be done here. Note we continue to use the weights and
+    mask specified in the original aggregation, by further summing both the
+    sum_weighted_statistics and sum_weights. The result should be the same as
+    if the specified `dims` had been reduced over in the original aggregation.
+
+    Args:
+      dims: Dimensions to sum over.
+
+    Returns:
+      A new AggregationState with the given dimensions summed over.
+    """
+    if self.sum_weighted_statistics is None:
+      # Further reduction of a generic zero state is also a zero state.
+      return self
+    sum_weighted_statistics = xarray_tree.map_structure(
+        lambda x: x.sum(dims, skipna=False),
+        self.sum_weighted_statistics,
+    )
+    sum_weights = xarray_tree.map_structure(
+        lambda x: x.sum(dims, skipna=False),
+        self.sum_weights,
+    )
+    return AggregationState(sum_weighted_statistics, sum_weights)
+
+  def to_data_tree(self) -> xr.DataTree:
+    """Returns a DataTree representation of the AggregationState."""
+    if isinstance(self.sum_weighted_statistics, xr.DataArray):
+      return xr.DataTree(dataset=xr.Dataset({
+          'sum_weighted_statistics': self.sum_weighted_statistics,
+          'sum_weights': self.sum_weights}))
+    elif isinstance(self.sum_weighted_statistics, Mapping):
+      return xr.DataTree(children={
+          k: AggregationState(self.sum_weighted_statistics[k],
+                              self.sum_weights[k]).to_data_tree()
+          for k in self.sum_weighted_statistics.keys()})
+    else:
+      raise TypeError('Bad type for AggregationState.sum_weighted_statistics.')
+
+  @classmethod
+  def from_data_tree(cls, data_tree: xr.DataTree) -> 'AggregationState':
+    """Returns an AggregationState from a DataTree representation."""
+    if data_tree.dataset:
+      return cls(
+          data_tree.dataset['sum_weighted_statistics'].rename(data_tree.name),
+          data_tree.dataset['sum_weights'].rename(data_tree.name))
+    else:
+      children = {
+          k: cls.from_data_tree(v) for k, v in data_tree.children.items()}
+      return cls(
+          sum_weighted_statistics={
+              k: v.sum_weighted_statistics for k, v in children.items()},
+          sum_weights={
+              k: v.sum_weights for k, v in children.items()},
+      )
+
+  def to_dataset(self, separator='#') -> xr.Dataset:
+    """A Dataset representation of the AggregationState.
+
+    This won't work (or at least won't round-trip correctly) if DataArrays have
+    incompatible coordinates, or if any statistic or variable names contain the
+    `separator`. Prefer to_data_tree() where possible.
+
+    Args:
+      separator: Separator to use between path components in the variable names
+        of the Dataset. '#' is used by default since '.' may occur in
+        statistics' unique_names, and '/' is reserved for netCDF groups.
+
+    Returns:
+      A Dataset representation of the AggregationState.
+    """
+    result = {}
+    for path, dataset in self.to_data_tree().to_dict().items():
+      path = str(path).lstrip('/').replace('/', separator)
+      for var_name, data_array in dataset.items():
+        result[f'{path}{separator}{var_name}'] = data_array
+    return xr.Dataset(result)
+
+  @classmethod
+  def from_dataset(
+      cls, dataset: xr.Dataset, separator='#') -> 'AggregationState':
+    """Returns an AggregationState from a Dataset representation."""
+    dataset_dict = collections.defaultdict(xr.Dataset)
+    for path, data_array in dataset.items():
+      path, var_name = str(path).rsplit(separator, 1)
+      path = '/' + path.replace(separator, '/')
+      dataset_dict[path][var_name] = data_array
+    return cls.from_data_tree(xr.DataTree.from_dict(dataset_dict))
 
 
 @dataclasses.dataclass
