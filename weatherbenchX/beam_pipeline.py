@@ -20,7 +20,6 @@ import typing
 from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
 
 import apache_beam as beam
-import fsspec
 import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import beam_utils
@@ -285,11 +284,13 @@ class WriteMetrics(beam.DoFn):
   def __init__(self, out_path: str):
     self.out_path = out_path
 
-  def process(self, metrics: xr.Dataset) -> None:
+  def process(self, metrics: xr.Dataset) -> Iterable[Never]:
     logging.debug('WriteMetrics inputs: %s', metrics)
-    with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
-      f.write(metrics.to_netcdf())
-    return None
+    beam_utils.atomic_write(
+        self.out_path,
+        metrics.to_netcdf(),
+    )
+    return []
 
 
 class WriteAggregationState(beam.DoFn):
@@ -300,9 +301,10 @@ class WriteAggregationState(beam.DoFn):
 
   def process(
       self, aggregation_state: aggregation.AggregationState) -> Iterable[Never]:
-
-    with fsspec.open(self.out_path, 'wb', auto_mkdir=True) as f:
-      f.write(aggregation_state.to_dataset().to_netcdf())
+    beam_utils.atomic_write(
+        self.out_path,
+        aggregation_state.to_dataset().to_netcdf(),
+    )
     return []
 
 
