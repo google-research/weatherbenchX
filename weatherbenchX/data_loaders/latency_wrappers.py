@@ -13,13 +13,13 @@
 # limitations under the License.
 """Latency wrappers."""
 
-from typing import Hashable, Mapping, Optional, Union
+from typing import Any, Hashable, Mapping, Optional, Union
+from absl import logging
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base
 from weatherbenchX.data_loaders import xarray_loaders
 import xarray as xr
-from absl import logging
 
 
 class ConstantLatencyWrapper(base.DataLoader):
@@ -115,6 +115,11 @@ class ConstantLatencyWrapper(base.DataLoader):
       chunk: Chunk loaded from adjusted nominal init/lead times but with the
         requested init/lead times assigned as coordinates.
     """
+    if isinstance(self.data_loader, xarray_loaders.XarrayDataLoader):
+      # Normally, maybe_prepare_dataset() is called in load_chunk(). However,
+      # since we are calling _load_chunk_from_source() directly, we need to call
+      # it here.
+      self.data_loader.maybe_prepare_dataset()
     if lead_times is None:
       raise ValueError('Latency adjustement is only valid with lead times.')
 
@@ -178,12 +183,35 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
       init_time_dim: str = 'init_time',
       concat_dim: str = 'init_time',
   ):
+    self._init_time_dim = init_time_dim
+    self._nominal_init_times_set = False
     super().__init__(
         data_loader,
         latency,
-        data_loader._ds[init_time_dim].values,
+        # We will set this in load_chunk after the dataset has been read.
+        nominal_init_times=np.array([]),
         concat_dim=concat_dim,
     )
+
+  def maybe_set_nominal_init_times(self):
+    if self._nominal_init_times_set:
+      return
+    assert isinstance(self.data_loader, xarray_loaders.XarrayDataLoader)
+    self.data_loader.maybe_prepare_dataset()
+    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access
+    self._nominal_init_times_set = True
+
+  def _load_chunk_from_source(
+      self,
+      init_times: np.ndarray,
+      lead_times: Optional[Union[np.ndarray, slice]] = None,
+  ) -> Mapping[Hashable, xr.DataArray]:
+    self.maybe_set_nominal_init_times()
+    return super()._load_chunk_from_source(init_times, lead_times)
+
+  def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
+    self.maybe_set_nominal_init_times()
+    return super().get_available_init_time(init_time)
 
 
 class MultipleConstantLatencyWrapper(base.DataLoader):
