@@ -49,23 +49,24 @@ class Binning(abc.ABC):
     """
 
 
-def _region_to_mask(
-    lat: xr.DataArray,
-    lon: xr.DataArray,
-    lat_lims: Tuple[int, int],
-    lon_lims: Tuple[int, int],
+def _create_lat_mask(
+    lat: xr.DataArray, lat_lims: Tuple[int, int]
 ) -> xr.DataArray:
-  """Computes a boolean mask for a lat/lon limits region."""
+  """Computes a boolean mask for a latitude limits region."""
   if lat_lims[0] >= lat_lims[1]:
     raise ValueError(
         f'`lat_lims[0]` must be smaller than `lat_lims[1]`, got {lat_lims}`'
     )
-  lat_mask = np.logical_and(lat >= lat_lims[0], lat <= lat_lims[1])
+  return np.logical_and(lat >= lat_lims[0], lat <= lat_lims[1])
 
+
+def _create_lon_mask(
+    lon: xr.DataArray, lon_lims: Tuple[int, int]
+) -> xr.DataArray:
+  """Computes a boolean mask for a longitude limits region."""
   # Make sure we are in the [0, 360] interval.
   lon = np.mod(lon, 360)
   lon_lims = np.mod(lon_lims[0], 360), np.mod(lon_lims[1], 360)
-
   if lon_lims[1] > lon_lims[0]:
     # Same as the latitude.
     lon_mask = np.logical_and(lon >= lon_lims[0], lon <= lon_lims[1])
@@ -73,6 +74,18 @@ def _region_to_mask(
     # In this case it means we need to wrap longitude around the other side of
     # the globe.
     lon_mask = np.logical_or(lon <= lon_lims[1], lon >= lon_lims[0])
+  return lon_mask
+
+
+def _region_to_mask(
+    lat: xr.DataArray,
+    lon: xr.DataArray,
+    lat_lims: Tuple[int, int],
+    lon_lims: Tuple[int, int],
+) -> xr.DataArray:
+  """Computes a boolean mask for a lat/lon limits region."""
+  lat_mask = _create_lat_mask(lat, lat_lims)
+  lon_mask = _create_lon_mask(lon, lon_lims)
   return np.logical_and(lat_mask, lon_mask)
 
 
@@ -183,6 +196,142 @@ class Regions(Binning):
       land_masks.coords[self.bin_dim_name] = np.array(region_names)
       masks = xr.concat([masks, land_masks], dim=self.bin_dim_name)
     return masks
+
+
+class GlobalGrid(Binning):
+  """Class for global grid binning.
+
+  The full set of latitudes and longitudes of the globe are divided into a
+  uniform grid by a certain degree and then a mask is created for each pixel
+  of the grid.
+  Note that coordinate must be named `latitude` and `longitude`.
+  """
+  def __init__(
+      self,
+      degrees: float,
+      bin_dim_name: str = 'global_grid',
+  ):
+    """Init.
+
+    Args:
+      degrees: Grid spacing in degrees.
+      bin_dim_name: Name of binning dimension. Default: 'global_grid'
+    """
+    super().__init__(bin_dim_name)
+    self._degrees = degrees
+    self._lat_bins = np.arange(-60, 60 + self._degrees, self._degrees)
+    self._lon_bins = np.arange(0, 360 + self._degrees, self._degrees)
+
+  def create_bin_mask(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    """Creates a bin mask for a statistic.
+
+    Args:
+      statistic: Individual DataArray with statistic values.
+
+    Returns:
+      bin_mask: Boolean mask with shape that broadcasts against the statistic
+        DataArray.
+    """
+    masks = []
+    for lat_start in self._lat_bins[:-1]:
+      for lon_start in self._lon_bins[:-1]:
+        lat_end = lat_start + self._degrees
+        lon_end = lon_start + self._degrees
+        mask = _region_to_mask(
+            statistic.latitude,
+            statistic.longitude,
+            (lat_start, lat_end),
+            (lon_start, lon_end),
+        )
+        mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
+        mask.coords[self.bin_dim_name] = np.array(
+            [f'lat_{lat_start}_{lat_end}_lon_{lon_start}_{lon_end}']
+        )
+        masks.append(mask)
+    return xr.concat(masks, dim=self.bin_dim_name)
+
+
+class LatitudeBins(Binning):
+  """Class for binning by latitude bands."""
+
+  def __init__(
+      self,
+      degrees: float,
+      lat_range: Tuple[int, int] = (-60, 60),
+      bin_dim_name: str = 'latitude_bins',
+  ):
+    """Init.
+
+    Args:
+      degrees: Grid spacing in degrees.
+      lat_range: Tuple of (min_lat, max_lat).
+      bin_dim_name: Name of binning dimension.
+    """
+    super().__init__(bin_dim_name)
+    self._degrees = degrees
+    self._lat_bins = np.arange(
+        lat_range[0], lat_range[1] + self._degrees, self._degrees
+    )
+
+  def create_bin_mask(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    """Creates a bin mask for a statistic."""
+    masks = []
+    for lat_start in self._lat_bins[:-1]:
+      lat_end = lat_start + self._degrees
+      mask = _create_lat_mask(
+          statistic.latitude,
+          (lat_start, lat_end),
+      )
+      mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
+      mask.coords[self.bin_dim_name] = np.array([lat_start])
+      masks.append(mask)
+    return xr.concat(masks, dim=self.bin_dim_name)
+
+
+class LongitudeBins(Binning):
+  """Class for binning by longitude bands."""
+
+  def __init__(
+      self,
+      degrees: float,
+      lon_range: Tuple[int, int] = (0, 360),
+      bin_dim_name: str = 'longitude_bins',
+  ):
+    """Init.
+
+    Args:
+      degrees: Grid spacing in degrees.
+      lon_range: Tuple of (min_lon, max_lon).
+      bin_dim_name: Name of binning dimension.
+    """
+    super().__init__(bin_dim_name)
+    self._degrees = degrees
+    self._lon_bins = np.arange(
+        lon_range[0], lon_range[1] + self._degrees, self._degrees
+    )
+
+  def create_bin_mask(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    """Creates a bin mask for a statistic."""
+    masks = []
+    for lon_start in self._lon_bins[:-1]:
+      lon_end = lon_start + self._degrees
+      mask = _create_lon_mask(
+          statistic.longitude,
+          (lon_start, lon_end),
+      )
+      mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
+      mask.coords[self.bin_dim_name] = np.array([lon_start])
+      masks.append(mask)
+    return xr.concat(masks, dim=self.bin_dim_name)
 
 
 def vectorized_coord_mask(
