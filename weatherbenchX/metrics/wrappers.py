@@ -186,25 +186,89 @@ class ContinuousToBinary(InputTransform):
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
+def select_bin_thresholds_by_time_from_chunk(
+    bin_thresholds: xr.DataArray,
+    chunk: xr.DataArray,
+) -> xr.DataArray:
+  """Selects bin thresholds by time from target or prediction data array.
+
+  This function is used to select bin thresholds using the time coordinates of
+  the target / prediction data array da.
+
+  Chunk must have dimensions (`init_time`, `lead_time`), `valid_time` or no time
+  dimensions. In the latter case, the bin thresholds are returned unchanged.
+  Options for bin_threshold time dimensions are:
+  - `valid_time`
+  - `init_time` and `lead_time` (only compatible for init/lead_time chunks)
+  - `dayofyear` (with `lead_time` for init/lead_time chunks)
+  - No time dimensions (in which case the bin thresholds are returned
+    unchanged)
+
+  Args:
+    bin_thresholds: Data array containing bin thresholds.
+    chunk: Data array of targets or predictions to use for selecting bin
+      thresholds according to their time coordinates.
+
+  Returns:
+    Data array containing bin thresholds selected by time.
+  """
+
+  if {'init_time', 'lead_time'}.issubset(chunk.dims):
+    if 'valid_time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(
+          valid_time=chunk.init_time + chunk.lead_time
+      )
+
+    elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
+      bin_thresholds = bin_thresholds.sel(
+          init_time=chunk.init_time, lead_time=chunk.lead_time
+      )
+    elif {'dayofyear', 'lead_time'}.issubset(bin_thresholds.dims):
+      bin_thresholds = bin_thresholds.sel(
+          dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
+      )
+    else:
+      # No time dimensions in bin_thresholds, so just return it.
+      return bin_thresholds
+
+  elif 'valid_time' in chunk.dims:
+    if 'valid_time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(valid_time=chunk.valid_time)
+    elif 'dayofyear' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(
+          dayofyear=chunk.valid_time.dt.dayofyear
+      )
+    else:
+      # No time dimensions in bin_thresholds, so just return it.
+      return bin_thresholds
+
+  else:
+    # No time dimensions in chunk, so just return thresholds.
+    return bin_thresholds
+
+  return bin_thresholds.compute()
+
+
 class ContinuousToBins(InputTransform):
   """Converts a continuous input to a binned one.
 
-  Applies np.digitize, with `right=True`, to assign values to bins defined by
-  `bin_values`. The bins are right-inclusive, i.e.,
-  `threshold[i-1] < x <= threshold[i]`. For example, if `bin_values` is
-  [0.5, 1.0, 1.5], then the bins will be (-np.inf, 0.5], (0.5, 1.0], (1.0, 1.5],
-  and (1.5, np.inf).
+  The bins are right-inclusive, i.e., `threshold[i-1] < x <= threshold[i]`. For
+  example, if `bin_values` is [0.5, 1.0, 1.5], then the bins will be
+  (-np.inf, 0.5], (0.5, 1.0], (1.0, 1.5], and (1.5, np.inf).
 
   The output DataArray will have two new coordinates: `{bin_dim}_left` and
-  `{bin_dim}_right`, which will contain the left and rin bin edges,
+  `{bin_dim}_right`, which will contain the left and right bin edges,
   respectively.
   """
 
   def __init__(
       self,
       which: str,
-      bin_values: Union[Iterable[float], xr.DataArray],
+      bin_values: Union[Iterable[float], xr.DataArray, xr.Dataset],
       bin_dim: str,
+      return_cdf: bool = False,
+      unique_name_suffix: str | None = None,
+      enforce_monotonicity: bool = True,
   ):
     """Initialize the transform.
 
@@ -214,63 +278,96 @@ class ContinuousToBins(InputTransform):
       bin_values: Iterable of threshold values or xarray.DataArray. Must be
         monotonically increasing.
       bin_dim: Name of dimension to use for threshold values.
+      return_cdf: If True, return the CDF instead of the PDF. Default: False.
+      unique_name_suffix: Suffix to add to the unique name. If `bin_values` is
+        an xarray.DataArray or xarray.Dataset, this must be provided.
+      enforce_monotonicity: If True, raise an error if the bin values are not
+        monotonically increasing. It might be necessary to turn this off if the
+        bin_values contain NaNs, which would raise an error here. Default: True.
     """
     super().__init__(which)
-    # Convert to list if it isn't already.
-    self._bin_values = (
-        bin_values
-        if isinstance(bin_values, (Iterable, xr.DataArray, xr.Dataset))
-        else [bin_values]
-    )
-    if not np.all(np.diff(self._bin_values) > 0):
-      raise ValueError('Bin values must be monotonically increasing.')
+    self._bin_values = bin_values
     self._bin_dim = bin_dim
+    if isinstance(self._bin_values, (xr.DataArray, xr.Dataset)):
+      if unique_name_suffix is None:
+        raise ValueError(
+            'unique_name_suffix must be provided if bin_values is an'
+            ' xarray.DataArray or xarray.Dataset.'
+        )
+    self._return_cdf = return_cdf
+    self._unique_name_suffix = unique_name_suffix
+    self._enforce_monotonicity = enforce_monotonicity
 
   @property
   def unique_name_suffix(self) -> str:
-    bin_values_str = ','.join([str(t) for t in self._bin_values])
-    return f'{self._bin_dim}_{bin_values_str}'
+    if self._unique_name_suffix is None:
+      unique_name_suffix = ','.join([str(t) for t in self._bin_values])
+    else:
+      unique_name_suffix = self._unique_name_suffix
+    return f'ContinuousToBins_{self._bin_dim}_{unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    if isinstance(self._bin_values, xr.DataArray):
-      thresholds_np = self._bin_values.values
+    if isinstance(self._bin_values, (xr.DataArray, xr.Dataset)):
+      if isinstance(self._bin_values, xr.Dataset):
+        bins = self._bin_values[da.name]  # Select appropriate variable.
+      else:
+        bins = self._bin_values
+      bins = select_bin_thresholds_by_time_from_chunk(bins, da)
+    elif isinstance(self._bin_values, Iterable):
+      # Convert to DataArray
+      bins = xr.DataArray(
+          self._bin_values,
+          dims=[self._bin_dim],
+          coords={self._bin_dim: self._bin_values},
+      )
     else:
-      thresholds_np = np.array(self._bin_values)
+      raise ValueError(
+          'Bin values must be an Iterable, xr.DataArray, or xr.Dataset.'
+      )
+    if self._enforce_monotonicity:
+      if not np.all(bins.diff(self._bin_dim) > 0):
+        raise ValueError(
+            'Bin values must be monotonically increasing. To turn off this'
+            ' check, set `enforce_monotonicity=False`.'
+        )
 
-    # `np.digitize(x, bins, right=True)` returns index `i` such that:
-    #   `bins[i-1] < x <= bins[i]`
-    # Indices range from 0 (for x <= bins[0]) to len(bins) (for x > bins[-1]).
-    # `bins` for np.digitize will be `thresholds_np`.
-    digitized_indices = xr.apply_ufunc(
-        np.digitize,
-        da,
-        kwargs={'bins': thresholds_np, 'right': True},
-        dask='parallelized',
-        output_dtypes=[int],
+    # Append -inf and inf bins at the edges.
+    bins = xr.concat(
+        [
+            bins.isel({self._bin_dim: [0]}).assign_coords(
+                {self._bin_dim: [-np.inf]}
+            )
+            * -np.inf,
+            bins,
+            bins.isel({self._bin_dim: [0]}).assign_coords(
+                {self._bin_dim: [np.inf]}
+            )
+            * np.inf,
+        ],
+        dim=self._bin_dim,
     )
-    assert digitized_indices.max() <= len(thresholds_np)
-
-    boolean_layers = []
-    for i in range(len(thresholds_np) + 1):
-      layer = digitized_indices == i
-      boolean_layers.append(layer)
-
-    concatenated = xr.concat(boolean_layers, dim=self._bin_dim)
-    left_edges = np.concatenate(([-np.inf], thresholds_np))
-    right_edges = np.concatenate((thresholds_np, [np.inf]))
+    left_edges = bins[self._bin_dim].values[:-1]
+    right_edges = bins[self._bin_dim].values[1:]
     bin_names = [
         f'{left:.2f} < p <= {right:.2f}'
         for left, right in zip(left_edges, right_edges)
     ]
-    concatenated = concatenated.assign_coords({self._bin_dim: bin_names})
-    concatenated = concatenated.assign_coords(
+    cdf = (da <= bins).astype('float')   # This <= makes it right-inclusive.
+    # Make sure NaNs are propagated.
+    cdf = cdf.where(~np.isnan(da))
+    if self._return_cdf:
+      result = cdf.isel({self._bin_dim: slice(1, None)})
+    else:
+      # Convert CDF to PDF by taking diff.
+      result = cdf.diff(self._bin_dim)
+    result = result.assign_coords({self._bin_dim: bin_names})
+    result = result.assign_coords(
         {f'{self._bin_dim}_left': (self._bin_dim, left_edges)}
     )
-    concatenated = concatenated.assign_coords(
+    result = result.assign_coords(
         {f'{self._bin_dim}_right': (self._bin_dim, right_edges)}
     )
-    concatenated = concatenated.where(~np.isnan(da)).astype(np.float32)
-    return concatenated
+    return result
 
 
 class WeibullEnsembleToProbabilistic(InputTransform):
