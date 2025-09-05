@@ -66,10 +66,14 @@ class ContinuousToBinaryTest(parameterized.TestCase):
   def test_datarray_threshold(self):
     target = test_utils.mock_target_data(random=True)
     threshold_percentiles = [0.25, 0.75]
-    threshold_dataarray = target.geopotential.quantile(threshold_percentiles, dim='time')
-    threshold_dataarray = threshold_dataarray.rename({"quantile": "threshold"})
+    threshold_dataarray = target.geopotential.quantile(
+        threshold_percentiles, dim='time'
+    )
+    threshold_dataarray = threshold_dataarray.rename({'quantile': 'threshold'})
     ctb = wrappers.ContinuousToBinary(
-        which='both', threshold_value=threshold_dataarray, threshold_dim='threshold'
+        which='both',
+        threshold_value=threshold_dataarray,
+        threshold_dim='threshold',
     )
 
     x = target.geopotential
@@ -89,13 +93,15 @@ class ContinuousToBinaryTest(parameterized.TestCase):
     target = test_utils.mock_target_data(random=True)
     threshold_percentiles = [0.25, 0.75]
     threshold_dataset = target.quantile(threshold_percentiles, dim='time')
-    threshold_dataset = threshold_dataset.rename({"quantile": "threshold"})
+    threshold_dataset = threshold_dataset.rename({'quantile': 'threshold'})
 
     ctb = wrappers.ContinuousToBinary(
-        which='both', threshold_value=threshold_dataset, threshold_dim='threshold'
+        which='both',
+        threshold_value=threshold_dataset,
+        threshold_dim='threshold',
     )
 
-    for var in ["geopotential", "2m_temperature"]:
+    for var in ['geopotential', '2m_temperature']:
       x = target[var]
       y = ctb.transform_fn(x)
       xr.testing.assert_equal(
@@ -163,8 +169,9 @@ class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
     y = em.transform_fn(binary_y)
     ensemble_members = x.sizes['realization']
     xr.testing.assert_equal(
-      (x > 0.5).sum('realization', skipna=skipna)/(ensemble_members+1),
-      y.sel(threshold=0.5, drop=True))
+        (x > 0.5).sum('realization', skipna=skipna) / (ensemble_members + 1),
+        y.sel(threshold=0.5, drop=True),
+    )
 
 
 class InlineTest(parameterized.TestCase):
@@ -192,7 +199,9 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
   def test_constant_shift(self):
     target = test_utils.mock_target_data(random=True)
     shift = wrappers.ShiftAlongNewDim(
-        which='both', shift_value=0.5, shift_dim='threshold',
+        which='both',
+        shift_value=0.5,
+        shift_dim='threshold',
         unique_name_suffix='shift_along_threshold_0.5',
     )
 
@@ -205,7 +214,9 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
     target = test_utils.mock_target_data(random=True)
     shift_value = [0.2, 0.7]
     shift = wrappers.ShiftAlongNewDim(
-        which='both', shift_value=shift_value, shift_dim='threshold',
+        which='both',
+        shift_value=shift_value,
+        shift_dim='threshold',
         unique_name_suffix='shift_along_threshold_[0.2,0.7]',
     )
 
@@ -231,7 +242,9 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
     shift_value = target.quantile(q=quantiles, dim='time')
 
     shift = wrappers.ShiftAlongNewDim(
-        which='both', shift_value=shift_value, shift_dim='quantile',
+        which='both',
+        shift_value=shift_value,
+        shift_dim='quantile',
         unique_name_suffix='shift_along_quantile_[0.25, 0.75]',
     )
 
@@ -247,52 +260,69 @@ class ShiftAlongNewDimTest(parameterized.TestCase):
 class ContinuousToBinsTest(parameterized.TestCase):
 
   def test_iterable_threshold(self):
-    target = test_utils.mock_target_data(random=True)
+    target = test_utils.mock_target_data(random=True).rename(time='valid_time')
+    bin_values_list = [-np.inf, 0.2, 0.7, np.inf]
+    bin_values_xr = xr.DataArray(
+        bin_values_list,
+        dims=['bin_values'],
+        coords={'bin_values': bin_values_list},
+    )
+    bin_values_da = bin_values_xr * xr.ones_like(target['2m_temperature'])
+    bin_values_ds = bin_values_xr * xr.ones_like(target)
+    for bin_values in [bin_values_list, bin_values_da, bin_values_ds]:
+      ctb = wrappers.ContinuousToBins(
+          which='both',
+          bin_values=bin_values,
+          bin_dim='bin_values',
+          unique_name_suffix='test',
+      )
+      x = target.geopotential
+      y = ctb.transform_fn(x)
+
+      np.testing.assert_array_equal(
+          y.bin_values_left.data, np.array([-np.inf, 0.2, 0.7])
+      )
+      np.testing.assert_array_equal(
+          y.bin_values_right.data, np.array([0.2, 0.7, np.inf])
+      )
+
+      # Bin 0: x <= 0.2 (maps to bin_values coord 0.2)
+      expected_bin_0 = x <= 0.2
+      xr.testing.assert_equal(y.isel(bin_values=0, drop=True), expected_bin_0)
+
+      # Bin 1: 0.2 < x <= 0.7 (maps to bin_values coord 0.7)
+      expected_bin_1 = (x > 0.2) & (x <= 0.7)
+      xr.testing.assert_equal(y.isel(bin_values=1, drop=True), expected_bin_1)
+
+      # Bin 2: x > 0.7 (maps to bin_values coord np.inf)
+      expected_bin_2 = x > 0.7
+      xr.testing.assert_equal(y.isel(bin_values=2, drop=True), expected_bin_2)
+
+  def test_non_monotonic_thresholds(self):
+    target = test_utils.mock_target_data(random=True).rename(time='valid_time')
+    bin_values = [0.7, 0.2]
+    ctb = wrappers.ContinuousToBins(
+        which='both',
+        bin_values=bin_values,
+        bin_dim='bin_values',
+    )
+    x = target.geopotential
+
+    with self.assertRaises(ValueError):
+      ctb.transform_fn(x)
+
+  def test_nan_thresholds(self):
+    # NaNs should be propagated.
+    target = test_utils.mock_target_data(random=True) * np.nan
     bin_values = [0.2, 0.7]
     ctb = wrappers.ContinuousToBins(
         which='both',
         bin_values=bin_values,
-        bin_dim='bin_values'
+        bin_dim='bin_values',
     )
     x = target.geopotential
     y = ctb.transform_fn(x)
-
-    np.testing.assert_array_equal(
-        y.bin_values_left.data,
-        np.array([-np.inf, 0.2, 0.7])
-    )
-    np.testing.assert_array_equal(
-        y.bin_values_right.data,
-        np.array([0.2, 0.7, np.inf])
-    )
-
-    # Bin 0: x <= 0.2 (maps to bin_values coord 0.2)
-    expected_bin_0 = x <= 0.2
-    xr.testing.assert_equal(
-        y.isel(bin_values=0, drop=True),
-        expected_bin_0
-    )
-
-    # Bin 1: 0.2 < x <= 0.7 (maps to bin_values coord 0.7)
-    expected_bin_1 = (x > 0.2) & (x <= 0.7)
-    xr.testing.assert_equal(
-        y.isel(bin_values=1, drop=True),
-        expected_bin_1
-    )
-
-    # Bin 2: x > 0.7 (maps to bin_values coord np.inf)
-    expected_bin_2 = x > 0.7
-    xr.testing.assert_equal(
-        y.isel(bin_values=2, drop=True),
-        expected_bin_2
-    )
-
-  def test_non_monotonic_thresholds(self):
-    bin_values = [0.7, 0.2] # Non-monotonic
-    with self.assertRaises(ValueError):
-      wrappers.ContinuousToBins(
-          which='both', bin_values=bin_values, bin_dim='t'
-      )
+    self.assertTrue(np.all(np.isnan(y)))
 
 
 if __name__ == '__main__':

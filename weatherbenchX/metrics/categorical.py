@@ -479,6 +479,7 @@ class Reliability(base.PerVariableMetric):
   def __init__(
       self,
       bin_values: Sequence[float] = (
+          -np.inf,
           0.1,
           0.2,
           0.3,
@@ -488,6 +489,7 @@ class Reliability(base.PerVariableMetric):
           0.7,
           0.8,
           0.9,
+          1.
       ),
       bin_dim: str = 'reliability_bin',
   ):
