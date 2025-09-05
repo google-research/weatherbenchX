@@ -902,3 +902,59 @@ class SubselectVariables(base.Metric):
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
     return self.metric.values_from_mean_statistics(statistic_values)
+
+
+class IntersectPredictionAndTargetVariablesForStatistic(base.Statistic):
+  """Only compute statistic for variables present in both predictions and targets."""
+
+  def __init__(self, statistic: base.Statistic):
+    """Init.
+
+    Args:
+      statistic: Statistic object to wrap.
+    """
+    self.statistic = statistic
+
+  @property
+  def unique_name(self) -> str:
+    # Make sure to change unique name in case there is another, non-intersected
+    # statistic with the same name.
+    return f'{self.statistic.unique_name}_intersected_vars'
+
+  def compute(
+      self,
+      predictions: Mapping[Hashable, xr.DataArray],
+      targets: Mapping[Hashable, xr.DataArray],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    shared_variables = set(predictions.keys()) & set(targets.keys())
+    predictions = {
+        k: v for k, v in predictions.items() if k in shared_variables
+    }
+    targets = {k: v for k, v in targets.items() if k in shared_variables}
+    return self.statistic.compute(predictions, targets)
+
+
+class IntersectPredictionAndTargetVariables(base.Metric):
+  """Only compute metric for variables present in both predictions and targets."""
+
+  def __init__(self, metric: base.Metric):
+    """Init.
+
+    Args:
+      metric: Metric to wrap.
+    """
+    self.metric = metric
+
+  @property
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+    stats = {}
+    for name, stat in self.metric.statistics.items():
+      stat = IntersectPredictionAndTargetVariablesForStatistic(stat)
+      stats[name] = stat
+    return stats
+
+  def values_from_mean_statistics(
+      self,
+      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    return self.metric.values_from_mean_statistics(statistic_values)

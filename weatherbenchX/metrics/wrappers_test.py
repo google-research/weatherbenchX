@@ -17,6 +17,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 from weatherbenchX import test_utils
+from weatherbenchX.metrics import deterministic
 from weatherbenchX.metrics import wrappers
 import xarray as xr
 
@@ -323,6 +324,31 @@ class ContinuousToBinsTest(parameterized.TestCase):
     x = target.geopotential
     y = ctb.transform_fn(x)
     self.assertTrue(np.all(np.isnan(y)))
+
+
+class IntersectPredictionAndTargetVariablesTest(parameterized.TestCase):
+
+  def test_intersection(self):
+    predictions = xr.Dataset({
+        'a': (('time',), np.arange(10)),
+        'b': (('time',), np.arange(10)),
+        'c': (('time',), np.arange(10)),
+        'd': (('time',), np.arange(10)),
+    })
+    targets = xr.Dataset({
+        'c': (('time',), np.arange(10)),
+        'd': (('time',), np.arange(10)),
+        'e': (('time',), np.arange(10)),
+    })
+
+    metric = wrappers.IntersectPredictionAndTargetVariables(
+        deterministic.MAE()
+    )
+    stats = metric.statistics
+    mae_stat = stats['self']
+    result = mae_stat.compute(predictions, targets)
+
+    self.assertSequenceEqual(list(result.keys()), ['c', 'd'])
 
 
 if __name__ == '__main__':
