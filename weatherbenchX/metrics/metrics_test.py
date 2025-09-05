@@ -606,6 +606,20 @@ class MetricsTest(parameterized.TestCase):
           check_dim_order=False,
       )
 
+  def test_direct_rps(self):
+    # CDFs
+    predictions = xr.DataArray(
+        [0.0, 0.0, 1.0],
+        coords={'sample': np.arange(3)},
+    )
+    targets = xr.DataArray(
+        [0.0, 1.0, 1.0],
+        coords={'sample': np.arange(3)},
+    )
+    rps = categorical.RankedProbabilityScore(bin_dim='sample')
+    result = rps.compute({'x': predictions}, {'x': targets})['x']
+    self.assertEqual(result.values, 1.0)
+
   @parameterized.named_parameters(
       dict(
           testcase_name=f'fair_{fair}_targ_temp_{targ_temp}',
@@ -626,7 +640,7 @@ class MetricsTest(parameterized.TestCase):
           (True, 0.9, 1.80),
       ]
   )
-  def test_rps_on_handwritten_small_data(
+  def test_ensemble_rps_on_handwritten_small_data(
       self,
       expected_rps: float,
       targ_temp: float,
@@ -650,15 +664,13 @@ class MetricsTest(parameterized.TestCase):
         data_vars={var: (['bin'], bin_thresholds_np) for var in targ.data_vars},
         coords={'bin': np.arange(len(bin_thresholds_np))},
     )
-    statistic = probabilistic.RankedProbabilityScore(
+    statistic = probabilistic.EnsembleRankedProbabilityScore(
         prediction_bin_thresholds=bin_thresholds_ds,
         target_bin_thresholds=bin_thresholds_ds,
         unique_name_suffix='test',
         bin_dim='bin',
         ensemble_dim='sample',
         fair=fair,
-        prediction_bin_preprocess_fn=None,
-        target_bin_preprocess_fn=None,
     ).compute(pred, targ)
 
     # Check calculation matches the expected RPS, which has been determined by

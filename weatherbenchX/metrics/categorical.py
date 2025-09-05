@@ -302,6 +302,43 @@ class SEEPS(base.Statistic):
     return result
 
 
+class RankedProbabilityScore(base.PerVariableStatistic):
+  """Ranked probability score for cumulative distribution functions.
+
+  Given a ground truth scalar random variable Y, a prediction random variable X,
+  a sequence of bin boundaries b_0 < b_1 < ... < b_k, where b_0 = -inf and
+  b_K = +inf, the Ranked Probability Score is defined as
+
+    RPS = E[ Σk (CDF(Y)(b_k) - CDF(X)(b_k))^2 ]
+
+  where the sum over k is taken over k = 1, 2, ..., K, and CDF(X) and CDF(Y)
+  are the cumulative distribution functions of X and Y, respectively.
+
+  Here it is assumed that the predictions and targets already represent the CDF
+  in the `bin_dim` dimension.
+
+  For an implementation that computes the RPS from ensemble predictions, see
+  `probabilistic.EnsembleRankedProbabilityScore`.
+  """
+
+  def __init__(
+      self,
+      bin_dim: str,
+  ):
+    self._bin_dim = bin_dim
+
+  @property
+  def unique_name(self) -> str:
+    return 'RankedProbabilityScore'
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    return ((predictions - targets) ** 2).sum(self._bin_dim)
+
+
 # Metrics
 class CSI(base.PerVariableMetric):
   """Critical Success Index.
