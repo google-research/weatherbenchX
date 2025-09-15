@@ -13,7 +13,7 @@
 # limitations under the License.
 """Data loaders for reading gridded Zarr files."""
 
-from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Union
+from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Union, Dict
 import numpy as np
 from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
@@ -68,6 +68,7 @@ class XarrayDataLoader(base.DataLoader):
       add_nan_mask: bool = False,
       preprocessing_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
       process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      open_dataset_args: Optional[Dict[str, Any]] = {},
   ):
     """Init.
 
@@ -101,7 +102,9 @@ class XarrayDataLoader(base.DataLoader):
         right after it is opened.
       process_chunk_fn: (Optional) A function that is applied to each chunk
         after loading, interpolation and compute, but before computing a mask.
-    """
+      open_dataset_args: (Optional) A dictionary with arguments that are passed
+        to the xr.open_dataset or xr.open_zarr function.
+      """
     if path is not None and ds is not None:
       raise ValueError('Only one of path or ds can be specified, not both.')
 
@@ -118,6 +121,7 @@ class XarrayDataLoader(base.DataLoader):
     )
     self._rename_variables = rename_variables
     self._preprocessing_fn = preprocessing_fn
+    self._open_dataset_args = open_dataset_args
 
     self._preprocessed = False
     super().__init__(
@@ -136,9 +140,9 @@ class XarrayDataLoader(base.DataLoader):
       logging.info('Opening dataset from path: %s', self._path)
       assert self._path is not None
       if self._path.rstrip('/').endswith('.zarr'):
-        self._ds = xr.open_zarr(self._path)
+        self._ds = xr.open_zarr(self._path, **self._open_dataset_args)
       else:
-        self._ds = xr.open_dataset(self._path)
+        self._ds = xr.open_dataset(self._path, **self._open_dataset_args)
 
     if self._preprocessing_fn is not None:
       self._ds = self._preprocessing_fn(self._ds)
