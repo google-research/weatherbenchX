@@ -812,6 +812,83 @@ class MetricsTest(parameterized.TestCase):
     )
     xr.testing.assert_allclose(result, expected_result)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f'EnsembleSize{size}_{sort=}_{fair=}',
+          ensemble_size=size,
+          use_sort=sort,
+          fair=fair,
+      )
+      for size, sort, fair in itertools.product(
+          [4, 5], [False], [True, False]
+      )
+  )
+  def test_crps_with_nans(
+      self, ensemble_size: int, use_sort: bool, fair: bool
+  ):
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00', time_stop='2020-01-03T00', random=True
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+    )
+
+    # Introduce a NaN value into the predictions
+    predictions_with_nan = predictions.copy(deep=True)
+    predictions_with_nan['2m_temperature'][{'realization': 0}] = np.nan
+
+    # Compute metrics with skipna_ensemble=True
+    metrics = {
+        'crps': probabilistic.CRPSEnsemble(
+            ensemble_dim='realization',
+            use_sort=use_sort,
+            fair=fair,
+            skipna_ensemble=True,
+        )
+    }
+    results = compute_all_metrics(
+        metrics,
+        predictions_with_nan,
+        targets,
+        reduce_dims=['latitude', 'longitude'],
+    )
+
+    # Compute metrics on the non-NaN data with skipna_ensemble=False
+    metrics_no_nan = {
+        'crps': probabilistic.CRPSEnsemble(
+            ensemble_dim='realization',
+            use_sort=use_sort,
+            fair=fair,
+            skipna_ensemble=False,
+        )
+    }
+    expected_results = compute_all_metrics(
+        metrics_no_nan,
+        predictions.isel(realization=slice(1, None)),
+        targets,
+        reduce_dims=['latitude', 'longitude'],
+    )
+
+    for v in ['2m_temperature', 'geopotential']:
+      if v == '2m_temperature':
+        xr.testing.assert_allclose(
+            results[f'crps.{v}'], expected_results[f'crps.{v}']
+        )
+      else:  # Other variables should not be affected by the NaN
+        # Recompute expected results without a nan
+        expected_results_no_nan = compute_all_metrics(
+            metrics_no_nan,
+            predictions,
+            targets,
+            reduce_dims=['latitude', 'longitude'],
+        )
+        xr.testing.assert_allclose(
+            results[f'crps.{v}'], expected_results_no_nan[f'crps.{v}']
+        )
+
 
 if __name__ == '__main__':
   absltest.main()

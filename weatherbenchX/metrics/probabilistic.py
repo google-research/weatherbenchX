@@ -30,8 +30,11 @@ import xarray as xr
 class CRPSSkill(base.PerVariableStatistic):
   """The skill measure associated with CRPS, E|X - Y|."""
 
-  def __init__(self, ensemble_dim: str = 'number'):
+  def __init__(
+      self, ensemble_dim: str = 'number', skipna_ensemble: bool = False
+  ):
     self._ensemble_dim = ensemble_dim
+    self._skipna_ensemble = skipna_ensemble
 
   @property
   def unique_name(self) -> str:
@@ -51,7 +54,9 @@ class CRPSSkill(base.PerVariableStatistic):
       pseudo_ensemble_dim = f'{self._ensemble_dim}_PSEUDO_FOR_TARGETS'
       reduce_dims += [pseudo_ensemble_dim]
       targets = targets.rename({self._ensemble_dim: pseudo_ensemble_dim})
-    return np.abs(predictions - targets).mean(reduce_dims, skipna=False)
+    return np.abs(predictions - targets).mean(
+        reduce_dims, skipna=self._skipna_ensemble
+    )
 
 
 def _rankdata(x: np.ndarray, axis: int) -> np.ndarray:
@@ -87,11 +92,13 @@ class CRPSSpread(base.PerVariableStatistic):
       use_sort: bool = False,
       fair: bool = True,
       which: str = 'predictions',
+      skipna_ensemble: bool = False,
   ):
     self._ensemble_dim = ensemble_dim
     self._use_sort = use_sort
     self._which = which
     self._fair = fair
+    self._skipna_ensemble = skipna_ensemble
 
   @property
   def unique_name(self) -> str:
@@ -110,11 +117,17 @@ class CRPSSpread(base.PerVariableStatistic):
     else:
       raise ValueError(f'Unhandled {self._which=}')
 
-    n_ensemble = da.sizes[self._ensemble_dim]
-    if n_ensemble < 2:
-      raise ValueError('Cannot estimate CRPS spread with n_ensemble < 2.')
+    if self._skipna_ensemble:
+      n_ensemble = da.count(self._ensemble_dim)
+    else:
+      n_ensemble = da.sizes[self._ensemble_dim]
+    if not self._skipna_ensemble:
+      if n_ensemble < 2:
+        raise ValueError('Cannot estimate CRPS spread with n_ensemble < 2.')
 
     if self._use_sort:
+      if self._skipna_ensemble:
+        raise ValueError('skipna_ensemble is not supported with use_sort=True.')
       # one_half_spread is ̂̂λ₂ from Zamo. That is, with n_ensemble = M,
       #   λ₂ = 1 / (2 M (M - 1)) Σ_{i,j=1}^M |Xi - Xj|
       # See the definition of eFAIR and then
@@ -143,7 +156,8 @@ class CRPSSpread(base.PerVariableStatistic):
       second_ensemble_dim = 'ensemble_dim_2'
       da_2 = da.rename({self._ensemble_dim: second_ensemble_dim})
       return abs(da - da_2).sum(
-          dim=(self._ensemble_dim, second_ensemble_dim), skipna=False
+          dim=(self._ensemble_dim, second_ensemble_dim),
+          skipna=self._skipna_ensemble,
       ) / (n_ensemble * (n_ensemble - int(self._fair)))
 
 
@@ -415,6 +429,7 @@ class CRPSEnsemble(base.PerVariableMetric):
       ensemble_dim: str = 'number',
       use_sort: bool = False,
       fair: bool = True,
+      skipna_ensemble: bool = False,
   ):
     """Init.
 
@@ -425,19 +440,29 @@ class CRPSEnsemble(base.PerVariableMetric):
         class docstring for more details. Default: False.
       fair: If True, use the fair estimate of CRPS. If False, use the
         conventional estimate. Default: True.
+      skipna_ensemble: If True, any NaN values are treated as missing ensemble
+        members. The metric is computed using an ensemble size corresponding to
+        the number of non-NaN values along the ensemble_dim, which may vary by
+        position along any other dims. When fewer than two ensemble members are
+        present along the ensemble_dim, the metric is computed but will be NaN.
     """
     self._ensemble_dim = ensemble_dim
     self._use_sort = use_sort
     self._fair = fair
+    self._skipna_ensemble = skipna_ensemble
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
     return {
-        'CRPSSkill': CRPSSkill(ensemble_dim=self._ensemble_dim),
+        'CRPSSkill': CRPSSkill(
+            ensemble_dim=self._ensemble_dim,
+            skipna_ensemble=self._skipna_ensemble,
+        ),
         'CRPSSpread': CRPSSpread(
             ensemble_dim=self._ensemble_dim,
             use_sort=self._use_sort,
             fair=self._fair,
+            skipna_ensemble=self._skipna_ensemble,
         ),
     }
 
@@ -492,6 +517,7 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
       ensemble_dim: str = 'number',
       use_sort: bool = False,
       fair: bool = True,
+      skipna_ensemble: bool = False,
   ):
     """Init.
 
@@ -504,10 +530,13 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
         Default: False.
       fair: If True, use the fair estimate of CRPS. If False, use the
         conventional estimate. Default: True.
+      skipna_ensemble: If True, skip NaN values when computing the ensemble MAE
+        and MAD. Default: False.
     """
     self._ensemble_dim = ensemble_dim
     self._use_sort = use_sort
     self._fair = fair
+    self._skipna_ensemble = skipna_ensemble
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -517,6 +546,7 @@ class CRPSEnsembleDistance(base.PerVariableMetric):
             ensemble_dim=self._ensemble_dim,
             use_sort=self._use_sort,
             fair=self._fair,
+            skipna_ensemble=self._skipna_ensemble,
         ),
         'CRPSTargetSpread': CRPSSpread(
             ensemble_dim=self._ensemble_dim,
