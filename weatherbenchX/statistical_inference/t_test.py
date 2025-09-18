@@ -15,7 +15,7 @@
 
 from collections.abc import Mapping
 import dataclasses
-from typing import cast
+import logging
 
 import numpy as np
 import scipy
@@ -23,22 +23,23 @@ from weatherbenchX import aggregation
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.statistical_inference import base
+from weatherbenchX.statistical_inference import baseline_comparison
+
 import xarray as xr
 
 
 def _check_constant(data_array: xr.DataArray, dim: str, error_suffix: str = ''):
-  try:
-    xr.testing.assert_allclose(
-        *xr.broadcast(
-            data_array.isel({dim: 0}),
-            data_array,
-        ),
-    )
-  except AssertionError as e:
+  if data_array.dtype.kind == 'f':
+    equiv = np.allclose
+  else:
+    equiv = lambda x, y: np.all(x == y)
+  if not equiv(
+      data_array.isel({dim: [0]}).data,
+      data_array.data):
     raise ValueError(
         f'Found non-constant values along dimension {dim} for '
         f'{data_array.name}. {error_suffix}'
-    ) from e
+    )
 
 
 def _check_uniform_step(
@@ -159,8 +160,6 @@ class TTest(base.StatisticalInferenceMethod):
       aggregated_statistics: aggregation.AggregationState,
       experimental_unit_dim: str,
       temporal_autocorrelation: bool,
-      baseline_aggregated_statistics:
-      aggregation.AggregationState | None = None,
       ):
     r"""Initializer.
 
@@ -169,7 +168,7 @@ class TTest(base.StatisticalInferenceMethod):
         inference (compute confidence intervals etc) using this inference
         method. Because the t-test only applies to means, these `Metrics` must
         be instances of `Statistic` (Metrics that are just the mean of a
-        statistic).
+        statistic) or linear functions of the means of multiple Statistics.
       aggregated_statistics: The aggregated statistics to use to compute the
         metric values. See base.StatisticalInferenceMethod docs for more
         details.
@@ -182,21 +181,26 @@ class TTest(base.StatisticalInferenceMethod):
         `experimental_unit_dim`. If so, we apply the autocorrelation inflation
         factor adjustment described in [1] to the t-test. The time coordinate
         along `experimental_unit_dim` must have a uniform timestep.
-      baseline_aggregated_statistics: The aggregated statistics to use to
-        compute the difference in metric values relative to a baseline.
     """
     self._dim = experimental_unit_dim
     self._temporal_autocorrelation = temporal_autocorrelation
 
     for metric in metrics.values():
-      if not isinstance(metric, metrics_base.Statistic):
-        raise TypeError(
-            'The t-test only applies to means, and so this inference method '
-            'can only be used with Metrics which are just the mean of a '
-            'single statistic. You passed a Metric which is not a Statistic: '
-            f'{type(metric)}'
+      if not isinstance(metric, metrics_base.Statistic) and not (
+          isinstance(metric, baseline_comparison.BaselineComparison)
+          and isinstance(metric.metric, metrics_base.Statistic)
+          and isinstance(metric.baseline_metric, metrics_base.Statistic)):
+        # TODO(matthjw): The Metric interface could have a 'is_linear' property
+        # to help with this check, although perhaps a bit of a niche thing to
+        # justify requiring it from metric implementors.
+        logging.warning(
+            'The t-test only applies to means, and so can only be used with '
+            'Metrics which are the mean of a single statistic, or a linear '
+            'function of the means of multiple statistics. We weren\'t able to '
+            'verify that this requirement holds for Metric %s so please check '
+            'this yourself.',
+            type(metric)
         )
-    metrics = cast(Mapping[str, metrics_base.Statistic], metrics)
 
     # We also support only a constant weighting of experimental units, so we
     # can take a mean of the per-unit means without having to apply any
@@ -207,26 +211,11 @@ class TTest(base.StatisticalInferenceMethod):
     # This divides by the constant per-unit sum of weights to get the per-unit
     # means, which we can then take a non-weighted mean of (since weights are
     # constant across units).
-    per_unit_means = aggregated_statistics.mean_statistics()
-    if baseline_aggregated_statistics is not None:
-      # If values are given for a baseline, check their weights are also
-      # constant and subtract the baseline values of the per-unit means.
-      xarray_tree.map_structure(
-          self._check_constant_weights,
-          baseline_aggregated_statistics.sum_weights)
-      baseline_per_unit_means = baseline_aggregated_statistics.mean_statistics()
-      per_unit_means = xarray_tree.map_structure(
-          lambda x, y: x - y, per_unit_means, baseline_per_unit_means)
+    per_unit_means = metrics_base.compute_metrics_from_statistics(
+        metrics, aggregated_statistics.mean_statistics())
 
     self._results = xarray_tree.map_structure(
         self._compute_results, per_unit_means)
-    # Rename from the Statistic.unique_name which the aggregated_statistics
-    # are keyed by, to the metric names used in the supplied `metrics` mapping.
-    # Because the metrics are all instances of Statistic, their value is equal
-    # to the mean of the statistic and we don't need to apply
-    # metric.values_from_mean_statistics here.
-    self._results = {metric_name: self._results[metric.unique_name]
-                     for metric_name, metric in metrics.items()}
 
   def _check_constant_weights(self, weights: xr.DataArray) -> None:
     _check_constant(

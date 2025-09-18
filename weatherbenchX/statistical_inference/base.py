@@ -20,6 +20,7 @@ from typing import final
 from weatherbenchX import aggregation
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
+from weatherbenchX.statistical_inference import baseline_comparison
 import xarray as xr
 
 
@@ -31,10 +32,11 @@ class StatisticalInferenceMethod(abc.ABC):
   """A statistical inference method.
 
   Can compute confidence intervals, p-values and other related quantities
-  for underlying / population values of:
-  * Metrics for a single set of predictions/targets
-  * Differences in Metrics between two aligned datasets of predictions/targets.
-    This can be used to test for significance of differences from a baseline.
+  for underlying / population values of Metrics.
+
+  Can also be used to compute confidence intervals for differences of Metrics
+  between two models, and p-values for paired-differences significance tests,
+  via the `for_baseline_comparison` classmethod.
   """
 
   @abc.abstractmethod
@@ -42,8 +44,6 @@ class StatisticalInferenceMethod(abc.ABC):
       self,
       metrics: Mapping[str, base.Metric],
       aggregated_statistics: aggregation.AggregationState,
-      baseline_aggregated_statistics:
-      aggregation.AggregationState | None = None,
       ):
     """Initializer.
 
@@ -73,12 +73,46 @@ class StatisticalInferenceMethod(abc.ABC):
         of this interface will require you to specify what these dimension(s)
         are and what properties hold for them (e.g. can data points be assumed
         independent, are they temporally dependent etc).
-      baseline_aggregated_statistics: The aggregated statistics to use to
-        compute the difference in metric values relative to a baseline. If
-        specified, confidence intervals, p-values etc will be
-        computed for the difference in metric values between the two sets of
-        aggregated statistics.
     """
+
+  @classmethod
+  def for_baseline_comparison(
+      cls,
+      metrics: Mapping[str, base.Metric],
+      aggregated_statistics: aggregation.AggregationState,
+      baseline_aggregated_statistics: aggregation.AggregationState,
+      baseline_metrics: Mapping[str, base.Metric] | None = None,
+      comparison: baseline_comparison.Comparison = baseline_comparison.difference,
+      **init_kwargs
+  ):
+    """StatisticalInferenceMethod for a baseline comparison / paired test.
+
+    Args:
+      metrics: The Metrics whose values we are comparing to a baseline.
+      aggregated_statistics: The aggregated statistics to use to compute the
+        metric values for the main model.
+      baseline_aggregated_statistics: The aggregated statistics to use to
+        compute the metric values for the baseline model. These should align
+        with `aggregated_statistics` along any dimensions that are treated as
+        part of a random sample by the inference method, so that the paired
+        test makes sense.
+      baseline_metrics: The Metrics used to compute equivalent values for the
+        baseline, under the same keys as `metrics`. If None, we assume the exact
+        same Metrics are used in both cases. In general it can be different,
+        e.g. if the same metric needs to be computed differently for the main vs
+        baseline models, although of course if you want a fair apples-to-apples
+        comparison then you will need to be careful about this.
+      comparison: A function that takes the results of the two metrics and
+        returns some comparison of them, defaulting to a difference.
+      **init_kwargs: Passed on to __init__.
+    """
+    return cls(
+        metrics=baseline_comparison.for_metrics(
+            metrics, baseline_metrics, comparison),
+        aggregated_statistics=baseline_comparison.combine_aggregation_states(
+            aggregated_statistics, baseline_aggregated_statistics),
+        **init_kwargs
+    )
 
   @abc.abstractmethod
   def point_estimates(self) -> MetricValues:

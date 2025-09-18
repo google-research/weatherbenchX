@@ -97,6 +97,74 @@ class TTestTest(absltest.TestCase):
       type_1_error_probability = significance.mean("replicates").data
       np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
 
+  def test_t_test_with_baseline_comparison(self):
+    # Here we test the t-test for a baseline comparison (i.e. a paired
+    # t-test). We check that we see the coverage probabilities equal to the
+    # specified coverage level alpha for the confidence interval, even for small
+    # sample sizes. We check this by computing CIs using many replicates of the
+    # data.
+    np.random.seed(0)
+    true_mean_diff = 0
+    sample_size = 10
+    replicates = 100000
+
+    # We use data from a baseline model, and from a main model, where the
+    # per-sample errors are correlated.
+    baseline_data = np.random.randn(sample_size, replicates)
+    baseline_data = xr.DataArray(
+        data=baseline_data, dims=("samples", "replicates")
+    )
+    main_data = (
+        baseline_data
+        + np.random.randn(sample_size, replicates) * 0.5
+        + true_mean_diff
+    )
+    main_data = xr.DataArray(data=main_data, dims=("samples", "replicates"))
+
+    # We go through a bit of boilerplate to dress this data up as a metric and
+    # do a no-op aggregation to get an AggregationState which we can use with
+    # the statistical inference method. In more realistic situations we would be
+    # using partially-aggregated values of some real weather metric here.
+    metrics = {"metric": PredictionsPassthrough()}
+    aggregator = aggregation.Aggregator(reduce_dims=())
+
+    baseline_stats = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics=metrics,
+        predictions={"variable": baseline_data},
+        targets={},
+    )
+    baseline_aggregated_stats = aggregator.aggregate_statistics(baseline_stats)
+    main_stats = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics=metrics,
+        predictions={"variable": main_data},
+        targets={},
+    )
+    main_aggregated_stats = aggregator.aggregate_statistics(main_stats)
+
+    statistical_inference_method = t_test.TTest.for_baseline_comparison(
+        metrics=metrics,
+        aggregated_statistics=main_aggregated_stats,
+        baseline_aggregated_statistics=baseline_aggregated_stats,
+        experimental_unit_dim="samples",
+        temporal_autocorrelation=False,
+    )
+    for alpha in [0.2, 0.1, 0.05]:
+      lower, upper = statistical_inference_method.confidence_intervals(alpha)
+      lower = lower["metric"]["variable"]
+      upper = upper["metric"]["variable"]
+      coverage_probability = (
+          ((lower <= true_mean_diff) & (true_mean_diff <= upper))
+          .mean("replicates")
+          .data
+      )
+      np.testing.assert_allclose(coverage_probability, 1 - alpha, rtol=0.01)
+
+      significance = statistical_inference_method.significance_tests(
+          null_value=true_mean_diff, alpha=alpha
+      )["metric"]["variable"]
+      type_1_error_probability = significance.mean("replicates").data
+      np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
+
   def test_t_test_with_ar2_correction(self):
     # We'll compute confidence intervals for the mean of many different
     # AR(2) processes all drawn from the same distribution. We'll check the true
