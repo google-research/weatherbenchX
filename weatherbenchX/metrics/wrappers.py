@@ -268,7 +268,6 @@ def compute_cdf(
     # correctly.
     threshold_values = np.array(threshold_values)
     # Convert to DataArray
-    print(f'threshold_values: {threshold_values}')
     thresholds = xr.DataArray(
         threshold_values,
         dims=[threshold_dim],
