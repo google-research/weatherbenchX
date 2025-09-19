@@ -151,6 +151,37 @@ class BinningTest(parameterized.TestCase):
         mask['prediction_timedelta_sec_hour'], np.arange(0, 6)
     )
 
+  @parameterized.parameters(
+      ('second', None, np.arange(0, 60)),
+      ('second', [0, 15, 30, 45], [0, 15, 30, 45]),
+      ('minute', None, np.arange(0, 60)),
+      ('minute', [0, 30], [0, 30]),
+      ('hour', None, np.arange(0, 24)),
+      ('hour', [0, 6, 12, 18], [0, 6, 12, 18]),
+  )
+  def test_by_time_unit_from_seconds_binning_with_units(
+      self, unit, bins, expected_bins
+  ):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-01T01',
+        time_resolution='1 hr',
+        lead_resolution='1 second',
+        lead_stop='24 hour',
+    )['2m_temperature']
+    statistic_values = statistic_values.assign_coords({
+        'prediction_timedelta_sec': (
+            statistic_values.prediction_timedelta.dt.total_seconds()
+        )
+    })
+    binning_obj = binning.ByTimeUnitFromSeconds(
+        unit, 'prediction_timedelta_sec', bins=bins
+    )
+    mask = binning_obj.create_bin_mask(statistic_values)
+    np.testing.assert_array_equal(
+        mask[f'prediction_timedelta_sec_{unit}'].values, expected_bins
+    )
+
   def test_by_coord_bins(self):
     target_path = resources.files('weatherbenchX').joinpath(
         'test_data/metar-timeNominal-by-month'
@@ -221,6 +252,67 @@ class BinningTest(parameterized.TestCase):
     self.assertEqual(mask.sum('index').sel(station_subset='empty_set'), 0)
     self.assertEqual(mask.sum('index').sel(station_subset='wrong_set'), 0)
     self.assertLen(statistic, mask.sum('index').sel(station_subset='global'))
+
+  @parameterized.parameters(
+      (10, (-90, 90), 18),
+      (30, (-90, 90), 6),
+      (20, (0, 60), 3),
+  )
+  def test_latitude_bins(self, degrees, lat_range, expected_bins):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00', time_stop='2020-01-01T01'
+    )['2m_temperature']
+    binning_obj = binning.LatitudeBins(degrees, lat_range)
+    mask = binning_obj.create_bin_mask(statistic_values)
+    self.assertEqual(mask.latitude_bins.shape[0], expected_bins)
+    self.assertTrue(np.all(mask.latitude_bins.values >= lat_range[0]))
+    self.assertTrue(np.all(mask.latitude_bins.values < lat_range[1]))
+    self.assertEqual(mask.shape, (expected_bins,) + statistic_values.shape)
+    # Check that a point is in the correct bin
+    # Find the latitude closest to 25
+    lat_val = 25
+    if not (lat_range[0] <= lat_val < lat_range[1]):
+      # If 25 is not in range, pick a value that is.
+      lat_val = (lat_range[0] + lat_range[1]) / 2
+    lat_idx = np.argmin(np.abs(statistic_values.latitude.values - lat_val))
+    lon_idx = np.argmin(np.abs(statistic_values.longitude.values - 0))
+
+    # Find the bin that contains the selected latitude
+    expected_bin_idx = (statistic_values.latitude.values[lat_idx] - lat_range[0]) // degrees
+    self.assertTrue(
+        mask.isel(latitude_bins=int(expected_bin_idx), latitude=lat_idx, longitude=lon_idx).values.all()
+    )
+
+  @parameterized.parameters(
+      (10, (0, 360), 36, 10),
+      (30, (0, 360), 12, 150),
+      (60, (-180, 180), 6, 0),
+      (90, (270, 360), 1, 300),
+  )
+  def test_longitude_bins(self, degrees, lon_range, expected_bins, test_lon):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00', time_stop='2020-01-01T01'
+    )['2m_temperature']
+    binning_obj = binning.LongitudeBins(degrees, lon_range)
+    mask = binning_obj.create_bin_mask(statistic_values)
+    self.assertEqual(mask.longitude_bins.shape[0], expected_bins)
+    self.assertEqual(mask.shape, (expected_bins,) + statistic_values.shape)
+    # Check wrapping
+    if lon_range == (-180, 180):
+      self.assertTrue(0 in mask.longitude_bins.values)
+
+    # Find the longitude closest to test_lon
+    lon_idx = np.argmin(np.abs(statistic_values.longitude.values - test_lon))
+    lat_idx = np.argmin(np.abs(statistic_values.latitude.values - 0))
+    lon_val = statistic_values.longitude.values[lon_idx]
+
+    # Calculate expected bin index: (lon_val - lon_range[0]) // degrees
+    # This works even with wrapping ranges because lon_bins is constructed correctly.
+    expected_bin_idx = (lon_val - lon_range[0]) // degrees
+
+    self.assertTrue(
+        mask.isel(longitude_bins=int(expected_bin_idx), latitude=lat_idx, longitude=lon_idx).values.all()
+    )
 
 
 if __name__ == '__main__':
