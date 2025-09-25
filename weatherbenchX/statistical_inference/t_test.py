@@ -116,9 +116,9 @@ class TTest(base.StatisticalInferenceMethod):
   r"""t-test for evaluation metrics, with optional autocorrelation adjustment.
 
   The t-test is used to test hypotheses about (and provide confidence intervals
-  for) means / differences of means, and so this only applies to `Statistic`s,
-  which represent the mean of a single statistic, and not to other more general
-  `Metric`s.
+  for) means / differences of means, and so this only applies to Metrics which
+  are the mean of a single Statistic, or a linear function of the means of
+  multiple Statistics.
 
   The main assumptions of the standard t-test are:
 

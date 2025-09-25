@@ -15,7 +15,7 @@
 
 import collections
 import dataclasses
-from typing import Any, Collection, Hashable, Mapping, Sequence
+from typing import Any, Callable, Collection, Hashable, Mapping, Sequence
 
 from weatherbenchX import binning
 from weatherbenchX import weighting
@@ -164,14 +164,26 @@ class AggregationState:
     if self.sum_weighted_statistics is None:
       # Further reduction of a generic zero state is also a zero state.
       return self
+    else:
+      return self.map(lambda x: x.sum(dims, skipna=False))
+
+  def dot(
+      self, *arrays: xr.DataArray, dim: Hashable | Sequence[Hashable]
+      ) -> 'AggregationState':
+    """Dot product of all stats with other arrays, over the given dimensions."""
+    return self.map(lambda x: xr.dot(x, *arrays, dim=dim))
+
+  def map(
+      self,
+      func: Callable[[xr.DataArray], xr.DataArray],
+  ) -> 'AggregationState':
+    """Apply a function to all DataArrays in the AggregationState."""
+    if self.sum_weighted_statistics is None:
+      raise ValueError('Cannot map a zero AggregationState.')
     sum_weighted_statistics = xarray_tree.map_structure(
-        lambda x: x.sum(dims, skipna=False),
-        self.sum_weighted_statistics,
-    )
+        func, self.sum_weighted_statistics)
     sum_weights = xarray_tree.map_structure(
-        lambda x: x.sum(dims, skipna=False),
-        self.sum_weights,
-    )
+        func, self.sum_weights)
     return AggregationState(sum_weighted_statistics, sum_weights)
 
   def to_data_tree(self) -> xr.DataTree:
@@ -306,7 +318,7 @@ class Aggregator:
     # Some downstream code relies on attrs on statistics being preserved, which
     # xr.dot will not do by default.
     with xr.set_options(keep_attrs=True):
-      return xr.dot(stat, *weights, *bin_masks, dims=reduce_dims_set)
+      return xr.dot(stat, *weights, *bin_masks, dim=reduce_dims_set)
 
   def aggregate_stat_var(self, stat: xr.DataArray) -> AggregationState | None:
     """Aggregate one statistic DataArray for one variable."""
