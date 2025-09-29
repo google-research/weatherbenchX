@@ -15,10 +15,11 @@
 
 from collections.abc import Hashable
 import dataclasses
-import logging
+import time
 import typing
 from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
 
+from absl import logging
 import apache_beam as beam
 import numpy as np
 from weatherbenchX import aggregation
@@ -50,6 +51,12 @@ class LoadPredictionsAndTargets(beam.DoFn):
     self.targets_loader = targets_loader
     self.setup_fn = setup_fn
     self.is_initialized = False
+    self.target_load_time = beam.metrics.Metrics.distribution(
+        'LoadPredictionsAndTargets', 'target_load_time'
+    )
+    self.prediction_load_time = beam.metrics.Metrics.distribution(
+        'LoadPredictionsAndTargets', 'prediction_load_time'
+    )
 
   def setup(self):
     # Call this function once per process.
@@ -59,8 +66,11 @@ class LoadPredictionsAndTargets(beam.DoFn):
         self.is_initialized = True
 
   def process(
-      self, all_inputs: tuple[time_chunks.TimeChunkOffsets,
-                              tuple[np.ndarray, Union[np.ndarray, slice]]]
+      self,
+      all_inputs: tuple[
+          time_chunks.TimeChunkOffsets,
+          tuple[np.ndarray, Union[np.ndarray, slice]],
+      ],
   ) -> Iterable[
       tuple[
           time_chunks.TimeChunkOffsets,
@@ -77,14 +87,29 @@ class LoadPredictionsAndTargets(beam.DoFn):
     Returns:
       (time_chunk_offsets, (predictions_chunk, targets_chunk))
     """
-    logging.debug('LoadPredictionsAndTargets inputs: %s', all_inputs)
+    logging.log_first_n(
+        logging.INFO, 'LoadPredictionsAndTargets inputs: %s', 10, all_inputs
+    )
     time_chunk_offsets, (init_times, lead_times) = all_inputs
+
+    start_time = time.time()
     targets_chunk = self.targets_loader.load_chunk(init_times, lead_times)
+    self.target_load_time.update(
+        (time.time() - start_time) * 1000
+    )  # In milliseconds because beam counters use longs.
+
+    start_time = time.time()
     predictions_chunk = self.predictions_loader.load_chunk(
         init_times, lead_times, targets_chunk
     )
-    logging.debug(
+    self.prediction_load_time.update(
+        (time.time() - start_time) * 1000
+    )  # In milliseconds because beam counters use longs.
+
+    logging.log_first_n(
+        logging.INFO,
         'LoadPredictionsAndTargets outputs: %s',
+        10,
         (time_chunk_offsets, (predictions_chunk, targets_chunk)),
     )
     return [(time_chunk_offsets, (predictions_chunk, targets_chunk))]
@@ -95,6 +120,7 @@ class LoadPredictionsAndTargets(beam.DoFn):
 @dataclasses.dataclass(frozen=True)
 class _AggregationKey:
   """Key under which statistics are aggregated (summed or combine_by_coords)."""
+
   type: Literal['sum_weighted_statistics', 'sum_weights']
   statistic_name: str
   variable_name: str
@@ -105,7 +131,8 @@ class _AggregationKey:
 
   def drop_offsets(self) -> '_AggregationKey':
     return dataclasses.replace(
-        self, init_time_offset=None, lead_time_offset=None)
+        self, init_time_offset=None, lead_time_offset=None
+    )
 
 
 class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
@@ -144,42 +171,73 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
       Multiple key/value pairs (aggregation_key, data_array), where the
       aggregation_key identifying the scope for further aggregation.
     """
-    logging.debug('ComputeStatisticsAggregateAndPrepareForCombine inputs: %s',
-                  all_inputs)
+    logging.log_first_n(
+        logging.INFO,
+        'ComputeStatisticsAggregateAndPrepareForCombine inputs: %s',
+        10,
+        all_inputs,
+    )
     time_chunk_offsets, (predictions_chunk, targets_chunk) = all_inputs
-    for stat_name, stats in (
-        metrics_base.generate_unique_statistics_for_all_metrics(
-            self.metrics, predictions_chunk, targets_chunk)):
-      # We use a generator above and yield one at a time, to avoid holding all
-      # statistics in memory all at once in case of large statistics.
-      for var_name, stat in stats.items():
-        aggregation_state = self.aggregator.aggregate_stat_var(stat)
-        if aggregation_state is None:
-          continue
-        if 'init_time' in aggregation_state.sum_weighted_statistics.dims:
-          init_time_offset = time_chunk_offsets.init_time
-        else:
-          init_time_offset = None
-        if 'lead_time' in aggregation_state.sum_weighted_statistics.dims:
-          lead_time_offset = time_chunk_offsets.lead_time
-        else:
-          lead_time_offset = None
-        aggregation_key = _AggregationKey(
-            type='sum_weighted_statistics',
-            statistic_name=stat_name,
-            variable_name=str(var_name),
-            init_time_offset=init_time_offset,
-            lead_time_offset=lead_time_offset,
+
+    # We use a generator below and yield one at a time, to avoid holding all
+    # unaggregated statistics in memory all at once in case of large statistics.
+    stats_iter = metrics_base.generate_unique_statistics_for_all_metrics(
+        self.metrics, predictions_chunk, targets_chunk
+    )
+
+    while True:
+      try:
+        # Compute stats.
+        start_time = time.time()
+        stat_name, stats = next(stats_iter)
+
+        # Create a short name so that it's more readable in dashboards.
+        short_stat_name = (
+            stat_name[:30] + '...' if len(stat_name) > 30 else stat_name
         )
-        yield aggregation_key, aggregation_state.sum_weighted_statistics
-        aggregation_key = _AggregationKey(
-            type='sum_weights',
-            statistic_name=stat_name,
-            variable_name=str(var_name),
-            init_time_offset=init_time_offset,
-            lead_time_offset=lead_time_offset,
-        )
-        yield aggregation_key, aggregation_state.sum_weights
+
+        beam.metrics.Metrics.distribution(
+            'ComputeStatistics', f'compute_{short_stat_name}'
+        ).update(
+            (time.time() - start_time) * 1000
+        )  # In milliseconds because beam counters use longs.
+
+        for var_name, stat in stats.items():
+          start_time = time.time()
+          aggregation_state = self.aggregator.aggregate_stat_var(stat)
+          if aggregation_state is None:
+            continue
+          beam.metrics.Metrics.distribution(
+              'ComputeStatistics', f'agg_{var_name}_{short_stat_name}'
+          ).update(
+              (time.time() - start_time) * 1000
+          )  # In milliseconds because beam counters use longs.
+          if 'init_time' in aggregation_state.sum_weighted_statistics.dims:
+            init_time_offset = time_chunk_offsets.init_time
+          else:
+            init_time_offset = None
+          if 'lead_time' in aggregation_state.sum_weighted_statistics.dims:
+            lead_time_offset = time_chunk_offsets.lead_time
+          else:
+            lead_time_offset = None
+          aggregation_key = _AggregationKey(
+              type='sum_weighted_statistics',
+              statistic_name=stat_name,
+              variable_name=str(var_name),
+              init_time_offset=init_time_offset,
+              lead_time_offset=lead_time_offset,
+          )
+          yield aggregation_key, aggregation_state.sum_weighted_statistics
+          aggregation_key = _AggregationKey(
+              type='sum_weights',
+              statistic_name=stat_name,
+              variable_name=str(var_name),
+              init_time_offset=init_time_offset,
+              lead_time_offset=lead_time_offset,
+          )
+          yield aggregation_key, aggregation_state.sum_weights
+      except StopIteration:
+        break
 
 
 class ConcatPerStatisticPerVariable(beam.PTransform):
@@ -191,7 +249,8 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
   """
 
   def expand(
-      self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]):
+      self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]
+  ):
 
     def drop_offsets_from_key(
         key: _AggregationKey, data_array: xr.DataArray
@@ -224,20 +283,19 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
         # Drop the chunk offsets from the key, so that we group by statistic
         # name, variable name and type (sum_weighted_statistics or sum_weights)
         # alone.
-        | 'DropOffsetsFromKey'
-        >> beam.MapTuple(drop_offsets_from_key)
+        | 'DropOffsetsFromKey' >> beam.MapTuple(drop_offsets_from_key)
         # We use GroupByKey instead of CombinePerKey because the data all needs
         # to be in memory at once to concatenate it, there is no saving from
         # doing this incrementally via a CombineFn.
-        | 'GroupByStatAndVariable'
-        >> beam.GroupByKey()
+        | 'GroupByStatAndVariable' >> beam.GroupByKey()
         | 'CombineDataArraysByCoords'
-        >> beam.MapTuple(combine_data_arrays_by_coords))
+        >> beam.MapTuple(combine_data_arrays_by_coords)
+    )
 
 
 def reconstruct_aggregation_state(
-    key_value_pairs: Iterable[tuple[_AggregationKey, xr.DataArray]]
-    ) -> aggregation.AggregationState:
+    key_value_pairs: Iterable[tuple[_AggregationKey, xr.DataArray]],
+) -> aggregation.AggregationState:
   """Reconstructs an AggregationState from (_AggregationKey, DataArray) pairs.
 
   Args:
@@ -272,9 +330,7 @@ class ReconstructAggregationState(beam.PTransform):
       self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]
   ) -> beam.PCollection[aggregation.AggregationState]:
     return (
-        pcoll
-        | beam_utils.GroupAll()
-        | beam.Map(reconstruct_aggregation_state)
+        pcoll | beam_utils.GroupAll() | beam.Map(reconstruct_aggregation_state)
     )
 
 
@@ -288,7 +344,9 @@ class ComputeMetrics(beam.DoFn):
       self, aggregation_state: aggregation.AggregationState
   ) -> Iterable[xr.Dataset]:
     """Computes a metrics Dataset from the final AggregationState."""
-    logging.debug('ComputeMetrics inputs: %s', aggregation_state)
+    logging.log_first_n(
+        logging.INFO, 'ComputeMetrics inputs: %s', 10, aggregation_state
+    )
     return [aggregation_state.metric_values(self.metrics)]
 
 
@@ -299,7 +357,7 @@ class WriteMetrics(beam.DoFn):
     self.out_path = out_path
 
   def process(self, metrics: xr.Dataset) -> Iterable[Never]:
-    logging.debug('WriteMetrics inputs: %s', metrics)
+    logging.log_first_n(logging.INFO, 'WriteMetrics inputs: %s', 10, metrics)
     beam_utils.atomic_write(
         self.out_path,
         metrics.to_netcdf(),
@@ -314,7 +372,8 @@ class WriteAggregationState(beam.DoFn):
     self.out_path = out_path
 
   def process(
-      self, aggregation_state: aggregation.AggregationState) -> Iterable[Never]:
+      self, aggregation_state: aggregation.AggregationState
+  ) -> Iterable[Never]:
     beam_utils.atomic_write(
         self.out_path,
         aggregation_state.to_dataset().to_netcdf(),
@@ -345,8 +404,8 @@ def define_pipeline(
     out_path: The full path to write the metrics to.
     aggregation_state_out_path: The full path to write the final aggregation
       state to. This can be useful if you want to compute further metrics from
-      it later, and if you are preserving init_time, it can be useful to
-      compute confidence intervals from later too.
+      it later, and if you are preserving init_time, it can be useful to compute
+      confidence intervals from later too.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
   """
@@ -364,8 +423,9 @@ def define_pipeline(
       # aggregation by breaking the AggregationState up into separate
       # DataArrays for each statistic, variable, type (sum_weights or
       # sum_weighted_statistics) and chunk offset.
-      | beam.ParDo(ComputeStatisticsAggregateAndPrepareForCombine(
-          metrics, aggregator))
+      | beam.ParDo(
+          ComputeStatisticsAggregateAndPrepareForCombine(metrics, aggregator)
+      )
       # Sum up the statistic DataArrays over dimensions of the TimeChunks that
       # we are reducing over, typically just init_time but can also be
       # lead_time. This is done separately for each statistic, each variable,
@@ -397,9 +457,8 @@ def define_pipeline(
     )
 
   if aggregation_state_out_path is not None:
-    _ = (
-        agg_state_pipeline
-        | beam.ParDo(WriteAggregationState(aggregation_state_out_path))
+    _ = agg_state_pipeline | beam.ParDo(
+        WriteAggregationState(aggregation_state_out_path)
     )
 
 
