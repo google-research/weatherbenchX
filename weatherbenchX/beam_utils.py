@@ -13,40 +13,35 @@
 # limitations under the License.
 r"""Beam-specific utils for beam pipelines."""
 
-from collections.abc import Iterable
 import contextlib
 import os
 import uuid
 
 import apache_beam as beam
 import fsspec
-from weatherbenchX import aggregation
-import xarray as xr
 
 
-_Accumulator = xr.DataArray | None
+class Sum(beam.transforms.CombineFn):
+  """CombineFn which always sums one element at a time.
 
+  This is logically equivalent to passing `sum` to e.g. `beam.CombinePerKey`,
+  but avoids bringing too many elements into memory before summing.
+  (Beam uses a buffer size of 10 when wrapping a callable like `sum` as a
+  CombineFn).
 
-class CombiningSum(beam.transforms.CombineFn):
-  """CombineFn for DataArrays, wrapping aggregation.combining_sum."""
+  It also assumes '0' is OK to use as the additive identity for the sum.
+  """
 
-  def create_accumulator(self) -> _Accumulator:
-    return None
+  def create_accumulator(self):
+    return 0
 
-  def add_input(
-      self, accumulator: _Accumulator, element: xr.DataArray
-  ) -> _Accumulator:
-    if accumulator is None:
-      return element
-    else:
-      return aggregation.combining_sum([accumulator, element])
+  def add_input(self, accumulator, element):
+    return accumulator + element
 
-  def merge_accumulators(
-      self, accumulators: Iterable[_Accumulator]) -> _Accumulator:
-    accumulators = [a for a in accumulators if a is not None]
-    return aggregation.combining_sum(accumulators) if accumulators else None
+  def merge_accumulators(self, accumulators):
+    return sum(accumulators, start=0)
 
-  def extract_output(self, accumulator: _Accumulator) -> _Accumulator:
+  def extract_output(self, accumulator):
     return accumulator
 
 

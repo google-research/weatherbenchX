@@ -358,10 +358,10 @@ def define_pipeline(
       # and each chunk offset along dimensions not being reduced over (e.g.
       # typically lead_time is not reduced over)
       | 'SumPerStatisticPerVariableAndPerUnreducedOffset'
-      >> beam.CombinePerKey(beam_utils.CombiningSum())
+      >> beam.CombinePerKey(beam_utils.Sum())
       # Now we've reduced the size of the data as much as we can by summing,
-      # we concatenate the resulting chunks along any remaining dimensions where
-      # we know that coordinates will not overlap across chunks.
+      # we concatenate the resulting chunks along any dimensions that we are not
+      # summing over (e.g. concatenating lead_time chunks)
       | ConcatPerStatisticPerVariable()
       # Finally we gather together all the concatenated chunks for all
       # statistics and variables and reconstitute the full AggregationState
