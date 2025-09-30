@@ -24,6 +24,35 @@ from weatherbenchX.metrics import base as metrics_base
 import xarray as xr
 
 
+def combining_sum(data_arrays: Sequence[xr.DataArray]) -> xr.DataArray:
+  """Sum of DataArrays, with zero-filled outer join for non-aligned coordinates.
+
+  Outer join means that no coordinates will be dropped during the sum, like they
+  would be under the default inner join behavior for arithmetic ops. This is
+  important when dealing with sparse data for which coordinates may not be
+  exactly the same for each chunk.
+
+  Zero-filling makes sense here as zero is the identity for addition; the
+  NaN-filling behaviour of arithmetic_join='outer' doesn't work here and we
+  can't replace NaNs with zero afterwards as the NaNs propagate in the sum.
+
+  If your DataArrays have non-overlapping coordinates, this will have the effect
+  of combining or concatenating them, similarly to `xr.combine_by_coords`,
+  but will be inefficient and memory-hungry since it will zero-fill every input
+  to the size of the full result before summing them, which is quadratic in the
+  number of arrays being combined in the non-overlapping case. Please prefer to
+  use a more a more tailored approach like `xr.combine_by_coords` in cases like
+  this, an example of this is in beam_pipeline.py.
+
+  Args:
+    data_arrays: Sequence of DataArrays to sum.
+
+  Returns:
+    The results as a DataArray.
+  """
+  return sum(xr.align(*data_arrays, join='outer', fill_value=0))
+
+
 @dataclasses.dataclass
 class AggregationState:
   """An object that contains a sum of weighted statistics and a sum of weights.
@@ -67,7 +96,7 @@ class AggregationState:
 
     # Sum over each element in the nested dictionaries
     sum_weighted_statistics, sum_weights = xarray_tree.map_structure(
-        lambda *a: sum(a),
+        lambda *a: combining_sum(a),
         *sum_weighted_statistics_and_sum_weights_tuples,
     )
 
