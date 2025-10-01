@@ -166,6 +166,42 @@ class MetricsTest(parameterized.TestCase):
         ['test'],
     )
 
+  def test_far(self):
+    ds = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        variables_2d=['total_precipitation_1hr'],
+        variables_3d=[],
+    )
+    metrics = {'far': categorical.FalseAlarmRate()}
+
+    # 1. Only True Negatives, should be NaN
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'far', ds, ds))
+    )
+
+    # 2. Only True Positives, should be 0
+    tmp = ds.copy(deep=True) + 1
+    self.assertEqual(compute_precipitation_metric(metrics, 'far', tmp, tmp), 0)
+
+    # 3. Only False Positives, should be 1
+    self.assertEqual(compute_precipitation_metric(metrics, 'far', tmp, ds), 1)
+
+    # 4. Half False Positives, should be 0.5
+    tmp2 = ds.copy(deep=True)
+    # Time dimension is size 2 in position 1.
+    tmp2['total_precipitation_1hr'][{'time': 0}] = 1
+    self.assertEqual(
+        compute_precipitation_metric(metrics, 'far', tmp, tmp2), 0.5
+    )
+
+    # 5. Input NaNs should result in NaN
+    tmp = ds.copy(deep=True) + 1
+    tmp['total_precipitation_1hr'][{'time': 0}] = np.nan
+    self.assertTrue(
+        np.isnan(compute_precipitation_metric(metrics, 'far', ds, tmp))
+    )
+
   def test_csi(self):
     ds = test_utils.mock_prediction_data(
         time_start='2020-01-01T00',
