@@ -13,42 +13,9 @@
 # limitations under the License.
 from absl.testing import absltest
 import numpy as np
-from weatherbenchX import aggregation
-from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.statistical_inference import t_test
+from weatherbenchX.statistical_inference import test_utils
 import xarray as xr
-
-
-class PredictionsPassthrough(metrics_base.Statistic):
-  def compute(self, predictions, targets):
-    return predictions
-
-
-def simulate_ar2(mean, sigma, phi1, phi2, steps=10, replicates=1000):
-  """Simulates a stationary AR(2) process with the given parameters."""
-  # https://rf.mokslasplius.lt/stationary-variance-of-ar-2-process/
-  denom = (1 + phi2) * (1 - phi1**2 + phi2**2 - 2*phi2)
-  gamma_0 = sigma**2 * (1 - phi2) / denom  # Stationary variance.
-  gamma_1 = sigma**2 * phi1 / denom  # Lag-1 covariance.
-  rho_1 = gamma_1 / gamma_0  # Lag-1 correlation.
-  # Sample initial values (y_0, y_1) from the stationary distribution over
-  # consecutive pairs, which is Normal with covariance:
-  # [[gamma_0, gamma_1],
-  #  [gamma_1, gamma_0]]
-  # Because we do this, no warm-up is needed to reach the stationary
-  # distribution and start generating samples from it.
-  x_0 = np.random.randn(replicates)
-  y_0 = np.sqrt(gamma_0) * x_0
-  x_1 = np.random.randn(replicates)
-  y_1 = np.sqrt(gamma_0) * (rho_1 * x_0 + np.sqrt(1 - rho_1**2) * x_1)
-  results = [y_0, y_1]
-  # Now just need to simulate from the AR(2) process following its definition:
-  for _ in range(steps-2):
-    y_nm2, y_nm1 = results[-2], results[-1]
-    x_n = np.random.randn(replicates)
-    y_n = phi1 * y_nm1 + phi2 * y_nm2 + x_n * sigma
-    results.append(y_n)
-  return np.stack(results, axis=0) + mean
 
 
 class TTestTest(absltest.TestCase):
@@ -65,35 +32,23 @@ class TTestTest(absltest.TestCase):
     data = np.random.randn(sample_size, replicates) + true_mean
     data = xr.DataArray(data=data, dims=("samples", "replicates"))
 
-    # We go through a bit of boilerplate to dress this data up as a metric and
-    # do a no-op aggregation to get an AggregationState which we can use with
-    # the statistical inference method. In more realistic situations we would be
-    # using partially-aggregated values of some real weather metric here.
-    metrics = {"metric": PredictionsPassthrough()}
-    stats = metrics_base.compute_unique_statistics_for_all_metrics(
-        metrics=metrics,
-        predictions={"variable": data},
-        targets={},
-    )
-    aggregator = aggregation.Aggregator(reduce_dims=())
-    aggregated_stats = aggregator.aggregate_statistics(stats)
-
+    metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
     statistical_inference_method = t_test.TTest(
-        metrics={"metric": PredictionsPassthrough()},
+        metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="samples",
         temporal_autocorrelation=False,
     )
     for alpha in [0.2, 0.1, 0.05]:
       lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["metric"]["variable"]
-      upper = upper["metric"]["variable"]
+      lower = lower["mean"]["variable"]
+      upper = upper["mean"]["variable"]
       coverage_probability = (
           (lower <= true_mean) & (true_mean <= upper)).mean("replicates").data
       np.testing.assert_allclose(coverage_probability, 1-alpha, rtol=0.01)
 
       significance = statistical_inference_method.significance_tests(
-          null_value=true_mean, alpha=alpha)["metric"]["variable"]
+          null_value=true_mean, alpha=alpha)["mean"]["variable"]
       type_1_error_probability = significance.mean("replicates").data
       np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
 
@@ -114,32 +69,17 @@ class TTestTest(absltest.TestCase):
     baseline_data = xr.DataArray(
         data=baseline_data, dims=("samples", "replicates")
     )
+    (metrics, baseline_aggregated_stats
+     ) = test_utils.metrics_and_agg_state_for_mean(baseline_data)
+
     main_data = (
         baseline_data
         + np.random.randn(sample_size, replicates) * 0.5
         + true_mean_diff
     )
     main_data = xr.DataArray(data=main_data, dims=("samples", "replicates"))
-
-    # We go through a bit of boilerplate to dress this data up as a metric and
-    # do a no-op aggregation to get an AggregationState which we can use with
-    # the statistical inference method. In more realistic situations we would be
-    # using partially-aggregated values of some real weather metric here.
-    metrics = {"metric": PredictionsPassthrough()}
-    aggregator = aggregation.Aggregator(reduce_dims=())
-
-    baseline_stats = metrics_base.compute_unique_statistics_for_all_metrics(
-        metrics=metrics,
-        predictions={"variable": baseline_data},
-        targets={},
-    )
-    baseline_aggregated_stats = aggregator.aggregate_statistics(baseline_stats)
-    main_stats = metrics_base.compute_unique_statistics_for_all_metrics(
-        metrics=metrics,
-        predictions={"variable": main_data},
-        targets={},
-    )
-    main_aggregated_stats = aggregator.aggregate_statistics(main_stats)
+    (_, main_aggregated_stats
+     ) = test_utils.metrics_and_agg_state_for_mean(main_data)
 
     statistical_inference_method = t_test.TTest.for_baseline_comparison(
         metrics=metrics,
@@ -150,8 +90,8 @@ class TTestTest(absltest.TestCase):
     )
     for alpha in [0.2, 0.1, 0.05]:
       lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["metric"]["variable"]
-      upper = upper["metric"]["variable"]
+      lower = lower["mean"]["variable"]
+      upper = upper["mean"]["variable"]
       coverage_probability = (
           ((lower <= true_mean_diff) & (true_mean_diff <= upper))
           .mean("replicates")
@@ -161,7 +101,7 @@ class TTestTest(absltest.TestCase):
 
       significance = statistical_inference_method.significance_tests(
           null_value=true_mean_diff, alpha=alpha
-      )["metric"]["variable"]
+      )["mean"]["variable"]
       type_1_error_probability = significance.mean("replicates").data
       np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
 
@@ -171,7 +111,7 @@ class TTestTest(absltest.TestCase):
     # mean lies within the 95% CI approximately 95% of the time.
     np.random.seed(0)
     true_mean = 10.
-    data = simulate_ar2(
+    data = test_utils.simulate_ar2(
         mean=true_mean,
         sigma=0.1,
         # This is a decent amount of autocorrelation, but not extreme,
@@ -188,25 +128,18 @@ class TTestTest(absltest.TestCase):
         replicates=20000)
     data = xr.DataArray(data=data, dims=("steps", "replicates"))
 
-    metrics = {"metric": PredictionsPassthrough()}
-    stats = metrics_base.compute_unique_statistics_for_all_metrics(
-        metrics=metrics,
-        predictions={"variable": data},
-        targets={},
-    )
-    aggregator = aggregation.Aggregator(reduce_dims=())
-    aggregated_stats = aggregator.aggregate_statistics(stats)
+    metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
 
     statistical_inference_method = t_test.TTest(
-        metrics={"metric": PredictionsPassthrough()},
+        metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="steps",
         temporal_autocorrelation=True,
     )
     for alpha in [0.2, 0.1, 0.05]:
       lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["metric"]["variable"]
-      upper = upper["metric"]["variable"]
+      lower = lower["mean"]["variable"]
+      upper = upper["mean"]["variable"]
       coverage_probability = (
           (lower <= true_mean) & (true_mean <= upper)).mean("replicates").data
       # The tolerance here is somewhat loose because we'd need a lot of
