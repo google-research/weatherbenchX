@@ -59,6 +59,36 @@ def metrics_and_agg_state_for_mean(data: xr.DataArray) -> tuple[
   return metrics, aggregation_state
 
 
+class ExpMeanPrediction(metrics_base.PerVariableMetric):
+  """Example of a nonlinear function (exp) of the mean.
+
+  This can be skewed and non-Gaussian so can be useful to test methods which
+  don't rely on normality assumptions.
+  """
+
+  @property
+  def statistics(self):
+    return {"mean_prediction": MeanPrediction()}
+
+  def _values_from_mean_statistics_per_variable(
+      self, statistic_values: Mapping[str, xr.DataArray]) -> xr.DataArray:
+    return np.exp(statistic_values["mean_prediction"])
+
+
+def metrics_and_agg_state_for_exp_of_mean(data: xr.DataArray) -> tuple[
+    Mapping[str, metrics_base.Metric], aggregation.AggregationState]:
+  """Like metrics_and_agg_state_for_mean but for the exp of the mean."""
+  metrics = {"exp_mean": ExpMeanPrediction()}
+  stats = metrics_base.compute_unique_statistics_for_all_metrics(
+      metrics=metrics,
+      predictions={"variable": data},
+      targets={},
+  )
+  aggregator = aggregation.Aggregator(reduce_dims=())
+  aggregation_state = aggregator.aggregate_statistics(stats)
+  return metrics, aggregation_state
+
+
 def simulate_ar2(mean, sigma, phi1, phi2, steps=10, replicates=1000):
   """Simulates a stationary Gaussian AR(2) process with the given parameters."""
   # https://rf.mokslasplius.lt/stationary-variance-of-ar-2-process/
