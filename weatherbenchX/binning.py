@@ -537,6 +537,7 @@ class BySets(Binning):
       sets: Mapping[str, Sequence[Any]],
       coord_name: str,
       bin_dim_name: Optional[str] = None,
+      add_set_complements: bool = False,
       add_global_bin: bool = False,
   ):
     """Init.
@@ -545,6 +546,8 @@ class BySets(Binning):
       sets: Dictionary specifying sets of values to bin by.
       coord_name: Name of coordinate to bin over.
       bin_dim_name: Name of binning dimension. Default: `dim_name`
+      add_set_complements: If True, for each set, also add a bin for all values
+        not in the set.
       add_global_bin: If True, add a global bin containing all data. Default:
         False.
     """
@@ -555,6 +558,7 @@ class BySets(Binning):
     super().__init__(bin_dim_name)
     self.sets = sets
     self.coord_name = coord_name
+    self.add_set_complements = add_set_complements
     self.add_global_bin = add_global_bin
 
   def create_bin_mask(
@@ -568,6 +572,10 @@ class BySets(Binning):
       mask = mask.expand_dims(self.bin_dim_name, axis=0)
       mask.coords[self.bin_dim_name] = [name]
       masks.append(mask)
+      if self.add_set_complements:
+        not_in_mask = ~mask.copy()
+        not_in_mask.coords[self.bin_dim_name] = [f'not_in_{name}']
+        masks.append(not_in_mask)
     if self.add_global_bin:
       mask = xr.full_like(
           statistic[self.coord_name], True, dtype=bool
