@@ -421,6 +421,29 @@ class Recall(base.PerVariableMetric):
     )
 
 
+class FalseAlarmRate(base.PerVariableMetric):
+  """False Alarm Rate.
+
+  FAR = FP / (TP + FP).
+  """
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['FalsePositives'] / (
+        statistic_values['TruePositives'] + statistic_values['FalsePositives']
+    )
+
+
 class Precision(base.PerVariableMetric):
   """Also called Positive Predictive Value (PPV).
 
