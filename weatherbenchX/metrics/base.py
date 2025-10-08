@@ -389,10 +389,13 @@ class PerVariableStatisticWithClimatology(Statistic):
           ' dimensions.'
       )
 
-    # Climatology either has dayofyear or dayofyear/hour dimensions
-    sel_kwargs = {'dayofyear': valid_time.dt.dayofyear}
-    if hasattr(climatology, 'hour'):
-      sel_kwargs['hour'] = valid_time.dt.hour
+    # Climatology either has time, dayofyear or dayofyear/hour dimensions
+    if hasattr(climatology, 'time'):
+      sel_kwargs = {'time': valid_time}
+    else:
+      sel_kwargs = {'dayofyear': valid_time.dt.dayofyear}
+      if hasattr(climatology, 'hour'):
+        sel_kwargs['hour'] = valid_time.dt.hour
     aligned_climatology = climatology.sel(**sel_kwargs).compute()
     return self._compute_per_variable_with_aligned_climatology(
         predictions, targets, aligned_climatology
