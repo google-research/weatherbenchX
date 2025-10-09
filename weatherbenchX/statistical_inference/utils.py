@@ -13,8 +13,12 @@
 # limitations under the License.
 """Utility functions for statistical inference method implementations."""
 
+from collections.abc import Hashable, Sequence
+from typing import Any, Callable
+
 import numpy as np
 from weatherbenchX import aggregation
+from weatherbenchX import xarray_tree
 import xarray as xr
 
 
@@ -62,3 +66,68 @@ def get_and_check_experimental_unit_coord(
   if coord is None:
     raise ValueError('No statistics found.')
   return coord
+
+
+DataArrayTree = Any
+
+
+def apply_to_slices(
+    func: Callable[[DataArrayTree], DataArrayTree],
+    *args: DataArrayTree,
+    dim: Hashable | Sequence[Hashable],
+    ) -> DataArrayTree:
+  """Apply a function vectorized over slices of the arguments.
+
+  This is a little bit similar to xr.apply_ufunc with vectorize=True, but takes
+  a function operating on DataArrays for the slices, not just on raw numpy data.
+
+  Args:
+    func: The function to apply to each slice.
+    *args: The arguments which you want to pass slices of to the function.
+      These can be any tree of DataArrays.
+    dim: The dimension along which to vectorize. This can be a single dimension
+      or a sequence of dimensions (e.g. ['init_time', 'lead_time']).
+      The function will be called once for each combination of indices along
+      these dimensions. The dimensions will be retained but with size 1.
+
+  Returns:
+    The result of combining the results of calling func on each slice.
+    We use combine_by_coords for this. You are not required to retain the
+    original `dim`s in your result, but outputs of `func` should be
+    non-overlapping slices of the final result and should have coordinates on
+    them that combine_by_coords can use to combine them.
+  """
+
+  dims = (dim,) if isinstance(dim, str) else tuple(dim)
+  sizes = {}
+  def check_arg_sizes_and_maybe_add_missing_coords(arg):
+    for dim in dims:
+      if dim not in arg.dims:
+        continue
+      if dim not in arg.coords:
+        # xr.combine_by_coords later will expect a coordinate to be present on
+        # any dimensions we're combining slices along. Setting a default
+        # coordinate here saves the user's fn having to do it.
+        arg = arg.assign_coords({dim: np.arange(arg.sizes[dim])})
+      if dim not in sizes:
+        sizes[dim] = arg.sizes[dim]
+      if sizes[dim] != arg.sizes[dim]:
+        raise ValueError(
+            f'Different sizes {sizes[dim]}, {arg.sizes[dim]} for {dim=}.')
+    return arg
+  args = xarray_tree.map_structure(
+      check_arg_sizes_and_maybe_add_missing_coords, args)
+  for dim in dims:
+    if dim not in sizes:
+      raise ValueError(f'Dimension {dim=} not found in any arguments.')
+
+  results = []
+  for indexes in np.ndindex(*[sizes[d] for d in dims]):
+    def slice_arg(arg, indexes=indexes):
+      return arg.isel(
+          {dim: [i] for dim, i in zip(dims, indexes) if dim in arg.dims})
+    arg_slices = xarray_tree.map_structure(slice_arg, args)
+    results.append(func(*arg_slices))
+
+  return xarray_tree.map_structure(
+      lambda *args: xr.combine_by_coords(args), *results)
