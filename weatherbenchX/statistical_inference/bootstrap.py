@@ -129,3 +129,78 @@ class IIDBootstrap(Bootstrap):
             [experimental_unit_dim]).mean_statistics())
     self._resampled_values = metrics_base.compute_metrics_from_statistics(
         metrics, resampled_stats.mean_statistics())
+
+
+class ClusterBootstrap(Bootstrap):
+  r"""Resamples clusters identified by the distinct values of a coordinate.
+
+  The coordinate need not be unique and need not be an index coordinate, but it
+  must be 1-dimensional.
+
+  This method assumes independence between clusters, but allows for arbitrary
+  dependence within clusters. It corresponds to the 'Strategy 1' cluster
+  bootstrap of [1, pp.100-101], in the equal-cluster-size case anyway, and more
+  generally to the 'all block' bootstrap of [2, p.5].
+
+  In the unequal-cluster-size case, the resampled datasets may have a different
+  total size to the original one (albeit with the same number of clusters).
+  [2, p.5] also propose another option which ensures equal total size. It does
+  not seem likely to work well unless you have many clusters of every occurring
+  size, and it is also debatable in which situations it is desirable to maintain
+  an equal total size (see below), and so we have not implemented it here.
+
+  We can think of the approach implemented here as equivalent to the IID
+  bootstrap, but where the IID data points are pairs of (sum-weighted-stats,
+  sum-weights) computed within each cluster, not the original data points. From
+  this point of view it is not a problem if the clusters' sizes (or summed
+  weights) are unequal, provided the sizes are assumed to be drawn IID at random
+  and not (say) fixed in the experimental design to have specific unequal
+  values.
+
+  This should give us good frequentist properties under replications of the
+  experiment in which the number of clusters is the same, but the size of each
+  cluster is random. In my view this is reasonable in many situations.
+
+  If instead  we care about properties under replications of the experiment
+  in which the total size of the dataset and/or individual cluster sizes are
+  also constrained to be the same -- then we would need a more sophisticated
+  approach.
+
+
+  [1] Davison, A. C. & Hinkley, D. V. Bootstrap Methods and their Application
+  (Cambridge University Press, 1997).
+  [2] Sherman, M. & le Cessie, Saskia, A comparison between bootstrap methods
+  and generalized estimating equations for correlated outcomes in generalized
+  linear models, Communications in Statistics - Simulation and Computation,
+  26:3, 901-925 (1997).
+  """
+
+  def __init__(
+      self,
+      metrics: Mapping[str, metrics_base.Metric],
+      aggregated_statistics: aggregation.AggregationState,
+      experimental_unit_coord: str,
+      n_replicates: int,
+      ):
+    coord = utils.get_and_check_experimental_unit_coord(
+        aggregated_statistics, experimental_unit_coord, check_is_dim=False)
+    experimental_unit_dim = coord.dims[0]
+    unique_cluster_ids, cluster_ids = np.unique(coord.data, return_inverse=True)
+    cluster_ids = xr.DataArray(cluster_ids, dims=[experimental_unit_dim])
+    num_units = unique_cluster_ids.shape[0]
+
+    counts = np.random.multinomial(
+        num_units,
+        np.full(num_units, 1/num_units),
+        size=n_replicates)
+    counts = xr.DataArray(
+        data=counts, dims=[_REPLICATE_DIM, 'cluster_id'])
+    counts = counts.isel(cluster_id=cluster_ids)
+
+    resampled_stats = aggregated_statistics.dot(
+        counts, dim=experimental_unit_dim)
+    self._point_estimates = metrics_base.compute_metrics_from_statistics(
+        metrics, aggregated_statistics.sum_along_dims(
+            [experimental_unit_dim]).mean_statistics())
+    self._resampled_values = metrics_base.compute_metrics_from_statistics(
+        metrics, resampled_stats.mean_statistics())
