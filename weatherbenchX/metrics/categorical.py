@@ -13,11 +13,12 @@
 # limitations under the License.
 """Implementations of categorical metrics."""
 
-from typing import Hashable, Mapping, Sequence, Union
+from typing import Hashable, Mapping, Sequence, Union, final
 import numpy as np
 from weatherbenchX.metrics import base
 from weatherbenchX.metrics import wrappers
 import xarray as xr
+from xarray.core import dataarray
 
 
 class TruePositives(base.PerVariableStatistic):
@@ -580,3 +581,208 @@ class Reliability(base.PerVariableMetric):
     return statistic_values['TruePositives'] / (
         statistic_values['TruePositives'] + statistic_values['FalsePositives']
     )
+
+
+# TODO(aelkadi, srasp, matthjw): think of better names for everything.
+class Confident(base.PerVariableStatisticWithClimatology):
+  """Forecast confidence.
+
+  Defined as prediction spread < threshold * climatological spread.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      confidence_quantiles: tuple[float, float] = (0.1, 0.9),
+      confidence_threshold: float = 0.7,
+  ):
+    super().__init__(climatology)
+    self._ensemble_dim = ensemble_dim
+    self._conf_low, self._conf_high = confidence_quantiles
+    self._confidence_threshold = confidence_threshold
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'Confident'
+        + f'_conf_thres={self._confidence_threshold}'
+        + f'_conf_low={self._conf_low}'
+        + f'_conf_high={self._conf_high}'
+    )
+
+  def _compute_per_variable_with_aligned_climatology(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      aligned_climatology: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes confidence per variable."""
+    del targets  # Unused.
+
+    # Get the spread of the predictions.
+    predictions_spread = predictions.quantile(
+        self._conf_high, dim=self._ensemble_dim
+    ) - predictions.quantile(self._conf_low, dim=self._ensemble_dim)
+
+    # Climatologies are already quantiles.
+    climatology_spread = aligned_climatology.sel(
+        quantile=self._conf_high
+    ) - aligned_climatology.sel(quantile=self._conf_low)
+
+    return predictions_spread < self._confidence_threshold * climatology_spread
+
+
+# TODO(aelkadi, srasp): confirm that we want correctness to be defined with IQR.
+class Correct(base.PerVariableStatistic):
+  """Forecast correctness.
+
+  Defined as the target lying within the prediction IQR.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      quantiles: tuple[float, float] = (0.1, 0.9),
+  ):
+    self._ensemble_dim = ensemble_dim
+    self._lowq, self._highq = quantiles
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'Correct'
+        + f'_lowq={self._lowq}'
+        + f'_highq={self._highq}'
+    )
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes correctness per variable."""
+    predictions_lowq = predictions.quantile(self._lowq, dim=self._ensemble_dim)
+    predictions_highq = predictions.quantile(
+        self._highq, dim=self._ensemble_dim
+    )
+    return (predictions_lowq <= targets) & (targets <= predictions_highq)
+
+
+class Informative(base.PerVariableStatisticWithClimatology):
+  """Forecast informativeness.
+
+  Defined as the absolute difference between the median prediction and the
+  climatology median being greater than the threshold times the climatological
+  spread.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      threshold: float = 0.25,
+      climatology_quantiles: tuple[float, float] = (0.1, 0.9),
+  ):
+    super().__init__(climatology)
+    self._ensemble_dim = ensemble_dim
+    self._threshold = threshold
+    self._clim_low, self._clim_high = climatology_quantiles
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'Informative'
+        + f'_threshold={self._threshold}'
+    )
+
+  def _compute_per_variable_with_aligned_climatology(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      aligned_climatology: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes informativeness per variable."""
+    del targets  # Unused.
+    predictions_median = predictions.median(dim=self._ensemble_dim)
+    climatology_median = aligned_climatology.sel(quantile=0.5)
+    climatology_spread = aligned_climatology.sel(
+        quantile=self._clim_high
+    ) - aligned_climatology.sel(quantile=self._clim_low)
+
+    return (
+        abs(predictions_median - climatology_median)
+        > self._threshold * climatology_spread
+    )
+
+
+class Opportunism(base.PerVariableMetric):
+  """Opporunism.
+
+  Fraction of forecast that is (un)confident, (un)correct, and (un)informative.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      is_confident: bool,
+      is_correct: bool | None = None,
+      is_informative: bool | None = None,
+      confidence_quantiles: tuple[float, float] = (0.1, 0.9),
+      confidence_threshold: float = 0.7,
+      climatology_informative_threshold: float = 0.25,
+  ):
+    self._is_confident = is_confident
+    self._is_correct = is_correct
+    self._is_informative = is_informative
+    self._ensemble_dim = ensemble_dim
+    self._climatology = climatology
+    self._confidence_quantiles = confidence_quantiles
+    self._confidence_threshold = confidence_threshold
+    self._climatology_informative_threshold = climatology_informative_threshold
+
+  @final
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'Confident': Confident(
+            ensemble_dim=self._ensemble_dim,
+            climatology=self._climatology,
+            confidence_quantiles=self._confidence_quantiles,
+            confidence_threshold=self._confidence_threshold,
+        ),
+        'Correct': Correct(
+            ensemble_dim=self._ensemble_dim,
+            quantiles=self._confidence_quantiles,
+        ),
+        'Informative': Informative(
+            ensemble_dim=self._ensemble_dim,
+            climatology=self._climatology,
+            threshold=self._climatology_informative_threshold,
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes opporunism per variable."""
+    confidence = statistic_values['Confident']
+    if not self._is_confident:
+      confidence = 1 - confidence
+
+    statistics_values = confidence
+
+    if self._is_correct is not None:
+      correctness = statistic_values['Correct']
+      if not self._is_correct:
+        correctness = 1 - correctness
+      statistics_values = statistics_values * correctness
+
+    if self._is_informative is not None:
+      informativeness = statistic_values['Informative']
+      if not self._is_informative:
+        informativeness = 1 - informativeness
+      statistics_values = statistics_values * informativeness
+    return statistics_values

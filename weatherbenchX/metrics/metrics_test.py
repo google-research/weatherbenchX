@@ -848,6 +848,98 @@ class MetricsTest(parameterized.TestCase):
     )
     xr.testing.assert_allclose(result, expected_result)
 
+  def test_opportunism(self):
+    preds = test_utils.mock_prediction_data(
+        ensemble_size=10,
+        time_start='2020-01-01T00',
+        time_stop='2020-01-01T00',
+        variables_2d=['2m_temperature'],
+        variables_3d=[],
+    ).rename(time='init_time', prediction_timedelta='lead_time')
+
+    # Climatology: 2m_temperature quantiles 0.1, 0.5, 0.9 are 0, 1, 2.
+    # Spread q0.9-q0.1 = 2. Median q0.5 = 1.
+    def make_clim_var(data):
+      return xr.full_like(
+          preds['2m_temperature'].isel(
+              init_time=0, lead_time=0, realization=0, drop=True
+          ),
+          fill_value=data,
+      )
+
+    clim_da = xr.concat(
+        [make_clim_var(0), make_clim_var(1), make_clim_var(2)], dim='quantile'
+    ).assign_coords(quantile=[0.1, 0.5, 0.9])
+    clim_da = clim_da.expand_dims(dayofyear=list(range(1, 12)), hour=[0])
+    clim = xr.Dataset({'2m_temperature': clim_da})
+
+    # Predictions: 5 members at 0.9, 5 members at 1.1.
+    # q0.1=0.9, median=1, q0.9=1.1. Spread=0.2.
+    preds['2m_temperature'] = xr.concat(
+        [
+            xr.full_like(
+                preds['2m_temperature'].isel(realization=slice(0, 5)), 0.9
+            ),
+            xr.full_like(
+                preds['2m_temperature'].isel(realization=slice(5, 10)), 1.1
+            ),
+        ],
+        dim='realization',
+    )
+    targs = preds.mean('realization')
+
+    # For default parameters confidence_quantiles=(0.1, 0.9),
+    # confidence_threshold=0.7:
+    # pred_spread = 0.2. clim_spread = 2.
+    # 0.2 < 0.7 * 2 = 1.4 -> Confident=True.
+
+    # For Correct statistic with default quantiles=(0.1, 0.9):
+    # pred_q0.1=0.9, pred_q0.9=1.1. target=1.
+    # 0.9 <= 1 <= 1.1 -> Correct=True.
+
+    # For Informative statistic with climatology_informative_threshold=0.7:
+    # pred_median=1. clim_median=1. clim_spread=2.
+    # abs(1 - 1) > 0.25 * 2 = 0.5 -> 0 > 0.5 -> Informative=False.
+
+    # Metric Opportunism(is_confident=True, is_correct=True,
+    # is_informative=False) should be True & True & ~False = True, so result
+    # 1.0.
+    metrics = {
+        'opp': categorical.Opportunism(
+            ensemble_dim='realization',
+            climatology=clim,
+            is_confident=True,
+            is_correct=True,
+            is_informative=False,
+        )
+    }
+    results = compute_all_metrics(
+        metrics,
+        preds,
+        targs,
+        reduce_dims=['init_time', 'lead_time', 'latitude', 'longitude'],
+    )
+    self.assertEqual(results['opp.2m_temperature'], 1.0)
+
+    # Metric Opportunism(is_confident=True, is_correct=True,
+    # is_informative=True) should be True & True & False = False, so result 0.0.
+    metrics = {
+        'opp_inf': categorical.Opportunism(
+            ensemble_dim='realization',
+            climatology=clim,
+            is_confident=True,
+            is_correct=True,
+            is_informative=True,
+        )
+    }
+    results = compute_all_metrics(
+        metrics,
+        preds,
+        targs,
+        reduce_dims=['init_time', 'lead_time', 'latitude', 'longitude'],
+    )
+    self.assertEqual(results['opp_inf.2m_temperature'], 0.0)
+
   @parameterized.named_parameters(
       dict(
           testcase_name=f'EnsembleSize{size}_{sort=}_{fair=}',
