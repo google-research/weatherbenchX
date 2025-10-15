@@ -173,18 +173,25 @@ class AggregationState:
     """Dot product of all stats with other arrays, over the given dimensions."""
     return self.map(lambda x: xr.dot(x, *arrays, dim=dim))
 
-  def map(
-      self,
-      func: Callable[[xr.DataArray], xr.DataArray],
+  @classmethod
+  def map_multi(
+      cls,
+      func: Callable[..., xr.DataArray],
+      *agg_states: 'AggregationState',
   ) -> 'AggregationState':
-    """Apply a function to all DataArrays in the AggregationState."""
-    if self.sum_weighted_statistics is None:
+    """Like `map` but takes a multi-arg func and multiple AggregationStates."""
+    if any(a.sum_weighted_statistics is None for a in agg_states):
       raise ValueError('Cannot map a zero AggregationState.')
     sum_weighted_statistics = xarray_tree.map_structure(
-        func, self.sum_weighted_statistics)
+        func, *[a.sum_weighted_statistics for a in agg_states])
     sum_weights = xarray_tree.map_structure(
-        func, self.sum_weights)
+        func, *[a.sum_weights for a in agg_states])
     return AggregationState(sum_weighted_statistics, sum_weights)
+
+  def map(
+      self, func: Callable[[xr.DataArray], xr.DataArray]) -> 'AggregationState':
+    """Map a function over the DataArrays in the AggregationState."""
+    return self.map_multi(func, self)
 
   def to_data_tree(self) -> xr.DataTree:
     """Returns a DataTree representation of the AggregationState."""
