@@ -16,6 +16,7 @@ import setuptools
 
 base_requires = [
     "apache_beam[gcp]>=2.31.0",
+    "arch>=5.0",
     "cftime>=1.6.2",
     "numpy>=2.1.3",
     "pandas>=2.2.3",

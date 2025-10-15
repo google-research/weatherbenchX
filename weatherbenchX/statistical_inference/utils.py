@@ -68,6 +68,11 @@ def get_and_check_experimental_unit_coord(
   return coord
 
 
+def logarithmic_round(x, resolution=30):
+  """Resolution is number of values between 1 and 10, or 10 and 100, etc."""
+  return 10**((np.log10(x) * resolution).round() / resolution)
+
+
 DataArrayTree = Any
 
 

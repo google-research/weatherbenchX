@@ -26,6 +26,11 @@ class MeanPrediction(metrics_base.Statistic):
     return predictions
 
 
+class MeanTarget(metrics_base.Statistic):
+  def compute(self, predictions, targets):
+    return targets
+
+
 def metrics_and_agg_state_for_mean(data: xr.DataArray) -> tuple[
     Mapping[str, metrics_base.Metric], aggregation.AggregationState]:
   """Boilerplate setup needed to test statistical inference of the mean.
@@ -54,6 +59,36 @@ def metrics_and_agg_state_for_mean(data: xr.DataArray) -> tuple[
   # the statistical inference method. In more realistic situations we would be
   # using some real weather metric here whose statistics have been aggregated
   # over some dimensions (e.g. lat/lon grid).
+  aggregator = aggregation.Aggregator(reduce_dims=())
+  aggregation_state = aggregator.aggregate_statistics(stats)
+  return metrics, aggregation_state
+
+
+class RatioOfPredictionAndTargetMeans(metrics_base.PerVariableMetric):
+  """Example of a nonlinear function of the means of two statistics."""
+
+  @property
+  def statistics(self):
+    return {
+        "mean_prediction": MeanPrediction(),
+        "mean_target": MeanTarget(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self, statistic_values: Mapping[str, xr.DataArray]) -> xr.DataArray:
+    return statistic_values["mean_prediction"] / statistic_values["mean_target"]
+
+
+def metrics_and_agg_state_for_ratio_of_means(
+    numerator: xr.DataArray, denominator: xr.DataArray) -> tuple[
+        Mapping[str, metrics_base.Metric], aggregation.AggregationState]:
+  """Like metrics_and_agg_state_for_mean but for the ratio of two means."""
+  metrics = {"ratio_of_means": RatioOfPredictionAndTargetMeans()}
+  stats = metrics_base.compute_unique_statistics_for_all_metrics(
+      metrics=metrics,
+      predictions={"variable": numerator},
+      targets={"variable": denominator},
+  )
   aggregator = aggregation.Aggregator(reduce_dims=())
   aggregation_state = aggregator.aggregate_statistics(stats)
   return metrics, aggregation_state
@@ -132,3 +167,13 @@ def simulate_ar1(mean, sigma, phi, steps=10, replicates=1000):
     y_n = phi * y_nm1 + x_n * sigma
     results.append(y_n)
   return np.stack(results, axis=0) + mean
+
+
+def gaussian_ar1_true_stderr_of_sample_mean(
+    sigma: float, phi: float, n: int):
+  """True std.err. for sample mean of a stationary Gaussian AR(1) process."""
+  sigma_marginal = sigma / np.sqrt(1 - phi**2)
+  correction_factor = 1 + 2*phi/(1-phi) * (
+      1 - (1 - phi**n)/(1-phi)/n)
+  effective_sample_size = n / correction_factor
+  return sigma_marginal / np.sqrt(effective_sample_size)
