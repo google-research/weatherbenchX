@@ -15,10 +15,11 @@
 
 from collections.abc import Mapping, Hashable
 import functools
-from typing import final
+from typing import final, Literal
 
 import arch.bootstrap
 import numpy as np
+import scipy.stats
 from weatherbenchX import aggregation
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
@@ -29,10 +30,101 @@ import xarray as xr
 
 
 _REPLICATE_DIM = 'bootstrap_replicate'
+_JACKKNIFE_DIM = 'jackknife'
+
+
+CIMethod = Literal['percentile', 'bc', 'bca']
+
+
+def _bca_bias(
+    resampled: xr.DataArray, point_estimate: xr.DataArray) -> xr.DataArray:
+  """Computes the bias used in BCa confidence intervals."""
+  # Compute which proportion of values fall below the point estimate, where
+  # values exactly equal are counted as a half. This avoids an arbitrary choice
+  # of 0 or 1 for the equal case, and is important to avoid NaNs in some
+  # degenerate situations, e.g. where there is no uncertainty (all resamples
+  # equal to the point estimate) or where the point estimate lies on the
+  # boundary.
+  # This is equivalent to (resampled < point_estimate).mean(_REPLICATE_DIM)
+  # except that it counts exact equality as a half:
+  p = (xr.ufuncs.sign(resampled - point_estimate).mean(_REPLICATE_DIM) + 1)/2
+  return xr.apply_ufunc(scipy.stats.norm.ppf, p)
+
+
+def _bca_acceleration(jackknife_values: xr.DataArray) -> xr.DataArray:
+  """Computes the acceleration `a` used in BCa confidence intervals."""
+  u = jackknife_values.mean(_JACKKNIFE_DIM) - jackknife_values
+  # This is formula 6.2 in Efron (1987):
+  numerator = (u**3).sum(_JACKKNIFE_DIM)
+  denominator = 6 * (u**2).sum(_JACKKNIFE_DIM)**1.5
+  acceleration_estimate = numerator / denominator
+  # When the denominator is zero the variance of the jackknife estimates is
+  # zero (i.e. they're all the same), we have no evidence of any skewness in
+  # this case and so set acceleration to zero.
+  return xr.where(denominator == 0, 0, acceleration_estimate)
+
+
+def _bca_adjust_cdf_values(
+    cdf_values: xr.DataArray,
+    bias: xr.DataArray,
+    acceleration: xr.DataArray,
+    ) -> xr.DataArray:
+  """Adjusts CDF values `q` used for BCa confidence intervals [1]."""
+  z = xr.apply_ufunc(scipy.stats.norm.ppf, cdf_values)
+  z_plus_bias = bias + z
+  z = bias + z_plus_bias / (1.0 - acceleration * z_plus_bias)
+  result = xr.apply_ufunc(scipy.stats.norm.cdf, z)
+  # Where the input is equal to 0 or 1, the limiting value of the output is the
+  # same but we will encounter a NaN intermediate value without this logic:
+  return xr.where(cdf_values.isin([0, 1]), cdf_values, result)
+
+
+def _bca_inverse_adjust_cdf_values(
+    cdf_values: xr.DataArray,
+    bias: xr.DataArray,
+    acceleration: xr.DataArray,
+    ) -> xr.DataArray:
+  """Inverse of _bca_adjust_cdf_values, used for p-value computation."""
+  z = xr.apply_ufunc(scipy.stats.norm.ppf, cdf_values)
+  z_minus_bias = z - bias
+  z = z_minus_bias / (1 + acceleration * z_minus_bias) - bias
+  result = xr.apply_ufunc(scipy.stats.norm.cdf, z)
+  # Where the input is equal to 0 or 1, the limiting value of the output is the
+  # same but we will encounter a NaN intermediate value without this logic:
+  return xr.where(cdf_values.isin([0, 1]), cdf_values, result)
+
+
+def _interpolated_empirical_cdf(data: xr.DataArray, dim: str, at_value: float):
+  """Computes the interpolated empirical CDF of `data` at `at_value`."""
+
+  def interpolated_empirical_cdf_1d_numpy(array: np.ndarray) -> float:
+    assert array.ndim == 1
+    array = array[~np.isnan(array)]  # Equiv. to skipna=True.
+    # We could do this in O(n) rather than O(n log n) time, but the
+    # interpolation would be more fiddly, so using sort and np.interp for now.
+    array = np.sort(array)
+    q = np.linspace(0, 1, array.shape[0])
+    return np.interp(at_value, array, q)
+
+  return xr.apply_ufunc(
+      interpolated_empirical_cdf_1d_numpy,
+      data,
+      input_core_dims=[[dim]],
+      vectorize=True)
 
 
 class Bootstrap(base.StatisticalInferenceMethod):
   r"""Superclass for bootstrap-based statistical inference methods.
+
+  This implements both traditional-but-naive percentile confidence intervals,
+  and the more modern/best-practise BCa (and BC) confidence intervals of [1].
+
+  The acceleration value required for BCa intervals is estimated using a
+  jackknife procedure. So subclasses are required to provide jackknife values as
+  well as bootstrap-resampled values to faciliate this. In the standard IID
+  setup of [1] these are leave-one-out values of the metric, each omitting one
+  of the evaluation units. In non-IID settings one can use e.g. leave-block-out
+  or leave-cluster-out values, see subclasses for more details.
 
   # General caveats about bootstrap confidence intervals
 
@@ -56,10 +148,20 @@ class Bootstrap(base.StatisticalInferenceMethod):
   with the mismatch. In particular this means that bootstrap intervals may not
   be strictly comparable across different sample sizes (they are intervals for
   different quantities), although if doing a paired test this is not a problem.
+
+  While BCa intervals [1] aim to mitigate certain kinds of bias which can arise
+  within the bootstrap procedure itself, they are fundamentally unable to detect
+  or correct for biases of our estimator itself. Fundamentally, the procedure
+  doesn't have any way to know what we intend it to be an estimator of, besides
+  its own expectation.
+
+  [1] Efron, B. Better bootstrap confidence intervals. J.A.S.A. 82, 171-185
+  (1987).
   """
 
   # Subclass constructors must set these.
-  _resampled_values: base.MetricValues
+  _resampled_values: base.MetricValues  # Should have _REPLICATE_DIM.
+  _jackknife_values: base.MetricValues  # Should have _JACKKNIFE_DIM.
   _point_estimates: base.MetricValues
 
   @property
@@ -69,6 +171,45 @@ class Bootstrap(base.StatisticalInferenceMethod):
 
   def point_estimates(self) -> base.MetricValues:
     return self._point_estimates
+
+  def _adjust_cdf_values(
+      self,
+      cdf_values: base.MetricValues,
+      method: CIMethod,
+  ) -> base.MetricValues:
+    """Adjusts CDF values for use by the given CI method."""
+    if method not in ('bc', 'bca'):
+      return cdf_values
+
+    def adjust(cdf_values, resampled, point_estimate, jackknife):
+      b = _bca_bias(resampled, point_estimate)
+      a = _bca_acceleration(jackknife) if method == 'bca' else 0.
+      return _bca_adjust_cdf_values(cdf_values, b, a)
+
+    return xarray_tree.map_structure(
+        adjust,
+        cdf_values,
+        self._resampled_values, self._point_estimates, self._jackknife_values)
+
+  def _inverse_adjust_cdf_values(
+      self,
+      cdf_values: base.MetricValues,
+      method: CIMethod,
+  ) -> base.MetricValues:
+    """Inverse of _adjust_cdf_values."""
+    if method not in ('bc', 'bca'):
+      return cdf_values
+
+    def inverse_adjust(cdf_values, resampled, point_estimate, jackknife):
+      b = _bca_bias(resampled, point_estimate)
+      a = _bca_acceleration(jackknife) if method == 'bca' else 0.
+      return _bca_inverse_adjust_cdf_values(cdf_values, b, a)
+
+    return xarray_tree.map_structure(
+        inverse_adjust,
+        cdf_values,
+        self._resampled_values, self._point_estimates, self._jackknife_values)
+
 
   # Note: we set skipna=True when dealing with bootstrap replicates below,
   # because in some more unusual cases (e.g. finely-binned metric values where
@@ -89,40 +230,87 @@ class Bootstrap(base.StatisticalInferenceMethod):
 
   @final
   def confidence_intervals(
-      self, alpha: float = 0.05
+      self, alpha: float = 0.05, method: CIMethod = 'percentile',
   ) -> tuple[base.MetricValues, base.MetricValues]:
-    # TODO(matthjw): implement BCa intervals.
+    """Two-sided confidence intervals.
+
+    Args:
+      alpha: The confidence level to use.
+      method: The method to use to compute bootstrap confidence intervals.
+        'percentile': This is the commonly-used method which just takes the
+          alpha/2 and 1-alpha/2 quantiles of the bootstrap resampled values.
+          It is somewhat naive and suboptimal especially at smaller sample
+          sizes, see [1] for more details.
+        'bca': The bias-corrected and accelerated method of [1], which
+          corrects bootstrap confidence intervals for bias and skewness.
+        'bc': Like 'bca' but without the correction for skewness
+          ('acceleration'), also see [1].
+
+    Returns:
+      A tuple of lower and upper bounds of the confidence intervals, each of
+      which are computed separately for each component of each variable of each
+      metric.
+    """
+    cdf_values = xr.DataArray(
+        [alpha/2, 1-alpha/2],
+        dims=['level'],
+        coords={'level': ['lower', 'upper']})
+    cdf_values = xarray_tree.map_structure(
+        lambda _: cdf_values, self.resampled_values)
+    cdf_values = self._adjust_cdf_values(cdf_values, method)
+
+    def compute_quantiles(
+        resampled: xr.DataArray, cdf_values: xr.DataArray) -> xr.DataArray:
+      return xr.apply_ufunc(
+          lambda x, q: np.nanquantile(x, q, axis=-1),
+          resampled,
+          cdf_values,
+          input_core_dims=[[_REPLICATE_DIM], ['level']],
+          output_core_dims=[['level']],
+          vectorize=True,
+      )
+    quantiles = xarray_tree.map_structure(
+        compute_quantiles, self.resampled_values, cdf_values)
+
     return (
-        xarray_tree.map_structure(
-            lambda x: x.quantile(alpha/2, _REPLICATE_DIM, skipna=True),
-            self.resampled_values),
-        xarray_tree.map_structure(
-            lambda x: x.quantile(1-alpha/2, _REPLICATE_DIM, skipna=True),
-            self.resampled_values),
+        xarray_tree.map_structure(lambda qs: qs.sel(level='lower'), quantiles),
+        xarray_tree.map_structure(lambda qs: qs.sel(level='upper'), quantiles),
     )
 
   @final
-  def p_values(self, null_value: float = 0.) -> base.MetricValues:
-    """p-value for a two-sided test with the given null hypothesis value."""
+  def p_values(
+      self,
+      null_value: float = 0.,
+      method: CIMethod = 'percentile',
+    ) -> base.MetricValues:
+    """p-value for a two-sided test with the given null hypothesis value.
 
-    # Obtained by inverting the percentile confidence interval above.
-    # TODO(matthjw): replace with inverting the BCa interval when implemented.
+    This is computed by inverting the procedure used to compute confidence
+    intervals.
 
-    def p_value_numpy_1d(resampled: np.ndarray) -> float:
-      resampled = resampled[~np.isnan(resampled)]  # Equiv. to skipna=True.
-      data = np.sort(resampled)
-      q = np.linspace(0, 1, data.shape[0])
-      empirical_cdf_at_null = np.interp(null_value, data, q)
-      return 2 * min(empirical_cdf_at_null, 1 - empirical_cdf_at_null)
+    Args:
+      null_value: The null hypothesis value to test.
+      method: The method for computing confidence intervals, since the p-values
+        are obtained by inverting this method. See `confidence_intervals` for
+        more details.
 
-    def p_value(resampled: xr.DataArray) -> xr.DataArray:
-      return xr.apply_ufunc(
-          p_value_numpy_1d,
-          resampled,
-          input_core_dims=[[_REPLICATE_DIM]],
-          vectorize=True)
+    Returns:
+      Two-sided p-values against the given null hypothesis, computed separately
+      for each component of each variable of each metric.
+    """
 
-    return xarray_tree.map_structure(p_value, self.resampled_values)
+    empirical_cdf_at_null = xarray_tree.map_structure(
+        functools.partial(_interpolated_empirical_cdf,
+                          dim=_REPLICATE_DIM, at_value=null_value),
+        self.resampled_values)
+
+    # Inverts the transformation applied when computing confidence intervals.
+    empirical_cdf_at_null = self._inverse_adjust_cdf_values(
+        empirical_cdf_at_null, method)
+
+    # Convert to a two-sided p-value.
+    return xarray_tree.map_structure(
+        lambda q: 2 * xr.ufuncs.minimum(q, 1-q), empirical_cdf_at_null)
 
 
 class IIDBootstrap(Bootstrap):
@@ -135,8 +323,22 @@ class IIDBootstrap(Bootstrap):
       experimental_unit_dim: str,
       n_replicates: int,
       ):
+    summed_stats = aggregated_statistics.sum_along_dims([experimental_unit_dim])
+    self._point_estimates = metrics_base.compute_metrics_from_statistics(
+        metrics, summed_stats.mean_statistics())
+
+    def jackknife(summed_stats, separate_stats):
+      return (summed_stats - separate_stats).rename(
+          {experimental_unit_dim: _JACKKNIFE_DIM})
+    jackknife_summed_stats = aggregation.AggregationState.map_multi(
+        jackknife, summed_stats, aggregated_statistics)
+    self._jackknife_values = (
+        metrics_base.compute_metrics_from_statistics(
+            metrics, jackknife_summed_stats.mean_statistics()))
+
     num_units = utils.get_and_check_experimental_unit_coord(
         aggregated_statistics, experimental_unit_dim).size
+
     # We optimize the computation of sums of resampled statistics.
     # Rather than first compute bootstrap indices, then slice out values at
     # those indices and then take their sums, we instead sample a matrix of
@@ -150,9 +352,6 @@ class IIDBootstrap(Bootstrap):
         data=counts, dims=[_REPLICATE_DIM, experimental_unit_dim])
     resampled_stats = aggregated_statistics.dot(
         counts, dim=experimental_unit_dim)
-    self._point_estimates = metrics_base.compute_metrics_from_statistics(
-        metrics, aggregated_statistics.sum_along_dims(
-            [experimental_unit_dim]).mean_statistics())
     self._resampled_values = metrics_base.compute_metrics_from_statistics(
         metrics, resampled_stats.mean_statistics())
 
@@ -211,6 +410,11 @@ class ClusterBootstrap(Bootstrap):
     coord = utils.get_and_check_experimental_unit_coord(
         aggregated_statistics, experimental_unit_coord, check_is_dim=False)
     experimental_unit_dim = coord.dims[0]
+
+    self._point_estimates = metrics_base.compute_metrics_from_statistics(
+        metrics, aggregated_statistics.sum_along_dims(
+            [experimental_unit_dim]).mean_statistics())
+
     unique_cluster_ids, cluster_ids = np.unique(coord.data, return_inverse=True)
     cluster_ids = xr.DataArray(cluster_ids, dims=[experimental_unit_dim])
     num_units = unique_cluster_ids.shape[0]
@@ -222,14 +426,19 @@ class ClusterBootstrap(Bootstrap):
     counts = xr.DataArray(
         data=counts, dims=[_REPLICATE_DIM, 'cluster_id'])
     counts = counts.isel(cluster_id=cluster_ids)
-
     resampled_stats = aggregated_statistics.dot(
         counts, dim=experimental_unit_dim)
-    self._point_estimates = metrics_base.compute_metrics_from_statistics(
-        metrics, aggregated_statistics.sum_along_dims(
-            [experimental_unit_dim]).mean_statistics())
     self._resampled_values = metrics_base.compute_metrics_from_statistics(
         metrics, resampled_stats.mean_statistics())
+
+    unique_cluster_ids = xr.DataArray(
+        unique_cluster_ids, dims=[_JACKKNIFE_DIM])
+    leave_one_cluster_out_weights = (cluster_ids != unique_cluster_ids)
+    leave_one_cluster_out_stats = aggregated_statistics.dot(
+        leave_one_cluster_out_weights, dim=experimental_unit_dim)
+    self._jackknife_values = (
+        metrics_base.compute_metrics_from_statistics(
+            metrics, leave_one_cluster_out_stats.mean_statistics()))
 
 
 def stationary_bootstrap_indices(
@@ -254,6 +463,77 @@ def stationary_bootstrap_indices(
         end_block_flags, new_random_indices, next_indices)
     all_indices.append(current_indices)
   return np.stack(all_indices, axis=0)
+
+
+def _stationary_jackknife_block_lengths(
+    n_data: int, mean_block_length: float) -> np.ndarray:
+  """Sample block lengths for the stationary jackknife [1].
+
+  Two modifications are made to the original method:
+  * We limit sampled block lengths to a maximum of 1/2 the sample size, as well
+    as imposing the paper's limit of 2 log(n) * mean_block_length.
+  * We use circular wraparound to avoid endpoint bias and for further
+    consistency with the stationary bootstrap of [2] which we use this in
+    combination with.
+
+  [1] Zhou, W. & Lahiri, S. Stationary jackknife. J. Time Ser. Anal. 45,
+  333-360 (2024).
+  [2] Politis, D. N. & Romano, J. P. The stationary bootstrap. J.A.S.A. 89,
+  1303-1313 (1994).
+
+  Args:
+    n_data: The number of data points.
+    mean_block_length: The mean block length to leave out (before truncation
+      of the block length distribution anyway).
+
+  Returns:
+    1D array of lengths of the blocks to leave out.
+  """
+  # This geometric distribution is supported on {1, 2, ...} with mean 1/p.
+  block_lengths = scipy.stats.geom.rvs(p=1/mean_block_length, size=n_data)
+  # This is the upper bound on sampled block lengths from the paper, which aims
+  # to ensure that the "length of the missing part is much smaller than the
+  # length of the original observations":
+  upper_bound = round(2 * mean_block_length * np.log(n_data))
+  # The above achieves its aim in cases where block_length << n/2log(n), which
+  # should usually be the case for reasonable sample sizes and
+  # mean block lengths that scale e.g. with sqrt(n) or slower and with a
+  # smallish constant factor. But it's far from guaranteed. We impose a tighter
+  # upper bound here to stop the longest sampled block lengths from exceeding
+  # half the sample size. (TODO(matthjw): or should this be lower than 1/2?)
+  upper_bound = min(upper_bound, n_data//2)
+  # Note this truncation of the geometric distribution means that
+  # 'mean_block_length' is not strictly true any more, but it shouldn't affect
+  # the mean too much in typical cases.
+  return np.minimum(block_lengths, upper_bound)
+
+
+def _leave_block_out_sums(
+    data: np.ndarray, block_lengths: np.ndarray) -> np.ndarray:
+  """Computes sums of data excluding blocks of the given lengths.
+
+  The left-out blocks start at each index of the data in turn, have the lengths
+  specified and they wrap around at the boundary.
+
+  Args:
+    data: Array of data points, to compute leave-block-out sums over final axis.
+    block_lengths: Array of same shape as `data`, block lengths to leave
+      out for blocks starting at each index of `data`'s final axis.
+
+  Returns:
+    Array of same shape as `data`, with sums of `data` excluding blocks of the
+    given lengths.
+  """
+  n_data = data.shape[-1]
+  # Add periodic padding for wraparound:
+  data = np.concatenate([data, data], axis=-1)
+  cumsums = data.cumsum(axis=-1)
+  # We want sums that exclude blocks of the given lengths. With wraparound,
+  # complements of blocks are themselves just blocks, with length:
+  complement_of_block_lengths = n_data - block_lengths[::-1]
+  end_indices = np.arange(n_data) + complement_of_block_lengths
+  result = cumsums[..., end_indices] - cumsums[..., :n_data]
+  return result[::-1]
 
 
 class StationaryBootstrap(Bootstrap):
@@ -342,13 +622,28 @@ class StationaryBootstrap(Bootstrap):
   sample size (or here, the effective sample size after taking into account
   temporal dependence) is small.
 
-  [1] Politis, D. N. & Romano, J. P. The stationary bootstrap. J. Am. Stat.
-  Assoc. 89, 1303–1313 (1994).
+  # Stationary jackknife for estimating acceleration in BCa intervals
+
+  We support the BCa (bias-corrected and accelerated) intervals of [4]. In the
+  original IID setting these use the IID jackknife to estimate the acceleration.
+  Here the data is not IID however, and we use the stationary jackknife of [5]
+  instead, which is suitable for use with dependent data, and takes a similar
+  approach to the stationary bootstrap [1] in sampling block lengths from a
+  geometric distribution. We use the same mean block length for this as we
+  use for the stationary bootstrap. Our implementation also modifies [5] to use
+  circular wraparound, for consistency with the stationary bootstrap.
+
+  [1] Politis, D. N. & Romano, J. P. The stationary bootstrap. J.A.S.A. 89,
+  1303-1313 (1994).
   [2] Politis, D. N. & White, H. Automatic Block-Length Selection for the
   Dependent Bootstrap, Econometric Reviews, 23:1, 53-70 (2004).
   [3] Patton, A., Politis, D. N. & White, H. Correction to "Automatic
   Block-Length Selection for the Dependent Bootstrap" by D. Politis and
   H. White, Econometric Reviews, 28:4, 372-375 (2009).
+  [4] Efron, B. Better bootstrap confidence intervals. J.A.S.A. 82, 171-185
+  (1987).
+  [5] Zhou, W. & Lahiri, S. Stationary jackknife. J. Time Ser. Anal. 45,
+  333-360 (2024).
   """
 
   def __init__(
@@ -396,11 +691,13 @@ class StationaryBootstrap(Bootstrap):
             stationary_bootstrap_indices)
     self._point_estimates = {}
     self._resampled_values = {}
+    self._jackknife_values = {}
     for metric_name, metric in metrics.items():
-      point_estimates, resampled_values = self._bootstrap_results_for_metric(
-          metric)
+      (point_estimates, resampled_values, jackknife_values
+       ) = self._bootstrap_results_for_metric(metric)
       self._point_estimates[metric_name] = point_estimates
       self._resampled_values[metric_name] = resampled_values
+      self._jackknife_values[metric_name] = jackknife_values
 
   def _optimal_block_length(self, data_array: xr.DataArray) -> float:
     if self._mean_block_length is not None:
@@ -442,7 +739,9 @@ class StationaryBootstrap(Bootstrap):
 
   def _bootstrap_results_for_metric(
       self, metric: metrics_base.Metric) -> tuple[
-          Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
+          Mapping[Hashable, xr.DataArray],
+          Mapping[Hashable, xr.DataArray],
+          Mapping[Hashable, xr.DataArray]]:
 
     point_estimates = metrics_base.compute_metric_from_statistics(
         metric, self._aggregated_statistics.sum_along_dims(
@@ -460,6 +759,7 @@ class StationaryBootstrap(Bootstrap):
         for stat_name, stat in metric.statistics.items()
     }
     resampled_values = {}
+    jackknife_values = {}
     for var_name in point_estimates.keys():
       # Results for different variables will need to be computed separately,
       # as the optimal block length will depend on the variable.
@@ -514,16 +814,17 @@ class StationaryBootstrap(Bootstrap):
       # * Metrics which introduce some additional dimensions in their output
       #   which aren't present in the statistics, but use a different dimension
       #   name for them to any dimensions used in the statistics.
-      per_var_resampled_values = utils.apply_to_slices(
-          functools.partial(self._bootstrap_results_for_metric_scalar,
-                            metric, var_name),
-          per_unit_values[var_name],
-          sum_weighted_stats_for_this_var,
-          sum_weights_for_this_var,
-          dim=point_estimates[var_name].dims,
-      )
-      resampled_values[var_name] = per_var_resampled_values
-    return point_estimates, resampled_values
+      (resampled_values[var_name],
+       jackknife_values[var_name]) = utils.apply_to_slices(
+           functools.partial(self._bootstrap_results_for_metric_scalar,
+                             metric, var_name),
+           per_unit_values[var_name],
+           sum_weighted_stats_for_this_var,
+           sum_weights_for_this_var,
+           dim=point_estimates[var_name].dims,
+       )
+
+    return point_estimates, resampled_values, jackknife_values
 
   def _bootstrap_results_for_metric_scalar(
       self,
@@ -532,9 +833,10 @@ class StationaryBootstrap(Bootstrap):
       per_unit_values: xr.DataArray,
       sum_weighted_stats: Mapping[str, Mapping[Hashable, xr.DataArray]],
       sum_weights: Mapping[str, Mapping[Hashable, xr.DataArray]],
-  ) -> xr.DataArray:
+  ) -> tuple[xr.DataArray, xr.DataArray]:
     n_data = per_unit_values.sizes[self._experimental_unit_dim]
     mean_block_length = self._optimal_block_length(per_unit_values)
+
     bootstrap_indices = self._stationary_bootstrap_indices(
         n_data=n_data,
         mean_block_length=mean_block_length,
@@ -543,16 +845,26 @@ class StationaryBootstrap(Bootstrap):
     bootstrap_indices = xr.DataArray(
         bootstrap_indices, dims=[self._experimental_unit_dim, _REPLICATE_DIM])
 
+    agg_state = aggregation.AggregationState(sum_weighted_stats, sum_weights)
     def sum_of_resampled(data):
       # Note the dimensions of bootstrap_indices (experimental_unit_dim,
       # _REPLICATE_DIM) that we're selecting, will be present in the result of
       # the isel call.
       return data.isel({self._experimental_unit_dim: bootstrap_indices}).sum(
           self._experimental_unit_dim)
-    sum_weighted_stats, sum_weights = xarray_tree.map_structure(
-        sum_of_resampled, (sum_weighted_stats, sum_weights))
-    mean_stats = xarray_tree.map_structure(
-        lambda x, y: x / y, sum_weighted_stats, sum_weights)
-    del sum_weighted_stats, sum_weights
+    resampled_values = metric.values_from_mean_statistics(
+        agg_state.map(sum_of_resampled).mean_statistics())[var_name]
 
-    return metric.values_from_mean_statistics(mean_stats)[var_name]
+    block_lengths = _stationary_jackknife_block_lengths(
+        n_data, mean_block_length)
+    def jackknife_sums(data):
+      return xr.apply_ufunc(
+          lambda x: _leave_block_out_sums(x, block_lengths),
+          data,
+          input_core_dims=[[self._experimental_unit_dim]],
+          output_core_dims=[[_JACKKNIFE_DIM]],
+      )
+    jackknife_values = metric.values_from_mean_statistics(
+        agg_state.map(jackknife_sums).mean_statistics())[var_name]
+
+    return resampled_values, jackknife_values
