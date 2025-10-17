@@ -788,19 +788,19 @@ class RelativeEconomicValue(base.PerVariableMetric):
   """Relative economic value.
 
   This metric assumes that the targets are a binary and the predictions
-  are probabilities between in [0, 1]. It computes REV across all possible
-  decision thresholds for a given ensemble size.
+  are probabilities between in [0, 1].
+
+  By default, it computes REV across all possible decision thresholds for a
+  given ensemble size. However, it is also possible to specify the desired
+  probability thresholds and cost/loss ratios directly.
   """
 
   def __init__(
-      self, ensemble_size: int, cost_loss_ratios: Optional[np.ndarray] = None
+      self,
+      ensemble_size: int,
+      cost_loss_ratios: Optional[np.ndarray] = None,
+      probability_thresholds: Optional[np.ndarray] = None,
   ):
-
-    thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
-
-    self._thresholds = xr.DataArray(
-        thresholds, dims=['threshold'], coords={'threshold': thresholds}
-    )
 
     if cost_loss_ratios is None:
       cost_loss_ratios = np.geomspace(0.005, 1, 51)[:-1]
@@ -810,6 +810,10 @@ class RelativeEconomicValue(base.PerVariableMetric):
         dims=['cost_loss_ratio'],
         coords={'cost_loss_ratio': cost_loss_ratios},
     )
+
+    self._thresholds = probability_thresholds
+    if self._thresholds is None:
+      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
