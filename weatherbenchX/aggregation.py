@@ -15,7 +15,7 @@
 
 import collections
 import dataclasses
-from typing import Any, Callable, Collection, Hashable, Mapping, Sequence
+from typing import Any, Callable, Collection, Hashable, Iterable, Mapping, Sequence
 
 from weatherbenchX import binning
 from weatherbenchX import weighting
@@ -79,7 +79,7 @@ class AggregationState:
 
   @classmethod
   def sum(
-      cls, aggregation_states: list['AggregationState']
+      cls, aggregation_states: Iterable['AggregationState']
   ) -> 'AggregationState':
     """Sum of aggregation states."""
     sum_weighted_statistics_and_sum_weights_tuples = [
