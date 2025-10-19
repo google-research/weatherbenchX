@@ -24,6 +24,19 @@ import xarray as xr
 ### Statistics
 
 
+class RelativeIntensityDiff(base.PerVariableStatistic):
+  """Relative intensity of predictions."""
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      ) -> xr.DataArray:
+    prediction_mean = predictions.mean(dim=['latitude', 'longitude'])
+    target_mean = targets.mean(dim=['latitude', 'longitude'])
+    return np.abs(prediction_mean / target_mean - 1)
+
+
 class Error(base.PerVariableStatistic):
   """Error between predictions and targets."""
 
@@ -359,3 +372,19 @@ class PredictionActivity(base.PerVariableMetric):
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return np.sqrt(statistic_values['SquaredPredictionAnomaly'])
+
+
+class RelativeIntensity(base.PerVariableMetric):
+  """Relative intensity of predictions."""
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {'RelativeIntensityDiff': RelativeIntensityDiff()}
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['RelativeIntensityDiff']
+
