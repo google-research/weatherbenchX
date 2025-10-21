@@ -358,6 +358,9 @@ class WriteMetrics(beam.DoFn):
 
   def process(self, metrics: xr.Dataset) -> Iterable[Never]:
     logging.log_first_n(logging.INFO, 'WriteMetrics inputs: %s', 10, metrics)
+    # Remove attributes that may have been propogated from the targets or
+    # predictions.
+    metrics = metrics.drop_attrs(deep=True)
     beam_utils.atomic_write(
         self.out_path,
         metrics.to_netcdf(),
@@ -374,9 +377,13 @@ class WriteAggregationState(beam.DoFn):
   def process(
       self, aggregation_state: aggregation.AggregationState
   ) -> Iterable[Never]:
+    aggregation_state_ds = aggregation_state.to_dataset()
+    # Remove attributes that may have been propogated from the targets or
+    # predictions.
+    aggregation_state_ds = aggregation_state_ds.drop_attrs(deep=True)
     beam_utils.atomic_write(
         self.out_path,
-        aggregation_state.to_dataset().to_netcdf(),
+        aggregation_state_ds.to_netcdf(),
     )
     return []
 
