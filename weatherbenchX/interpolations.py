@@ -206,10 +206,6 @@ class InterpolateToReferenceCoords(Interpolation):
       reference: xr.DataArray,  # pytype: disable=signature-mismatch
   ) -> xr.DataArray:
 
-    # Catch case where reference doesn't contain any data.
-    if len(reference) == 0:
-      return reference.copy()
-
     if self._wrap_longitude:
       da = pad_longitude(da)
 
@@ -225,6 +221,14 @@ class InterpolateToReferenceCoords(Interpolation):
       dims = [d for d in da.dims if d in reference.coords]
     else:
       dims = self._dims
+
+    # Catch case where reference doesn't contain any data.
+    if reference.size == 0:
+      # Need to make sure to retain any dimensions that are not being
+      # interpolated.
+      da_dims_to_retain = set(da.dims) - set(dims)
+      return reference.copy().expand_dims({d: da[d] for d in da_dims_to_retain})
+
     dim_args = {dim: reference[dim] for dim in dims}
 
     da_like_reference = interpolate_to_coords(
