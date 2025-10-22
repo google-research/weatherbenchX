@@ -101,6 +101,7 @@ class SparseObservationsFromParquet(base.DataLoader):
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
       interpolation: Optional[interpolations.Interpolation] = None,
+      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
   ):
     """Init.
 
@@ -149,12 +150,15 @@ class SparseObservationsFromParquet(base.DataLoader):
       preprocessing_fn: (Optional) Function to apply to the dataframe after
         reading.
       interpolation: (Optional) Interpolation to be applied to the data.
+      process_chunk_fn: (Optional) Function to apply to the chunk of data after
+        loading.
     """
 
     super().__init__(
         interpolation=interpolation,
         compute=False,  # Data is already loaded.
         add_nan_mask=add_nan_mask,
+        process_chunk_fn=process_chunk_fn,
     )
     self._path = path
     if partitioned_by not in ['hour', 'day', 'month']:
@@ -473,6 +477,7 @@ class METARFromParquet(SparseObservationsFromParquet):
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
       interpolation: Optional[interpolations.Interpolation] = None,
+      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
   ):
     def metar_preprocessing_fn(
         df: pd.DataFrame,
@@ -516,4 +521,5 @@ class METARFromParquet(SparseObservationsFromParquet):
             metar_preprocessing_fn, preprocessing_fn=preprocessing_fn
         ),
         interpolation=interpolation,
+        process_chunk_fn=process_chunk_fn,
     )
