@@ -30,6 +30,7 @@ base_requires = [
     "pyarrow",
     "opt_einsum",
     "xarray-beam",
+    "jax[cpu]",
 ]
 docs_requires = [
     "myst-nb",
