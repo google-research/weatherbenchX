@@ -64,7 +64,7 @@ class ContinuousToBinaryTest(parameterized.TestCase):
       expected = x > thresh
       xr.testing.assert_equal(y.sel(threshold=thresh, drop=True), expected)
 
-  def test_datarray_threshold(self):
+  def test_data_array_threshold(self):
     target = test_utils.mock_target_data(random=True)
     threshold_percentiles = [0.25, 0.75]
     threshold_dataarray = target.geopotential.quantile(
@@ -75,6 +75,7 @@ class ContinuousToBinaryTest(parameterized.TestCase):
         which='both',
         threshold_value=threshold_dataarray,
         threshold_dim='threshold',
+        unique_name_suffix='test',
     )
 
     x = target.geopotential
@@ -100,6 +101,7 @@ class ContinuousToBinaryTest(parameterized.TestCase):
         which='both',
         threshold_value=threshold_dataset,
         threshold_dim='threshold',
+        unique_name_suffix='test',
     )
 
     for var in ['geopotential', '2m_temperature']:
