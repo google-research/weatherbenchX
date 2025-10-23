@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
-from typing import Callable, Mapping, Optional, Tuple
+from typing import Mapping, Optional, Tuple
 import numpy as np
 import scipy.stats
 from weatherbenchX.metrics import base
@@ -801,6 +801,9 @@ class RelativeEconomicValue(base.PerVariableMetric):
     self._thresholds = xr.DataArray(
         thresholds, dims=['threshold'], coords={'threshold': thresholds}
     )
+    # TODO(tomandersson): Make this configurable when thresholds themselves are
+    # configurable.
+    self._unique_name_suffix = 'all_thresholds_for_ensemble_size'
 
     if cost_loss_ratios is None:
       cost_loss_ratios = np.geomspace(0.005, 1, 51)[:-1]
@@ -817,6 +820,7 @@ class RelativeEconomicValue(base.PerVariableMetric):
         which='predictions',
         threshold_value=self._thresholds,
         threshold_dim='threshold',
+        unique_name_suffix=self._unique_name_suffix,
     )
 
     return {
