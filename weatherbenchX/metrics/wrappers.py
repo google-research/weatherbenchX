@@ -158,15 +158,20 @@ class ContinuousToBinary(InputTransform):
       which: str,
       threshold_value: Union[float, Iterable[float], xr.DataArray, xr.Dataset],
       threshold_dim: str,
+      unique_name_suffix: str | None = None,
   ):
     """Init.
 
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      threshold_value: Threshold value, list of values, xarray.DataArray or
+      threshold_value: Threshold value, iterable of values, xarray.DataArray or
         xarray.Dataset.
       threshold_dim: Name of dimension to use for threshold values.
+      unique_name_suffix: Suffix to add to the unique name. If
+        `threshold_values` is an xarray.DataArray or xarray.Dataset, this must
+        be provided, and must be unique over all the threshold_value that you
+        intend to use within a set of Metrics that are computed together.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
@@ -177,10 +182,21 @@ class ContinuousToBinary(InputTransform):
     )
     self._threshold_dim = threshold_dim
 
+    if isinstance(self._threshold_value, (xr.DataArray, xr.Dataset)):
+      if unique_name_suffix is None:
+        raise ValueError(
+            'unique_name_suffix must be provided if threshold_value is an'
+            ' xarray.DataArray or xarray.Dataset.'
+        )
+    self._unique_name_suffix = unique_name_suffix
+
   @property
   def unique_name_suffix(self) -> str:
-    threshold_value_str = ','.join([str(t) for t in self._threshold_value])
-    return f'{self._threshold_dim}={threshold_value_str}'
+    if self._unique_name_suffix is None:
+      unique_name_suffix = ','.join([str(t) for t in self._threshold_value])
+    else:
+      unique_name_suffix = self._unique_name_suffix
+    return f'{self._threshold_dim}={unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
@@ -294,7 +310,7 @@ class ContinuousToBins(InputTransform):
 
   The bins are right-inclusive, i.e., `threshold[i-1] < x <= threshold[i]`. For
   example, if `bin_values` is [0.5, 1.0, 1.5], then the bins will be
-  (0.5, 1.0] and (1.0, 1.5]. To have open-ended bins, the `bin_values` have to 
+  (0.5, 1.0] and (1.0, 1.5]. To have open-ended bins, the `bin_values` have to
   specify the `-np.inf` and `np.inf` values at the edges. That means that the
   size of the binning dimension is len(bin_values) -1 .
 
