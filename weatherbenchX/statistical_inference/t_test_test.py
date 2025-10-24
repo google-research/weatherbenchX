@@ -22,9 +22,10 @@ class TTestTest(absltest.TestCase):
 
   def test_plain_t_test(self):
     # Here we test the plain t-test with all its assumptions met. We check
-    # that we see the coverage probabilities equal to the specified coverage
-    # level alpha for the confidence interval, even for small sample sizes.
-    # We check this by computing CIs using many replicates of the data.
+    # that we see estimated coverage probabilities consistent with the specified
+    # significance level alpha for the confidence interval, even for small
+    # sample sizes. We check this by computing CIs using many replicates of the
+    # data.
     np.random.seed(0)
     true_mean = 10.
     sample_size = 10
@@ -33,24 +34,23 @@ class TTestTest(absltest.TestCase):
     data = xr.DataArray(data=data, dims=("samples", "replicates"))
 
     metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
-    statistical_inference_method = t_test.TTest(
+    inference = t_test.TTest(
         metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="samples",
         temporal_autocorrelation=False,
     )
     for alpha in [0.2, 0.1, 0.05]:
-      lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["mean"]["variable"]
-      upper = upper["mean"]["variable"]
-      coverage_probability = (
-          (lower <= true_mean) & (true_mean <= upper)).mean("replicates").data
-      np.testing.assert_allclose(coverage_probability, 1-alpha, rtol=0.01)
-
-      significance = statistical_inference_method.significance_tests(
-          null_value=true_mean, alpha=alpha)["mean"]["variable"]
-      type_1_error_probability = significance.mean("replicates").data
-      np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
+      test_utils.assert_coverage_probability_estimate_plausible(
+          inference,
+          true_value=true_mean,
+          metric_name="mean",
+          alpha=alpha,
+          rtol=0,
+          coverage_prob_significance_level=0.1,
+      )
+      test_utils.assert_p_value_consistent_with_confidence_interval(
+          inference, null_value=true_mean, metric_name="mean")
 
   def test_t_test_with_baseline_comparison(self):
     # Here we test the t-test for a baseline comparison (i.e. a paired
@@ -81,7 +81,7 @@ class TTestTest(absltest.TestCase):
     (_, main_aggregated_stats
      ) = test_utils.metrics_and_agg_state_for_mean(main_data)
 
-    statistical_inference_method = t_test.TTest.for_baseline_comparison(
+    inference = t_test.TTest.for_baseline_comparison(
         metrics=metrics,
         aggregated_statistics=main_aggregated_stats,
         baseline_aggregated_statistics=baseline_aggregated_stats,
@@ -89,21 +89,16 @@ class TTestTest(absltest.TestCase):
         temporal_autocorrelation=False,
     )
     for alpha in [0.2, 0.1, 0.05]:
-      lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["mean"]["variable"]
-      upper = upper["mean"]["variable"]
-      coverage_probability = (
-          ((lower <= true_mean_diff) & (true_mean_diff <= upper))
-          .mean("replicates")
-          .data
+      test_utils.assert_coverage_probability_estimate_plausible(
+          inference,
+          true_value=true_mean_diff,
+          metric_name="mean",
+          alpha=alpha,
+          rtol=0,
+          coverage_prob_significance_level=0.1,
       )
-      np.testing.assert_allclose(coverage_probability, 1 - alpha, rtol=0.01)
-
-      significance = statistical_inference_method.significance_tests(
-          null_value=true_mean_diff, alpha=alpha
-      )["mean"]["variable"]
-      type_1_error_probability = significance.mean("replicates").data
-      np.testing.assert_allclose(type_1_error_probability, alpha, rtol=0.01)
+      test_utils.assert_p_value_consistent_with_confidence_interval(
+          inference, null_value=true_mean_diff, metric_name="mean")
 
   def test_t_test_with_ar2_correction(self):
     # We'll compute confidence intervals for the mean of many different
@@ -130,24 +125,23 @@ class TTestTest(absltest.TestCase):
 
     metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
 
-    statistical_inference_method = t_test.TTest(
+    inference = t_test.TTest(
         metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="steps",
         temporal_autocorrelation=True,
     )
     for alpha in [0.2, 0.1, 0.05]:
-      lower, upper = statistical_inference_method.confidence_intervals(alpha)
-      lower = lower["mean"]["variable"]
-      upper = upper["mean"]["variable"]
-      coverage_probability = (
-          (lower <= true_mean) & (true_mean <= upper)).mean("replicates").data
-      # The tolerance here is somewhat loose because we'd need a lot of
-      # replicates to estimate the coverage probability very accurately,
-      # and also the coverage may be slightly off due to the finite sample
-      # size (steps above) used. Still it's a useful check.
-      np.testing.assert_allclose(coverage_probability, 1-alpha, rtol=0.1)
-
+      test_utils.assert_coverage_probability_estimate_plausible(
+          inference,
+          true_value=true_mean,
+          metric_name="mean",
+          alpha=alpha,
+          rtol=0.01,
+          coverage_prob_significance_level=0.1,
+      )
+      test_utils.assert_p_value_consistent_with_confidence_interval(
+          inference, null_value=true_mean, metric_name="mean")
 
 if __name__ == "__main__":
   absltest.main()
