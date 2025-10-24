@@ -11,21 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The t-test and associated confidence intervals for evaluation metrics."""
+"""The t-test and associated confidence intervals for evaluation metrics.
+
+Includes extensions to handle autocorrelation and non-linear
+values_from_mean_statistics.
+"""
 
 from collections.abc import Mapping
 import dataclasses
-import logging
 
 import numpy as np
 import scipy
 from weatherbenchX import aggregation
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
+from weatherbenchX.statistical_inference import autodiff
 from weatherbenchX.statistical_inference import base
-from weatherbenchX.statistical_inference import baseline_comparison
 
 import xarray as xr
+import xarray.ufuncs as xu
 
 
 def _check_constant(data_array: xr.DataArray, dim: str, error_suffix: str = ''):
@@ -50,22 +54,28 @@ def _check_uniform_step(
     _check_constant(coord.diff(dim), dim, 'Non-uniform timestep not supported.')
 
 
-def _autocorrelation_estimate(
-    data_array: xr.DataArray,
+def  _variance_estimate_from_deviations(
+    deviations: xr.DataArray, dim: str, ddof: int = 1) -> xr.DataArray:
+  """Computes a variance estimate, given deviations from the mean."""
+  sample_size = deviations.sizes[dim]
+  return (deviations**2).sum(dim, skipna=False) / (sample_size - ddof)
+
+
+def _autocorrelation_estimate_from_deviations(
+    deviations: xr.DataArray,
     dim: str,
-    lag: int = 1,
-    skipna: bool = False) -> xr.DataArray:
-  mean = data_array.mean(dim, skipna=skipna)
-  variance = data_array.var(dim, skipna=skipna)
+    lag: int = 1
+    ) -> xr.DataArray:
+  """Computes an autocorrelation estimate, given deviations from the mean."""
+  variance = _variance_estimate_from_deviations(deviations, dim)
 
   # Drop coordinates on `dim` to allow alignment at lagged offsets:
-  data_array = data_array.drop_vars(
-      [name for name, coord in data_array.coords.items() if dim in coord.dims])
-  original = data_array.isel({dim: slice(0, -lag)})
-  lagged = data_array.isel({dim: slice(lag, None)})
+  deviations = deviations.drop_vars(
+      [name for name, coord in deviations.coords.items() if dim in coord.dims])
+  original = deviations.isel({dim: slice(0, -lag)})
+  lagged = deviations.isel({dim: slice(lag, None)})
 
-  return (((original - mean) * (lagged - mean)).mean(dim, skipna=skipna)
-          / variance)
+  return (original * lagged).mean(dim, skipna=False) / variance
 
 
 def _inflation_factor_from_autocorrelation(
@@ -116,9 +126,12 @@ class TTest(base.StatisticalInferenceMethod):
   r"""t-test for evaluation metrics, with optional autocorrelation adjustment.
 
   The t-test is used to test hypotheses about (and provide confidence intervals
-  for) means / differences of means, and so this only applies to Metrics which
-  are the mean of a single Statistic, or a linear function of the means of
-  multiple Statistics.
+  for) means. Here we extend it to handle non-linear functions of means too,
+  using the (multivariate) Delta Method, which approximates the function with a
+  1st-order Taylor series around the mean. This approximation is good if the
+  function is close to linear over the range of sampling variation of the mean
+  statistics, but might fail for highly nonlinear functions or smaller sample
+  sizes.
 
   The main assumptions of the standard t-test are:
 
@@ -185,57 +198,49 @@ class TTest(base.StatisticalInferenceMethod):
     self._dim = experimental_unit_dim
     self._temporal_autocorrelation = temporal_autocorrelation
 
-    for metric in metrics.values():
-      if not isinstance(metric, metrics_base.Statistic) and not (
-          isinstance(metric, baseline_comparison.BaselineComparison)
-          and isinstance(metric.metric, metrics_base.Statistic)
-          and isinstance(metric.baseline_metric, metrics_base.Statistic)):
-        # TODO(matthjw): The Metric interface could have a 'is_linear' property
-        # to help with this check, although perhaps a bit of a niche thing to
-        # justify requiring it from metric implementors.
-        logging.warning(
-            'The t-test only applies to means, and so can only be used with '
-            'Metrics which are the mean of a single statistic, or a linear '
-            'function of the means of multiple statistics. We weren\'t able to '
-            'verify that this requirement holds for Metric %s so please check '
-            'this yourself.',
-            type(metric)
-        )
-
-    # We also support only a constant weighting of experimental units, so we
-    # can take a mean of the per-unit means without having to apply any
-    # further weighting (which the standard t-test is not set up to handle).
-    xarray_tree.map_structure(
-        self._check_constant_weights, aggregated_statistics.sum_weights)
-
-    # This divides by the constant per-unit sum of weights to get the per-unit
-    # means, which we can then take a non-weighted mean of (since weights are
-    # constant across units).
-    per_unit_means = metrics_base.compute_metrics_from_statistics(
-        metrics, aggregated_statistics.mean_statistics())
+    # When the values_from_mean_statistics is a linear function,
+    # per_unit_tangents will just be the per-unit deviations from the mean,
+    # and the standard t-test applies.
+    #
+    # When the values_from_mean_statistics is not a linear function,
+    # per_unit_tangents will be stand-ins for the per-unit deviations which take
+    # into account the gradient of the function we're going to apply to the mean
+    # and its effect on the final variance. This is in effect using the delta
+    # method, a common approximation used in statistics for the variance of a
+    # nonlinear function. See docs on
+    # autodiff.per_unit_values_linearized_around_mean_statistics for more.
+    (values, per_unit_tangents
+     ) = autodiff.per_unit_values_linearized_around_mean_statistics(
+         metrics, aggregated_statistics, experimental_unit_dim)
 
     self._results = xarray_tree.map_structure(
-        self._compute_results, per_unit_means)
-
-  def _check_constant_weights(self, weights: xr.DataArray) -> None:
-    _check_constant(
-        weights, self._dim,
-        'Must have the same sum_weights for all values along'
-        'experimental_unit_dim in order to apply the t-test.')
+        self._compute_results, values, per_unit_tangents)
 
   def _compute_results(
-      self, per_unit_means: xr.DataArray) -> _TTestResults:
-    """Computes t-test results for a single DataArray of statistics."""
+      self,
+      mean: xr.DataArray,
+      per_unit_deviations: xr.DataArray) -> _TTestResults:
+    """Computes t-test results for a single variable of a single metric.
 
-    mean = per_unit_means.mean(dim=self._dim, skipna=False)
-    sample_size = per_unit_means.sizes[self._dim]
-    stddev = per_unit_means.std(dim=self._dim, skipna=False, ddof=1)
-    stderr = stddev / np.sqrt(sample_size)
+    Args:
+      mean: Mean value of the metric over all experimental units.
+      per_unit_deviations: Per-unit deviations from the mean. Adding `mean` to
+        this will give per-unit values of the metric.
+
+    Returns:
+      _TTestResults.
+    """
+    sample_size = per_unit_deviations.sizes[self._dim]
+    variance = _variance_estimate_from_deviations(
+        per_unit_deviations, self._dim, ddof=1)
+    stderr = xu.sqrt(variance / sample_size)
 
     if self._temporal_autocorrelation:
-      _check_uniform_step(per_unit_means, self._dim)
-      r1 = _autocorrelation_estimate(per_unit_means, self._dim, lag=1)
-      r2 = _autocorrelation_estimate(per_unit_means, self._dim, lag=2)
+      _check_uniform_step(per_unit_deviations, self._dim)
+      r1 = _autocorrelation_estimate_from_deviations(
+          per_unit_deviations, self._dim, lag=1)
+      r2 = _autocorrelation_estimate_from_deviations(
+          per_unit_deviations, self._dim, lag=2)
       # This is 'k' from the Geer paper, which is applied as an inflation
       # factor to the standard error in the t-test.
       k = _inflation_factor_from_autocorrelation(r1, r2)
@@ -247,12 +252,16 @@ class TTest(base.StatisticalInferenceMethod):
       # estimate and the t-distribution is still based on the original sample
       # size n however, not the smaller effective sample size. This will not
       # matter asymptotically but ideally something better would be done here
-      # for smaller sample sizes. TODO(matthjw): Find out if there's something
-      # better we could do here that doesn't introduce too much complexity.
+      # for smaller sample sizes.
       #
-      # Also Geer doesn't account for the fact that we're plugging in noisy
-      # estimates of the autocorrelation coefficients. Not sure there's a simple
-      # way to account for this without e.g. going to the bootstrap or similar?
+      # Also this method doesn't account for the fact that we're plugging in
+      # noisy estimates of the autocorrelation coefficients.
+      #
+      # TODO(matthjw): Find out if there's something better we could do here.
+      # There is a large literature on Heteroskedasticity and Autocorrelation
+      # Consistent (HAC) standard error estimators for example, although these
+      # have their own issues at small sample sizes and/or high degrees of
+      # autocorrelation.
 
     return _TTestResults(
         mean=mean,
