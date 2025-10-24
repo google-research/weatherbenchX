@@ -304,15 +304,6 @@ class StationaryBootstrapTest(absltest.TestCase):
     # for the non-linearity to have some effect and result in a sampling
     # distribution that's at least a bit skewed. There's also some temporal
     # autocorrelation thrown into the mix.
-    #
-    # Because the ratio function is extremely nonlinear over the range of the
-    # individual per-timestep values (which include zero for the denominator),
-    # the default block length selection approach (which computes the ratio on
-    # a per-timestep basis) fails here, with the per-timestep division
-    # destroying most of the relevant autocorrelation present in the numerator
-    # and denominator. Instead we specify a mean block length to use manually.
-    #
-    # Much more challenging than this and the bootstrap really starts to fail.
     np.random.seed(0)
     n = 1000
 
@@ -363,9 +354,6 @@ class StationaryBootstrapTest(absltest.TestCase):
         aggregated_statistics=agg_stats,
         experimental_unit_dim="steps",
         n_replicates=500,  # Internal bootstrap replicates.
-        # Automatic block length selection doesn't work well in this trickier
-        # scenario, so we specify a sensible mean block length manually.
-        mean_block_length=15,
     )
     # Now check that the (squared) standard error estimates are approximately
     # unbiased estimates of the (squared) true values under the sampling

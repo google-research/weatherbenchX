@@ -22,6 +22,7 @@ import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
+from weatherbenchX.statistical_inference import autodiff
 from weatherbenchX.statistical_inference import base
 from weatherbenchX.statistical_inference import utils
 
@@ -270,40 +271,30 @@ class StationaryBootstrap(Bootstrap):
   autocorrelation-corrected versions of it. There are still some caveats to
   note however:
 
-  # Optimal block length selection for functions of multiple time-series
+  # Block length selection for nonlinear functions of multiple time-series
 
-  The optimal block length selection algorithm we use was only designed to apply
-  to means of univariate time series, but our metrics in general can be computed
-  from arbitrary functions of the means of multiple time-series of statistics.
+  The optimal block length selection algorithm we use [2], [3] was designed to
+  apply to means of univariate time series, but our metrics in general can be
+  nonlinear functions f of the means of multiple time-series of statistics.
 
-  The compromise we make is to apply the block length selection procedure to
-  scalar values of the metric computed on a per-timestep basis. For metrics that
-  are a simple mean or a linear function of means this is using the method
-  exactly as intended. For non-linear functions of means, essentially we're
-  approximating f(mean(X)) as mean(f(X)) for the purposes of the block length
-  selection. This is justified when the function f is close to linear over the
-  range of variation of *per-timestep* values of X, but if f is very nonlinear
-  over this range then block length selection can fail badly and you are
-  advised to select an appropriate block length manually instead.
-  TODO(matthjw): Provide more options for this, e.g. a way to specify a
-  particular statistic to use for the block length selection instead of the
-  per-timestep values of the metric itself.
+  Our solution is to linearize the function f around the means, and then
+  apply block length selection to the time-series of per-timestep values of this
+  linearized function. We believe this is a reasonable approximation because:
+  * The mean of this timeseries is the correct value of the metric
+  * The variance estimate for the mean of the linearized values is a good
+    approximation of the variance of the actual metric value f(mean(X)),
+    provided that the function f is sufficiently linear over the range of
+    sampling variation we expect for the *means* of the statistics, which will
+    drop off with sample size.
+  * It's exactly correct in the common case where f is a linear function.
 
-  Other possible heuristic approaches seen in the literature are to base it on
-  the average or maximum of the optimal block lengths computed for each separate
-  univariate statistics time series, or on a VAR (vector auto-regressive) model
-  of the statistics. These may sometimes be too conservative, because they don't
-  take into account the potential of the function f to reduce the effect of
-  autocorrelation in some cases, for example where f computes something like
-  a difference of two positively-correlated time-series. A better solution may
-  be to linearize f around the mean, and then apply block length selection to
-  the per-timestep values of this linearized function. This would require the
-  gradient of f however.
-
-  From what I understand, automatic block-length selection for bootstrap methods
-  applied to multivariate time series data is a difficult open problem in
-  statistics. If the default approach doesn't work for you, you are free to
-  manually specify the block length to use, and you may sometimes need to.
+  In short, with a smooth function f this is valid asymptotically, and for
+  middling effective sample sizes we anticipate it will still be a good
+  enough approximation for the purposes of block length selection at least.
+  While it may seem a bit of a simplistic approximation, note that block
+  length selection for this general case of nonlinear functions and multiple
+  timeseries is an open research problem and I haven't been able to find a
+  better general method in the literature.
 
   # Stationarity assumption
 
@@ -394,13 +385,18 @@ class StationaryBootstrap(Bootstrap):
     self._stationary_bootstrap_indices = functools.lru_cache(
         maxsize=stationary_bootstrap_indices_cache_size)(
             stationary_bootstrap_indices)
-    self._point_estimates = {}
+
+    # We use linearized per-unit values for block length selection:
+    (self._point_estimates, self._per_unit_tangents
+     ) = autodiff.per_unit_values_linearized_around_mean_statistics(
+         metrics, aggregated_statistics, experimental_unit_dim)
+
     self._resampled_values = {}
     for metric_name, metric in metrics.items():
-      point_estimates, resampled_values = self._bootstrap_results_for_metric(
-          metric)
-      self._point_estimates[metric_name] = point_estimates
-      self._resampled_values[metric_name] = resampled_values
+      self._resampled_values[metric_name] = self._bootstrap_results_for_metric(
+          metric,
+          self._point_estimates[metric_name],
+          self._per_unit_tangents[metric_name])
 
   def _optimal_block_length(self, data_array: xr.DataArray) -> float:
     if self._mean_block_length is not None:
@@ -441,14 +437,12 @@ class StationaryBootstrap(Bootstrap):
     return result
 
   def _bootstrap_results_for_metric(
-      self, metric: metrics_base.Metric) -> tuple[
-          Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
+      self,
+      metric: metrics_base.Metric,
+      point_estimates: Mapping[Hashable, xr.DataArray],
+      per_unit_tangents: Mapping[Hashable, xr.DataArray],
+      ) -> Mapping[Hashable, xr.DataArray]:
 
-    point_estimates = metrics_base.compute_metric_from_statistics(
-        metric, self._aggregated_statistics.sum_along_dims(
-            [self._experimental_unit_dim]).mean_statistics())
-    per_unit_values = metrics_base.compute_metric_from_statistics(
-        metric, self._aggregated_statistics.mean_statistics())
     sum_weighted_stats = {
         stat_name: self._aggregated_statistics.sum_weighted_statistics[
             stat.unique_name]
@@ -514,27 +508,28 @@ class StationaryBootstrap(Bootstrap):
       # * Metrics which introduce some additional dimensions in their output
       #   which aren't present in the statistics, but use a different dimension
       #   name for them to any dimensions used in the statistics.
-      per_var_resampled_values = utils.apply_to_slices(
+      resampled_values[var_name] = utils.apply_to_slices(
           functools.partial(self._bootstrap_results_for_metric_scalar,
                             metric, var_name),
-          per_unit_values[var_name],
+          per_unit_tangents[var_name],
           sum_weighted_stats_for_this_var,
           sum_weights_for_this_var,
           dim=point_estimates[var_name].dims,
       )
-      resampled_values[var_name] = per_var_resampled_values
-    return point_estimates, resampled_values
+
+    return resampled_values
 
   def _bootstrap_results_for_metric_scalar(
       self,
       metric: metrics_base.Metric,
       var_name: str,
-      per_unit_values: xr.DataArray,
+      per_unit_tangents: xr.DataArray,
       sum_weighted_stats: Mapping[str, Mapping[Hashable, xr.DataArray]],
       sum_weights: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> xr.DataArray:
-    n_data = per_unit_values.sizes[self._experimental_unit_dim]
-    mean_block_length = self._optimal_block_length(per_unit_values)
+    n_data = per_unit_tangents.sizes[self._experimental_unit_dim]
+    mean_block_length = self._optimal_block_length(per_unit_tangents)
+
     bootstrap_indices = self._stationary_bootstrap_indices(
         n_data=n_data,
         mean_block_length=mean_block_length,
