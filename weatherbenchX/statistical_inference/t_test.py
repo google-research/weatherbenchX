@@ -50,7 +50,7 @@ def _check_uniform_step(
     data_array: xr.DataArray, dim: str) -> None:
   """Checks that any name coordinate for `dim` has uniform steps."""
   coord = data_array.coords.get(dim)
-  if coord is not None:
+  if coord is not None and np.issubdtype(coord.dtype, np.number):
     _check_constant(coord.diff(dim), dim, 'Non-uniform timestep not supported.')
 
 
@@ -75,7 +75,12 @@ def _autocorrelation_estimate_from_deviations(
   original = deviations.isel({dim: slice(0, -lag)})
   lagged = deviations.isel({dim: slice(lag, None)})
 
-  return (original * lagged).mean(dim, skipna=False) / variance
+  result = (original * lagged).mean(dim, skipna=False) / variance
+  # If variance is zero, the timeseries is constant and autocorrelation is
+  # technically undefined, but we can safely treat it as zero since no
+  # autocorrelation correction is required. This avoids NaN values in
+  # confidence intervals and standard errors.
+  return result.where(variance != 0, 0)
 
 
 def _inflation_factor_from_autocorrelation(
@@ -117,7 +122,16 @@ class _TTestResults:
 
   def p_value(self, null_value: float = 0.) -> xr.DataArray:
     """p-value for a two-sided test with the given null hypothesis value."""
-    z_score = (self.mean - null_value) / self.standard_error
+    difference = self.mean - null_value
+    # If the difference is zero and the standard error is zero, then the
+    # distribution is constant with the null value in the 'center' (or rather,
+    # only value) of the distribution, so we set the z-score to zero giving
+    # a p-value of 1.
+    # If the difference is non-zero but the standard error is zero, the
+    # null value is outside the support of the (constant) distribution, so we
+    # let the division by zero happen and give +/-inf and a p-value of zero.
+    z_score = xr.where((difference == 0) & (self.standard_error == 0),
+                       0., difference / self.standard_error)
     t_dist = scipy.stats.t(df=self.sample_size - 1)
     return 2 * (1 - xr.apply_ufunc(t_dist.cdf, abs(z_score)))
 
