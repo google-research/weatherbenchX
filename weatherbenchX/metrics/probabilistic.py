@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
-from typing import Mapping, Optional, Tuple
+from typing import Hashable, Mapping, Tuple
 import numpy as np
 import scipy.stats
 from weatherbenchX.metrics import base
@@ -21,6 +21,7 @@ from weatherbenchX.metrics import categorical
 from weatherbenchX.metrics import deterministic
 from weatherbenchX.metrics import wrappers
 import xarray as xr
+import xarray.ufuncs as xu
 
 ### Statistics
 # TODO(srasp): NaN mask seem to get lost in some probabilistic metrics.
@@ -649,7 +650,7 @@ class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
+    return xu.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
 
 
 class SpreadSkillRatio(base.PerVariableMetric):
@@ -694,7 +695,7 @@ class SpreadSkillRatio(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(
+    return xu.sqrt(
         statistic_values['EnsembleVariance']
         / statistic_values['EnsembleMeanSquaredError']
     )
@@ -742,7 +743,7 @@ class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(
+    return xu.sqrt(
         statistic_values['EnsembleVariance']
         / statistic_values['UnbiasedEnsembleMeanSquaredError']
     )
@@ -781,10 +782,56 @@ class EnsembleRootMeanVariance(base.PerVariableMetric):
       self,
       mean_statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
-    return np.sqrt(mean_statistic_values['EnsembleVariance'])
+    return xu.sqrt(mean_statistic_values['EnsembleVariance'])
 
 
-class RelativeEconomicValue(base.PerVariableMetric):
+def _select_optimal_thresholds(
+    values: xr.DataArray, optimal_thresholds: xr.DataArray
+) -> xr.DataArray:
+  """Selects the optimal thresholds for each cost/loss ratio."""
+  # These are the indices that we can use with a .isel.
+  optimal_indices = xr.core.indexing.map_index_queries(
+      values,
+      dict(threshold=optimal_thresholds)
+  ).dim_indexers['threshold']
+
+  # We need some extra work here to support jax arrays for the autodiff
+  # functionality used by weatherbenchX.statistical_inference:
+  try:
+    import jax  # pylint: disable=g-import-not-at-top
+  except ImportError:
+    jax = None
+
+  if jax and isinstance(values.data, jax.Array):
+    # This is equivalent to the .isel below, but for the vectorized case
+    # when extra dimensions are present, we have to implement a
+    # jax-compatible alternative to avoid a 'Vectorized indexing is not
+    # supported' error from xarray, which doesn't know how to do this for
+    # jax arrays.
+
+    # We broadcast the values and indices to have compatible shapes except
+    # for their last axis (which will respectively contain thresholds, and
+    # indexes into the threshold dimension for each cost/loss ratio).
+    values, indices = xr.broadcast(
+        values, optimal_indices, exclude=['threshold', 'cost_loss_ratio'])
+
+    # We then apply a one-dimensional multiple-index slice, vmap'd once
+    # for each of the aligned leading axes to make it vectorize over these
+    # other axes.
+    select = lambda arr, i: arr[i]
+    for _ in range(indices.ndim - 1):
+      select = jax.vmap(select, in_axes=0, out_axes=0)
+
+    return xr.apply_ufunc(
+        select, values, optimal_indices,
+        input_core_dims=[['threshold'], ['cost_loss_ratio']],
+        output_core_dims=[['cost_loss_ratio']])
+  else:
+    # Much simpler:
+    return values.isel(threshold=optimal_indices)
+
+
+class RelativeEconomicValue(base.Metric):
   """Relative economic value.
 
   This metric assumes that the targets are a binary and the predictions
@@ -793,9 +840,27 @@ class RelativeEconomicValue(base.PerVariableMetric):
   """
 
   def __init__(
-      self, ensemble_size: int, cost_loss_ratios: Optional[np.ndarray] = None
+      self,
+      ensemble_size: int,
+      cost_loss_ratios: np.ndarray | None = None,
+      optimal_thresholds: Mapping[Hashable, xr.DataArray] | None = None,
   ):
+    """Init.
 
+    Args:
+      ensemble_size: The size of the ensemble.
+      cost_loss_ratios: The cost/loss ratios to compute REV for. Default:
+        geometric progression from 0.005 to 1, not including 1.
+      optimal_thresholds: Optional mapping of variable name to optimal
+        thresholds to use for each cost/loss ratio. Its arrays should have a
+        'cost_loss_ratio' dimension whose coordinate matches the
+        `cost_loss_ratios` argument. They may also have dimensions corresponding
+        to other dimensions that will be present in the statistics, where an
+        optimal threshold has been selected separately for each value along
+        those dimensions.
+        If it's None, REV is computed for all thresholds for all cost/loss
+        ratios.
+    """
     thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
 
     self._thresholds = xr.DataArray(
@@ -813,6 +878,20 @@ class RelativeEconomicValue(base.PerVariableMetric):
         dims=['cost_loss_ratio'],
         coords={'cost_loss_ratio': cost_loss_ratios},
     )
+
+    if optimal_thresholds is not None:
+      for var in optimal_thresholds.values():
+        if 'cost_loss_ratio' not in var.dims:
+          raise ValueError(
+              'optimal_thresholds must have "cost_loss_ratio" dimensions.'
+          )
+        if not var.coords['cost_loss_ratio'].equals(self._cost_loss_ratio):
+          raise ValueError(
+              'optimal_thresholds must have cost_loss_ratio coordinates with '
+              'the same values as the cost_loss_ratios argument.'
+          )
+
+    self._optimal_thresholds = optimal_thresholds
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -859,9 +938,29 @@ class RelativeEconomicValue(base.PerVariableMetric):
     fn = xr.concat([at(zero, 0.0), fn, at(base_rate, 1.0)], dim='threshold')
     return tp, fp, fn
 
+  def values_from_mean_statistics(
+      self,
+      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    # Like base.PerVariableMetric.values_from_mean_statistics, but passes the
+    # name of each variable through as well. TODO(matthjw): Consider refactoring
+    # PerVariableMetrics and all subclasses to take this extra var_name
+    # argument.
+    common_variables = set.intersection(
+        *[set(statistic_values[s]) for s in self.statistics])
+    values = {}
+    for var_name in common_variables:
+      stats_per_variable = {s: statistic_values[s][var_name]
+                            for s in self.statistics}
+      values[var_name] = self._values_from_mean_statistics_per_variable(
+          stats_per_variable, var_name
+      )
+    return values
+
   def _values_from_mean_statistics_per_variable(
       self,
       statistic_values: Mapping[str, xr.DataArray],
+      var_name: str,
   ) -> xr.DataArray:
     """Computes REV from confusion matrices for all c/l ratios & thresholds.
 
@@ -877,9 +976,14 @@ class RelativeEconomicValue(base.PerVariableMetric):
 
     Args:
       statistic_values: The confusion matrices components for all thresholds.
+      var_name: The name of the variable to compute REV for.
 
     Returns:
-      The REV values for all thresholds and cost/loss ratios.
+      The REV values. If optimal_thresholds is None, REV is computed for all
+      thresholds and cost/loss ratios, with dimensions for both in the result.
+      If optimal_thresholds is specified, REV is computed only for the optimal
+      thresholds for each cost/loss ratio, with a cost_loss_ratio dimension but
+      no threshold dimension.
     """
 
     tp = statistic_values['TruePositives']
@@ -887,7 +991,13 @@ class RelativeEconomicValue(base.PerVariableMetric):
     fn = statistic_values['FalseNegatives']
     tp, fp, fn = self._add_constant_threshold_results(tp, fp, fn)
 
+    if self._optimal_thresholds is not None:
+      optimal_thresholds = self._optimal_thresholds[var_name]
+      tp = _select_optimal_thresholds(tp, optimal_thresholds)
+      fp = _select_optimal_thresholds(fp, optimal_thresholds)
+      fn = _select_optimal_thresholds(fn, optimal_thresholds)
+
     pred_cost = self._cost_loss_ratio * (tp + fp) + fn
     perf_cost = self._cost_loss_ratio * (tp + fn)
-    clim_cost = np.minimum(self._cost_loss_ratio, tp + fn)
+    clim_cost = xu.minimum(self._cost_loss_ratio, tp + fn)
     return (clim_cost - pred_cost) / (clim_cost - perf_cost)
