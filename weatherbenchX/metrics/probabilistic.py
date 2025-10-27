@@ -788,22 +788,43 @@ class RelativeEconomicValue(base.PerVariableMetric):
   """Relative economic value.
 
   This metric assumes that the targets are a binary and the predictions
-  are probabilities between in [0, 1]. It computes REV across all possible
-  decision thresholds for a given ensemble size.
+  are probabilities between in [0, 1].
+
+  Defaults to 51 cost-loss ratios spaced uniformly on a log scale from 0.005 to
+  1, unless overridden by setting cost_loss_ratios directly.
+
+  By default, REV is computed across all possible decision thresholds for a
+  given ensemble size. However, it is also possible to specify the desired
+  probability thresholds. This is useful if you only want to compute REV for a
+  subset of all possible probability thresholds.
+
+  TODO(tomandersson, matthjw): Add a helper method to ensure overridden
+  probability thresholds are a subset of the between-each-ensemble-member-count
+  thresholds, e.g. by snapping-to-nearest then deduplicating.
   """
 
   def __init__(
-      self, ensemble_size: int, cost_loss_ratios: Optional[np.ndarray] = None
+      self,
+      ensemble_size: Optional[int] = None,
+      cost_loss_ratios: Optional[np.ndarray] = None,
+      probability_thresholds: Optional[np.ndarray] = None,
+      statistic_suffix: Optional[str] = None,
   ):
 
-    thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
-
-    self._thresholds = xr.DataArray(
-        thresholds, dims=['threshold'], coords={'threshold': thresholds}
-    )
-    # TODO(tomandersson): Make this configurable when thresholds themselves are
-    # configurable.
-    self._unique_name_suffix = 'all_thresholds_for_ensemble_size'
+    if ensemble_size is None and probability_thresholds is None:
+      raise ValueError(
+          'Either ensemble_size or probability_thresholds must be specified.'
+      )
+    if probability_thresholds is not None and ensemble_size is not None:
+      raise ValueError(
+          'Only one of ensemble_size or probability_thresholds must be'
+          ' specified.'
+      )
+    if probability_thresholds is not None and statistic_suffix is None:
+      raise ValueError(
+          'If probability_thresholds is specified, statistic_suffix must be'
+          ' specified.'
+      )
 
     if cost_loss_ratios is None:
       cost_loss_ratios = np.geomspace(0.005, 1, 51)[:-1]
@@ -813,6 +834,21 @@ class RelativeEconomicValue(base.PerVariableMetric):
         dims=['cost_loss_ratio'],
         coords={'cost_loss_ratio': cost_loss_ratios},
     )
+
+    self._thresholds = probability_thresholds
+    if self._thresholds is None:
+      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
+      if statistic_suffix is None:
+        statistic_suffix = 'all_thresholds_for_ensemble_size'
+    if not np.all(self._thresholds >= 0.0) or not np.all(
+        self._thresholds <= 1.0
+    ):
+      raise ValueError(
+          'Probability thresholds must be in [0, 1], got'
+          f' {self._thresholds=}.'
+      )
+
+    self._unique_name_suffix = statistic_suffix or ''
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
