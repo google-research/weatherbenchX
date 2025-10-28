@@ -848,6 +848,157 @@ class MetricsTest(parameterized.TestCase):
     )
     xr.testing.assert_allclose(result, expected_result)
 
+  def _get_opportunism_test_data(self):
+    preds = test_utils.mock_prediction_data(
+        ensemble_size=10,
+        time_start='2020-01-01T00',
+        time_stop='2020-01-01T00',
+        variables_2d=['2m_temperature'],
+        variables_3d=[],
+    ).rename(time='init_time', prediction_timedelta='lead_time')
+
+    # Climatology: 2m_temperature quantiles 0.1, 0.5, 0.9 are 0, 1, 2.
+    # Spread q0.9-q0.1 = 2.
+    def make_clim_var(data):
+      return xr.full_like(
+          preds['2m_temperature'].isel(
+              init_time=0, lead_time=0, realization=0, drop=True
+          ),
+          fill_value=data,
+      )
+
+    clim_da = xr.concat(
+        [make_clim_var(0), make_clim_var(1), make_clim_var(2)], dim='quantile'
+    ).assign_coords(quantile=[0.1, 0.5, 0.9])
+    clim_da = clim_da.expand_dims(dayofyear=list(range(1, 12)), hour=[0])
+    clim = xr.Dataset({'2m_temperature': clim_da})
+
+    # Predictions: 5 members at 0.9, 5 members at 1.1.
+    # q0.1=0.9, mean=1, q0.9=1.1. Spread=0.2.
+    preds['2m_temperature'] = xr.concat(
+        [
+            xr.full_like(
+                preds['2m_temperature'].isel(realization=slice(0, 5)), 0.9
+            ),
+            xr.full_like(
+                preds['2m_temperature'].isel(realization=slice(5, 10)), 1.1
+            ),
+        ],
+        dim='realization',
+    )
+    targs = preds.mean('realization')
+    return preds, targs, clim
+
+  def test_confident(self):
+    preds, targs, clim = self._get_opportunism_test_data()
+    confident_stat = categorical.Confident(
+        ensemble_dim='realization',
+        climatology=clim,
+        confidence_threshold=0.7,
+    )
+    res = confident_stat.compute(preds, targs)['2m_temperature']
+    self.assertTrue(res.all())
+
+    not_confident_stat = categorical.Confident(
+        ensemble_dim='realization',
+        climatology=clim,
+        confidence_threshold=0.01,
+    )
+    res = not_confident_stat.compute(preds, targs)['2m_temperature']
+    self.assertFalse(res.all())
+
+  def test_covered(self):
+    preds, targs, _ = self._get_opportunism_test_data()
+    covered_stat = categorical.Covered(ensemble_dim='realization')
+    res = covered_stat.compute(preds, targs)['2m_temperature']
+    self.assertTrue(res.all())
+
+    targs['2m_temperature'] = 0.0
+    res = covered_stat.compute(preds, targs)['2m_temperature']
+    self.assertFalse(res.all())
+
+  def test_jaccard_distant(self):
+    preds, targs, clim = self._get_opportunism_test_data()
+    jd_stat = categorical.JaccardDistant(
+        ensemble_dim='realization',
+        climatology=clim,
+        threshold=0.75,
+    )
+    res = jd_stat.compute(preds, targs)['2m_temperature']
+    self.assertTrue(res.all())
+    not_jd_stat = categorical.JaccardDistant(
+        ensemble_dim='realization',
+        climatology=clim,
+        threshold=0.95,
+    )
+    res = not_jd_stat.compute(preds, targs)['2m_temperature']
+    self.assertFalse(res.all())
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='all_true',
+          is_confident=True,
+          is_covered=True,
+          is_jaccard_distant=True,
+          expected_result=1.0,
+      ),
+      dict(
+          testcase_name='jaccard_false',
+          is_confident=True,
+          is_covered=True,
+          is_jaccard_distant=False,
+          expected_result=0.0,
+      ),
+      dict(
+          testcase_name='covered_false',
+          is_confident=True,
+          is_covered=False,
+          is_jaccard_distant=True,
+          expected_result=0.0,
+      ),
+      dict(
+          testcase_name='confident_false',
+          is_confident=False,
+          is_covered=True,
+          is_jaccard_distant=True,
+          expected_result=0.0,
+      ),
+  )
+  def test_opportunism(
+      self, is_confident, is_covered, is_jaccard_distant, expected_result
+  ):
+    preds, targs, clim = self._get_opportunism_test_data()
+
+    # For default parameters spread_quantile_boundaries=(0.1, 0.9),
+    # confidence_threshold=0.7:
+    # pred_spread = 0.2. clim_spread = 2.
+    # 0.2 < 0.7 * 2 = 1.4 -> Confident=True.
+
+    # For Covered statistic with default quantiles=(0.1, 0.9):
+    # pred_q0.1=0.9, pred_q0.9=1.1. target=1.
+    # 0.9 <= 1 <= 1.1 -> Covered=True.
+
+    # For JaccardDistant statistic with threshold=0.75:
+    # jaccard distance = 0.9.
+    # 0.9 > 0.75 -> JaccardDistant=True.
+
+    metrics = {
+        'opp2': categorical.Opportunism(
+            ensemble_dim='realization',
+            climatology=clim,
+            is_confident=is_confident,
+            is_covered=is_covered,
+            is_jaccard_distant=is_jaccard_distant,
+        )
+    }
+    results = compute_all_metrics(
+        metrics,
+        preds,
+        targs,
+        reduce_dims=['init_time', 'lead_time', 'latitude', 'longitude'],
+    )
+    self.assertEqual(results['opp2.2m_temperature'], expected_result)
+
   @parameterized.named_parameters(
       dict(
           testcase_name=f'EnsembleSize{size}_{sort=}_{fair=}',

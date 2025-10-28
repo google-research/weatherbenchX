@@ -13,11 +13,12 @@
 # limitations under the License.
 """Implementations of categorical metrics."""
 
-from typing import Hashable, Mapping, Sequence, Union
+from typing import Hashable, Mapping, Sequence, Union, final
 import numpy as np
 from weatherbenchX.metrics import base
 from weatherbenchX.metrics import wrappers
 import xarray as xr
+from xarray.core import dataarray
 
 
 class TruePositives(base.PerVariableStatistic):
@@ -583,3 +584,276 @@ class Reliability(base.PerVariableMetric):
     return statistic_values['TruePositives'] / (
         statistic_values['TruePositives'] + statistic_values['FalsePositives']
     )
+
+
+class Confident(base.PerVariableStatisticWithClimatology):
+  """Forecast confidence.
+
+  Whether the prediction spread < threshold * climatological spread.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      spread_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+      confidence_threshold: float = 0.7,
+  ):
+    super().__init__(climatology)
+    self._ensemble_dim = ensemble_dim
+    self._spread_low, self._spread_high = spread_quantile_boundaries
+    self._confidence_threshold = confidence_threshold
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'Confident'
+        + f'_conf_thres={self._confidence_threshold}'
+        + f'_spread_low={self._spread_low}'
+        + f'_spread_high={self._spread_high}'
+    )
+
+  def _compute_per_variable_with_aligned_climatology(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      aligned_climatology: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes confidence per variable."""
+    del targets  # Unused.
+
+    # Get the spread of the predictions.
+    predictions_spread = predictions.quantile(
+        self._spread_high, dim=self._ensemble_dim
+    ) - predictions.quantile(self._spread_low, dim=self._ensemble_dim)
+
+    # Climatologies are already quantiles.
+    climatology_spread = aligned_climatology.sel(
+        quantile=self._spread_high
+    ) - aligned_climatology.sel(quantile=self._spread_low)
+
+    return predictions_spread < self._confidence_threshold * climatology_spread
+
+
+class Covered(base.PerVariableStatistic):
+  """Forecast coverage.
+
+  Whether the target lies within a prediction interval with specified quantile
+  boundaries.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      interval_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+  ):
+    self._ensemble_dim = ensemble_dim
+    self._interval_low, self._interval_high = interval_quantile_boundaries
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'Covered'
+        + f'_interval_low={self._interval_low}'
+        + f'_interval_high={self._interval_high}'
+    )
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes coverage per variable."""
+    predictions_low = predictions.quantile(
+        self._interval_low, dim=self._ensemble_dim
+    )
+    predictions_high = predictions.quantile(
+        self._interval_high, dim=self._ensemble_dim
+    )
+    return (predictions_low <= targets) & (targets <= predictions_high)
+
+
+class JaccardDistant(base.PerVariableStatisticWithClimatology):
+  """Thresholded Jaccard distance of prediction interval from climatology.
+
+  Whether the Jaccard distance between the forecast prediction interval and
+  climatology prediction interval is greater than a threshold.
+
+  Jaccard Distance is defined as 1 - |A ∩ B| / |A ∪ B|, where A is the set of
+  points in the forecast interval and B is the set of points in the climatology
+  interval.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      threshold: float = 0.75,
+      interval_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+  ):
+    super().__init__(climatology)
+    self._ensemble_dim = ensemble_dim
+    self._threshold = threshold
+    self._interval_low, self._interval_high = interval_quantile_boundaries
+
+  @property
+  def unique_name(self) -> str:
+    return (
+        'JaccardDistant'
+        + f'_threshold={self._threshold}'
+        + f'_interval_low={self._interval_low}'
+        + f'_interval_high={self._interval_high}'
+    )
+
+  def _compute_per_variable_with_aligned_climatology(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      aligned_climatology: xr.DataArray,
+  ) -> xr.DataArray:
+    """Computes jaccard distance per variable."""
+    del targets  # Unused.
+    predictions_low = predictions.quantile(
+        self._interval_low, dim=self._ensemble_dim
+    )
+    predictions_high = predictions.quantile(
+        self._interval_high, dim=self._ensemble_dim
+    )
+    climatology_low = aligned_climatology.sel(quantile=self._interval_low)
+    climatology_high = aligned_climatology.sel(quantile=self._interval_high)
+
+    # A ∩ B = max(min(A), min(B)) - min(max(A), max(B))
+    max_of_lows = np.maximum(predictions_low, climatology_low)
+    min_of_highs = np.minimum(predictions_high, climatology_high)
+
+    # Length of intersection is the difference. If they don't overlap,
+    # this difference could be negative, so we take the max with 0.
+    intersection_length = np.maximum(0, min_of_highs - max_of_lows)
+
+    # |A ∪ B| = |A| + |B| - |A ∩ B|
+    predictions_interval_length = predictions_high - predictions_low
+    climatology_interval_length = climatology_high - climatology_low
+    union_length = (
+        predictions_interval_length + climatology_interval_length
+    ) - intersection_length
+
+    # We need to handle the case where union_length is 0. This occurs if both
+    # intervals are identical single points (e.g., [5, 5] and [5, 5]). In this
+    # specific case, the Jaccard Index should be 1 (perfect overlap). Note that
+    # in this case the intersection_length will also be 0.
+    jaccard_index = xr.where(
+        union_length > 0,
+        intersection_length / union_length,
+        1.0
+    )
+
+    jaccard_distance = 1 - jaccard_index
+    return jaccard_distance > self._threshold
+
+
+class Opportunism(base.PerVariableMetric):
+  """Opporunism.
+
+  Fraction of forecast that is (un)confident, (un)covered, and
+  (un)jaccard-distant.
+  """
+
+  def __init__(
+      self,
+      ensemble_dim: str,
+      climatology: xr.Dataset,
+      is_confident: bool,
+      is_covered: bool | None = None,
+      is_jaccard_distant: bool | None = None,
+      confidence_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+      coverage_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+      jaccard_distance_quantile_boundaries: tuple[float, float] = (0.1, 0.9),
+      confidence_threshold: float = 0.7,
+      jaccard_distance_threshold: float = 0.75,
+  ):
+    """Initializes the Opportunism metric.
+
+    Args:
+      ensemble_dim: The dimension name of the ensemble.
+      climatology: The climatology dataset.
+      is_confident: Whether to compute if the forecast is confident or not in
+        the metric.
+      is_covered: Whether to compute if the forecast is covered or not in the
+        metric. If not set, the coverage will not be computed.
+      is_jaccard_distant: Whether to compute if the forecast is jaccard-distant
+        or not in the metric. If not set, the jaccard-distance will not be
+        computed.
+      confidence_quantile_boundaries: The quantiles boundaries to use.
+      coverage_quantile_boundaries: The quantiles boundaries to use.
+      jaccard_distance_quantile_boundaries: The quantiles boundaries to use.
+      confidence_threshold: The threshold to use for confidence.
+      jaccard_distance_threshold: The threshold to use for jaccard-distance.
+    """
+
+    self._is_confident = is_confident
+    self._is_covered = is_covered
+    self._is_jaccard_distant = is_jaccard_distant
+    self._ensemble_dim = ensemble_dim
+    self._climatology = climatology
+    self._confidence_quantile_boundaries = confidence_quantile_boundaries
+    self._coverage_quantile_boundaries = coverage_quantile_boundaries
+    self._jaccard_distance_quantile_boundaries = (
+        jaccard_distance_quantile_boundaries
+    )
+    self._confidence_threshold = confidence_threshold
+    self._jaccard_distance_threshold = jaccard_distance_threshold
+
+  @final
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    # Always compute confidence.
+    statistics = {
+        'Confident': Confident(
+            ensemble_dim=self._ensemble_dim,
+            climatology=self._climatology,
+            spread_quantile_boundaries=self._confidence_quantile_boundaries,
+            confidence_threshold=self._confidence_threshold,
+        ),
+    }
+    # Conditionally compute coverage and jaccard-distance if they're actually
+    # being used.
+    if self._is_covered is not None:
+      statistics['Covered'] = Covered(
+          ensemble_dim=self._ensemble_dim,
+          interval_quantile_boundaries=self._coverage_quantile_boundaries,
+      )
+    if self._is_jaccard_distant is not None:
+      statistics['JaccardDistant'] = JaccardDistant(
+          ensemble_dim=self._ensemble_dim,
+          climatology=self._climatology,
+          threshold=self._jaccard_distance_threshold,
+          interval_quantile_boundaries=self._jaccard_distance_quantile_boundaries,
+      )
+    return statistics
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes opportunism per variable."""
+    confident = statistic_values['Confident']
+    if self._is_confident:
+      statistics_values = confident
+    else:
+      statistics_values = 1 - confident
+
+    if self._is_covered is not None:
+      covered = statistic_values['Covered']
+      if self._is_covered:
+        statistics_values = statistics_values * covered
+      else:
+        statistics_values = statistics_values * (1 - covered)
+
+    if self._is_jaccard_distant is not None:
+      jaccard_distant = statistic_values['JaccardDistant']
+      if self._is_jaccard_distant:
+        statistics_values = statistics_values * jaccard_distant
+      else:
+        statistics_values = statistics_values * (1 - jaccard_distant)
+
+    return statistics_values
