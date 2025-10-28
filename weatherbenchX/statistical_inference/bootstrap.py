@@ -111,6 +111,8 @@ class Bootstrap(base.StatisticalInferenceMethod):
 
     def p_value_numpy_1d(resampled: np.ndarray) -> float:
       resampled = resampled[~np.isnan(resampled)]  # Equiv. to skipna=True.
+      if resampled.size == 0:
+        return np.nan
       data = np.sort(resampled)
       q = np.linspace(0, 1, data.shape[0])
       empirical_cdf_at_null = np.interp(null_value, data, q)

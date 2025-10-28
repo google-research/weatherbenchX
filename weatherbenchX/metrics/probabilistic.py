@@ -21,6 +21,7 @@ from weatherbenchX.metrics import categorical
 from weatherbenchX.metrics import deterministic
 from weatherbenchX.metrics import wrappers
 import xarray as xr
+import xarray.ufuncs as xu
 
 ### Statistics
 # TODO(srasp): NaN mask seem to get lost in some probabilistic metrics.
@@ -649,7 +650,7 @@ class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
+    return xu.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
 
 
 class SpreadSkillRatio(base.PerVariableMetric):
@@ -694,7 +695,7 @@ class SpreadSkillRatio(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(
+    return xu.sqrt(
         statistic_values['EnsembleVariance']
         / statistic_values['EnsembleMeanSquaredError']
     )
@@ -742,7 +743,7 @@ class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(
+    return xu.sqrt(
         statistic_values['EnsembleVariance']
         / statistic_values['UnbiasedEnsembleMeanSquaredError']
     )
@@ -781,7 +782,7 @@ class EnsembleRootMeanVariance(base.PerVariableMetric):
       self,
       mean_statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
-    return np.sqrt(mean_statistic_values['EnsembleVariance'])
+    return xu.sqrt(mean_statistic_values['EnsembleVariance'])
 
 
 class RelativeEconomicValue(base.PerVariableMetric):
@@ -925,5 +926,5 @@ class RelativeEconomicValue(base.PerVariableMetric):
 
     pred_cost = self._cost_loss_ratio * (tp + fp) + fn
     perf_cost = self._cost_loss_ratio * (tp + fn)
-    clim_cost = np.minimum(self._cost_loss_ratio, tp + fn)
+    clim_cost = xu.minimum(self._cost_loss_ratio, tp + fn)
     return (clim_cost - pred_cost) / (clim_cost - perf_cost)

@@ -143,5 +143,34 @@ class TTestTest(absltest.TestCase):
       test_utils.assert_p_value_consistent_with_confidence_interval(
           inference, null_value=true_mean, metric_name="mean")
 
+  def test_t_test_for_constant_sequence(self):
+    # We see constant sequences in some corner cases. When there's zero
+    # variation we want a zero-width confidence interval, rather than NaNs, say.
+    data = xr.DataArray(data=np.ones(100), dims=("steps",))
+    metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
+    inference = t_test.TTest(
+        metrics=metrics,
+        aggregated_statistics=aggregated_stats,
+        experimental_unit_dim="steps",
+        temporal_autocorrelation=True,
+    )
+    point_estimate = inference.point_estimates()["mean"]["variable"]
+    np.testing.assert_allclose(point_estimate.data, 1.)
+
+    stderr_estimate = inference.standard_error_estimates()
+    np.testing.assert_allclose(stderr_estimate["mean"]["variable"].data, 0.)
+
+    lower, upper = inference.confidence_intervals(alpha=0.05)
+    lower = lower["mean"]["variable"]
+    upper = upper["mean"]["variable"]
+    np.testing.assert_allclose(lower.data, 1.)
+    np.testing.assert_allclose(upper.data, 1.)
+
+    p = inference.p_values(null_value=1.)
+    np.testing.assert_allclose(p["mean"]["variable"].data, 1.)
+    p = inference.p_values(null_value=2.)
+    np.testing.assert_allclose(p["mean"]["variable"].data, 0.)
+
+
 if __name__ == "__main__":
   absltest.main()

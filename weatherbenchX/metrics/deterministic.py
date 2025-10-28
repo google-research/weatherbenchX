@@ -19,6 +19,7 @@ import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 import xarray as xr
+import xarray.ufuncs as xu
 
 
 ### Statistics
@@ -257,7 +258,7 @@ class RMSE(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['SquaredError'])
+    return xu.sqrt(statistic_values['SquaredError'])
 
 
 class WindVectorRMSE(base.Metric):
@@ -303,7 +304,7 @@ class WindVectorRMSE(base.Metric):
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
     return xarray_tree.map_structure(
-        np.sqrt, statistic_values['WindVectorSquaredError']
+        xu.sqrt, statistic_values['WindVectorSquaredError']
     )
 
 
@@ -331,8 +332,8 @@ class ACC(base.PerVariableMetric):
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['AnomalyCovariance'] / (
-        np.sqrt(statistic_values['SquaredPredictionAnomaly'])
-        * np.sqrt(statistic_values['SquaredTargetAnomaly'])
+        xu.sqrt(statistic_values['SquaredPredictionAnomaly'])
+        * xu.sqrt(statistic_values['SquaredTargetAnomaly'])
     )
 
 
@@ -358,4 +359,4 @@ class PredictionActivity(base.PerVariableMetric):
       statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['SquaredPredictionAnomaly'])
+    return xu.sqrt(statistic_values['SquaredPredictionAnomaly'])
