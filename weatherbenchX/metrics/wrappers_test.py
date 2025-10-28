@@ -27,7 +27,10 @@ class ContinuousToBinaryTest(parameterized.TestCase):
   def test_constant_threshold(self):
     target = test_utils.mock_target_data(random=True)
     ctb = wrappers.ContinuousToBinary(
-        which='both', threshold_value=0.5, threshold_dim='threshold'
+        which='both',
+        threshold_value=0.5,
+        threshold_dim='threshold',
+        unique_name_suffix='test',
     )
 
     x = target.geopotential

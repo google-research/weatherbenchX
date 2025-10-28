@@ -532,7 +532,7 @@ class Reliability(base.PerVariableMetric):
   predictions. It will automatically apply binning to the predictions into 10
   equal-width bins, assuming the predictions are in [0, 1]. You can modify the
   number of bins and the bin edges by passing in `bin_values` and `bin_dim`. For
-  each bin of predicted probabilities, the metric will compute the  probability
+  each bin of predicted probabilities, the metric will compute the probability
   of the positive class according to the ground truth.
   """
 
@@ -552,9 +552,11 @@ class Reliability(base.PerVariableMetric):
           1.
       ),
       bin_dim: str = 'reliability_bin',
+      statistic_suffix: str | None = None,
   ):
     self._bin_values = bin_values
     self._bin_dim = bin_dim
+    self._unique_name_suffix = statistic_suffix
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -562,6 +564,7 @@ class Reliability(base.PerVariableMetric):
         which='predictions',
         bin_values=self._bin_values,
         bin_dim=self._bin_dim,
+        unique_name_suffix=self._unique_name_suffix,
     )
     return {
         'TruePositives': wrappers.WrappedStatistic(
