@@ -25,6 +25,31 @@ import xarray.ufuncs as xu
 ### Statistics
 
 
+class RelativeIntensity(base.PerVariableStatistic):
+  """Relative intensity of predictions.
+
+  Relative intensity is defined as the ratio of the mean of the predictions
+  to the mean of the targets. The metric returns the absolute value of the
+  difference between this ratio and the ideal value of 1.
+
+  Helpful in capturing e.g. strobing effects observed in a
+  precipitation output. Notably, this metric is intended for predictions and
+  targets that are non-negative such as precip.
+
+  """
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      spatial_dims: Sequence[str] = ('latitude', 'longitude'),
+      ) -> xr.DataArray:
+
+    prediction_mean = predictions.mean(dim=spatial_dims)
+    target_mean = targets.mean(dim=spatial_dims)
+    return np.abs(prediction_mean / target_mean - 1)
+
+
 class Error(base.PerVariableStatistic):
   """Error between predictions and targets."""
 
