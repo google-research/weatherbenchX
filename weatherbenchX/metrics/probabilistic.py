@@ -13,9 +13,11 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
+from collections.abc import Hashable
 from typing import Mapping, Optional, Tuple
 import numpy as np
 import scipy.stats
+from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 from weatherbenchX.metrics import categorical
 from weatherbenchX.metrics import deterministic
@@ -26,6 +28,75 @@ import xarray.ufuncs as xu
 ### Statistics
 # TODO(srasp): NaN mask seem to get lost in some probabilistic metrics.
 # Investigate and fix this.
+
+
+class EnsembleAveragedStatistic(base.Statistic):
+  """Statistic that averages a statistic over the ensemble dimension."""
+
+  def __init__(
+      self,
+      wrapped_statistic: base.Statistic,
+      *,
+      ensemble_dim: str,
+      skipna_ensemble: bool,
+  ):
+    self._wrapped_statistic = wrapped_statistic
+    self._ensemble_dim = ensemble_dim
+    self._skipna_ensemble = skipna_ensemble
+
+  @property
+  def unique_name(self) -> str:
+    return self._wrapped_statistic.unique_name + '_each_'  + self._ensemble_dim
+
+  def compute(
+      self,
+      predictions: Mapping[Hashable, xr.DataArray],
+      targets: Mapping[Hashable, xr.DataArray],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    """Computes statistics per predictions/targets chunk."""
+    statistics = self._wrapped_statistic.compute(predictions, targets)
+
+    # Enforce that every single array has the ensemble dimension.
+    def reduce_over_ensemble(da: xr.DataArray) -> xr.DataArray:
+      if self._ensemble_dim not in da.dims:
+        raise ValueError(
+            f'Dimension {self._ensemble_dim} not found in {da.dims}'
+        )
+      return da.mean(dim=self._ensemble_dim, skipna=self._skipna_ensemble)
+
+    return xarray_tree.map_structure(reduce_over_ensemble, statistics)
+
+
+class EnsembleAveragedMetric(base.Metric):
+  """Metric that wraps any deterministic metric, averaging over the ensemble."""
+
+  def __init__(
+      self,
+      wrapped_metric: base.Metric,
+      *,
+      ensemble_dim: str = 'number',
+      skipna_ensemble: bool = False
+  ):
+    self._wrapped_metric = wrapped_metric
+    self._ensemble_dim = ensemble_dim
+    self._skipna_ensemble = skipna_ensemble
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    wrapped_statistics = {}
+    for stat_name, stat in self._wrapped_metric.statistics.items():
+      wrapped_statistics[stat_name] = EnsembleAveragedStatistic(
+          wrapped_statistic=stat,
+          ensemble_dim=self._ensemble_dim,
+          skipna_ensemble=self._skipna_ensemble,
+      )
+    return wrapped_statistics
+
+  def values_from_mean_statistics(
+      self,
+      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
+  ) -> Mapping[Hashable, xr.DataArray]:
+    return self._wrapped_metric.values_from_mean_statistics(statistic_values)
 
 
 class CRPSSkill(base.PerVariableStatistic):
