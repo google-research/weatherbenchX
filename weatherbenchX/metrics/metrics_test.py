@@ -1076,6 +1076,40 @@ class MetricsTest(parameterized.TestCase):
             results[f'crps.{v}'], expected_results_no_nan[f'crps.{v}']
         )
 
+  def test_ensemble_averaged_metric(self):
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00', time_stop='2020-01-03T00', random=True
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=5,
+    )
+
+    # With explicit averaging over the ensemble
+    metrics = {
+        'rmse': deterministic.RMSE()
+    }
+    results_expected = compute_all_metrics(
+        metrics, predictions, targets,
+        reduce_dims=['latitude', 'longitude', 'realization']
+    )
+
+    # With EnsembleAveragedMetric.
+    metrics_with_ensemble_averaged_metric = {
+        'rmse': probabilistic.EnsembleAveragedMetric(
+            deterministic.RMSE(),
+            ensemble_dim='realization',
+        )
+    }
+    results_actual = compute_all_metrics(
+        metrics_with_ensemble_averaged_metric, predictions, targets,
+        reduce_dims=['latitude', 'longitude']
+    )
+
+    xr.testing.assert_allclose(results_actual, results_expected)
+
 
 if __name__ == '__main__':
   absltest.main()
