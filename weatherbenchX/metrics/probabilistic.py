@@ -1012,3 +1012,41 @@ class RelativeEconomicValue(base.PerVariableMetric):
     perf_cost = self._cost_loss_ratio * (tp + fn)
     clim_cost = xu.minimum(self._cost_loss_ratio, tp + fn)
     return (clim_cost - pred_cost) / (clim_cost - perf_cost)
+
+
+class RankHistogram(base.PerVariableStatistic):
+  r"""Rank histogram of an ensemble forecast.
+
+  This produces a histogram of weighted counts of the rank (position in a sorted
+  list) of the target relative to the ensemble of predictions, so there are
+  num_samples+1 bins.
+
+  An additional 'rank' dimension is added, along which these counts are stored.
+  """
+
+  def __init__(
+      self,
+      *,
+      ensemble_dim: str = 'number',
+  ):
+    self._ensemble_dim = ensemble_dim
+
+  @property
+  def unique_name(self) -> str:
+    return f'RankHistogram_{self._ensemble_dim}'
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    num_bins = predictions.sizes[self._ensemble_dim] + 1
+    ranks = (predictions < targets).astype(int).sum(
+        self._ensemble_dim, skipna=False)
+
+    categories = xr.DataArray(np.arange(num_bins), dims=['rank'])
+    categories.coords['rank'] = categories
+
+    # Transform to floating point for the subsequent aggregation.
+    return (ranks == categories).astype(np.float32)
+
