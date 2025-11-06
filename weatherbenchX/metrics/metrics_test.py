@@ -1041,6 +1041,68 @@ class MetricsTest(parameterized.TestCase):
 
     xr.testing.assert_allclose(results_actual, results_expected)
 
+  def test_rank_histogram(self):
+
+    predictions = xr.Dataset({
+        'geopotential': xr.DataArray(
+            data=[[[0.6, 0.2],
+                   [0.7, 0.3],
+                   [0.8, 0.4],
+                   [0.9, 0.5],
+                   [1.0, 0.6,],],
+                  [[0.7, 0.6],
+                   [0.8, 0.7],
+                   [0.9, 0.8],
+                   [1.0, 0.9],
+                   [1.1, 1.0],]],
+            dims=['batch', 'number', 'space'],
+        ),
+    })
+    targets = xr.Dataset({
+        'geopotential': xr.DataArray(
+            data=[[0.55, 0.65],
+                  [0.75, 0.85]],
+            dims=['batch', 'space'],
+        ),
+    })
+
+    metrics = {
+        'rank_histogram': probabilistic.RankHistogram()
+    }
+
+    expected_per_element = xr.Dataset({
+        'geopotential': xr.DataArray(
+            data=[[[1., 0., 0., 0., 0., 0.],
+                   [0., 0., 0., 0., 0., 1.]],
+                  [[0., 1., 0., 0., 0., 0.],
+                   [0., 0., 0., 1., 0., 0.]],],
+            dims=['batch', 'space', 'rank'],
+            coords={'rank': [0, 1, 2, 3, 4, 5]},
+        ),
+    })
+
+    actual_per_element = metrics_test_utils.compute_all_metrics(
+        metrics, predictions, targets,
+        reduce_dims=[],
+    )
+
+    xr.testing.assert_allclose(
+        actual_per_element['rank_histogram.geopotential'],
+        expected_per_element['geopotential'],
+    )
+
+    expected_aggregated = expected_per_element.mean(['batch', 'space'])
+
+    actual_aggregated = metrics_test_utils.compute_all_metrics(
+        metrics, predictions, targets,
+        reduce_dims=['batch', 'space']
+    )
+
+    xr.testing.assert_allclose(
+        actual_aggregated['rank_histogram.geopotential'],
+        expected_aggregated['geopotential'],
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
