@@ -13,9 +13,7 @@
 # limitations under the License.
 """Unit tests for metrics."""
 
-import dataclasses
 import itertools
-from typing import Hashable, Mapping
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
@@ -25,83 +23,16 @@ from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.metrics import categorical
 from weatherbenchX.metrics import deterministic
+from weatherbenchX.metrics import metrics_test_utils
 from weatherbenchX.metrics import probabilistic
 from weatherbenchX.metrics import spatial
 from weatherbenchX.metrics import wrappers
 import xarray as xr
 
 
-# Multivariate metric for testing.
-@dataclasses.dataclass
-class SampleMultivariateStatistic(metrics_base.Statistic):
-  """Simple multivariate statistic that adds two variables of the predictions."""
-
-  var1: str
-  var2: str
-  out_name: str
-
-  @property
-  def unique_name(self) -> str:
-    return f'SampleMultivariateStatistic_{self.out_name}_from_{self.var1}_and_{self.var2}'
-
-  def compute(
-      self,
-      predictions: Mapping[Hashable, xr.DataArray],
-      targets: Mapping[Hashable, xr.DataArray],
-  ) -> Mapping[Hashable, xr.DataArray]:
-    return {self.out_name: predictions[self.var1] + predictions[self.var2]}
-
-
-@dataclasses.dataclass
-class SampleMultivariateMetric(metrics_base.Metric):
-  """Simple multivariate metric that adds two variables of the predictions."""
-
-  var1: str
-  var2: str
-  out_name: str
-
-  @property
-  def statistics(self) -> Mapping[Hashable, metrics_base.Statistic]:
-    return {
-        'SampleMultivariateStatistic': SampleMultivariateStatistic(
-            var1=self.var1, var2=self.var2, out_name=self.out_name
-        ),
-    }
-
-  def values_from_mean_statistics(
-      self,
-      statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
-  ) -> Mapping[Hashable, xr.DataArray]:
-    return statistic_values['SampleMultivariateStatistic']
-
-
-def compute_precipitation_metric(metrics, metric_name, prediction, target):
-  """Helper to compute metric values."""
-  stats = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, prediction, target
-  )
-  stats = xarray_tree.map_structure(
-      lambda x: x.mean(
-          ('time', 'prediction_timedelta', 'latitude', 'longitude'),
-          skipna=False,
-      ),
-      stats,
-  )
-  return metrics_base.compute_metric_from_statistics(
-      metrics[metric_name], stats
-  )['total_precipitation_1hr']
-
-
-def compute_all_metrics(metrics, predictions, targets, reduce_dims):
-  statistics = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, predictions, targets
-  )
-  aggregator = aggregation.Aggregator(
-      reduce_dims=reduce_dims,
-  )
-  aggregation_state = aggregator.aggregate_statistics(statistics)
-  results = aggregation_state.metric_values(metrics)
-  return results
+SampleMultivariateMetric = metrics_test_utils.SampleMultivariateMetric
+compute_precipitation_metric = metrics_test_utils.compute_precipitation_metric
+compute_all_metrics = metrics_test_utils.compute_all_metrics
 
 
 class MetricsTest(parameterized.TestCase):
