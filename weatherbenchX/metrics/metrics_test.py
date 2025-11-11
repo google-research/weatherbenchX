@@ -1103,6 +1103,107 @@ class MetricsTest(parameterized.TestCase):
         expected_aggregated['geopotential'],
     )
 
+  def test_rev(self):
+    # Just a smoke test for now.
+
+    predictions = xr.Dataset({
+        'geopotential': xr.DataArray(
+            data=[4/5, 3/5, 3/5, 1/5, 0/5],
+            dims=['batch'],
+        ),
+    })
+    targets = xr.Dataset({
+        'geopotential': xr.DataArray(
+            data=[True, True, False, True, False],
+            dims=['batch'],
+        ),
+    })
+
+    cost_loss_ratios = np.array([0.3, 0.5, 0.7])
+    metrics = {
+        'rev': probabilistic.RelativeEconomicValue(
+            ensemble_size=5,
+            cost_loss_ratios=cost_loss_ratios)
+    }
+
+    result = metrics_test_utils.compute_all_metrics(
+        metrics, predictions, targets,
+        reduce_dims=['batch'],
+    )
+
+    self.assertSameElements(result.dims, {'threshold', 'cost_loss_ratio'})
+    # Thresholds inbetween each of 5 ensemble members will be used, as well as
+    # special endpoint threhsolds of 0 and 1 corresponding to always-true /
+    # always-false predictions.
+    np.testing.assert_allclose(
+        result.threshold.data,
+        np.array([0.0, 0.5/5, 1.5/5, 2.5/5, 3.5/5, 4.5/5, 1.0]),
+    )
+    np.testing.assert_allclose(
+        result.cost_loss_ratio.data, cost_loss_ratios)
+
+    with self.subTest('optimal_thresholds'):
+      optimal_thresholds = {
+          'geopotential': result['rev.geopotential'].idxmax('threshold'),
+      }
+      metrics = {
+          'rev': probabilistic.RelativeEconomicValue(
+              ensemble_size=5,
+              cost_loss_ratios=cost_loss_ratios,
+              optimal_thresholds=optimal_thresholds)
+      }
+
+      result = metrics_test_utils.compute_all_metrics(
+          metrics, predictions, targets,
+          reduce_dims=['batch'],
+      )
+      self.assertSameElements(result.dims, {'cost_loss_ratio'})
+
+  def test_select_optimal_thresholds_vectorized(self):
+    values = xr.DataArray(data=np.random.randn(2, 6),
+                          dims=['lead_time', 'threshold'],
+                          coords={'threshold': [0, 0.2, 0.4, 0.6, 0.8, 1.0]})
+    thresholds = xr.DataArray(
+        data=[
+            [0.0, 0.2, 0.6],
+            [0.2, 0.4, 1.0],
+        ],
+        dims=['lead_time', 'cost_loss_ratio'],
+        coords={'cost_loss_ratio': [0.2, 0.4, 0.6]})
+    result = probabilistic._select_optimal_thresholds(values, thresholds)
+    expected_result = values.sel(threshold=thresholds).drop_vars('threshold')
+    xr.testing.assert_allclose(result, expected_result)
+
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    values = values.copy(data=jax.numpy.array(values.data))
+    result = probabilistic._select_optimal_thresholds(values, thresholds)
+    xr.testing.assert_allclose(result.as_numpy(), expected_result)
+
+  def test_select_optimal_thresholds_vectorized_requiring_broadcast(self):
+    values = xr.DataArray(data=np.random.randn(2, 6),
+                          dims=['lead_time', 'threshold'],
+                          coords={'threshold': [0, 0.2, 0.4, 0.6, 0.8, 1.0]})
+    thresholds = xr.DataArray(
+        data=[0.0, 0.2, 0.6],
+        dims=['cost_loss_ratio'],
+        coords={'cost_loss_ratio': [0.2, 0.4, 0.6]})
+    result = probabilistic._select_optimal_thresholds(values, thresholds)
+    expected_result = values.sel(threshold=thresholds).drop_vars('threshold')
+    xr.testing.assert_allclose(result, expected_result)
+
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    values = values.copy(data=jax.numpy.array(values.data))
+    result = probabilistic._select_optimal_thresholds(values, thresholds)
+    xr.testing.assert_allclose(result.as_numpy(), expected_result)
+
 
 if __name__ == '__main__':
   absltest.main()
