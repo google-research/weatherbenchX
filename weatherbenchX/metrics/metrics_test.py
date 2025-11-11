@@ -678,26 +678,27 @@ class MetricsTest(parameterized.TestCase):
       statistic.compute(predictions_ds, targets_no_ens)
 
   def test_spread_skill_ratio(self):
+    ensemble_size = 5
+    # Sample targets and predictions independently from the same distribution.
+    # (This is the case where the spread-skill ratio should be close to 1.)
     targets = test_utils.mock_target_data(
         time_start='2020-01-01T00',
         time_stop='2020-01-03T00',
         variables_3d=[],
         random=True,
+        seed=0,
     )
-    # Predictions centered at 0, which should result in an error of zero.
     predictions = test_utils.mock_target_data(
         time_start='2020-01-01T00',
         time_stop='2020-01-03T00',
         variables_3d=[],
-        ensemble_size=5,
+        ensemble_size=ensemble_size,
         random=True,
+        seed=1,
     )
 
     metrics = {
         'unbiased_spread_skill': probabilistic.UnbiasedSpreadSkillRatio(
-            ensemble_dim='realization'
-        ),
-        'spread_skill': probabilistic.SpreadSkillRatio(
             ensemble_dim='realization'
         ),
     }
@@ -707,11 +708,9 @@ class MetricsTest(parameterized.TestCase):
         targets,
         reduce_dims=['time', 'latitude', 'longitude'],
     )
-    # Expected error: 1 / sqrt(sample size) + 1 / ensemble size
-    atol = 4 * (
-        1 / np.sqrt(np.prod(list(targets.sizes.values())))
-        + 1 / predictions.realization.size
-    )
+    # Expected error is order of 1 / sqrt(sample size * ensemble size).
+    sample_size = np.prod(list(targets.sizes.values()))
+    atol = 4 / np.sqrt(sample_size * ensemble_size)
     xr.testing.assert_allclose(results, xr.ones_like(results), atol=atol)
 
   def test_acc(self):

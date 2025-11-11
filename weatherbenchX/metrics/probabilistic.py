@@ -737,63 +737,39 @@ class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
     return xu.sqrt(statistic_values['UnbiasedEnsembleMeanSquaredError'])
 
 
-class SpreadSkillRatio(base.PerVariableMetric):
-  """Computes the (biased) spread-skill ratio.
-
-  The spread skill ratio is defined as the ensemble standard deviation divided
-  by the RMSE of the ensemble mean.
-  """
-
-  def __init__(
-      self, ensemble_dim: str = 'number', skipna_ensemble: bool = False
-  ):
-    """Init.
-
-    Args:
-      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
-      skipna_ensemble: If True, NaN values will be ignored along the ensemble
-        dimension. Default: False.
-    """
-    self._ensemble_dim = ensemble_dim
-    self._skipna_ensemble = skipna_ensemble
-
-  @property
-  def statistics(self) -> Mapping[str, base.Statistic]:
-    return {
-        'EnsembleVariance': EnsembleVariance(
-            ensemble_dim=self._ensemble_dim,
-            skipna_ensemble=self._skipna_ensemble,
-        ),
-        'EnsembleMeanSquaredError': wrappers.WrappedStatistic(
-            deterministic.SquaredError(),
-            wrappers.EnsembleMean(
-                which='predictions',
-                ensemble_dim=self._ensemble_dim,
-                skipna=self._skipna_ensemble,
-            ),
-        ),
-    }
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[str, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return xu.sqrt(
-        statistic_values['EnsembleVariance']
-        / statistic_values['EnsembleMeanSquaredError']
-    )
+def SpreadSkillRatio(**unused_kwargs):  # pylint: disable=invalid-name
+  raise ValueError(
+      'SpreadSkillRatio is no longer supported as it was not correctly '
+      'implemented. Please use UnbiasedSpreadSkillRatio instead and see '
+      'the docstring of that class for more details.')
 
 
 class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
-  """Computes the spread-skill ratio based on the unbiased skill estimator.
+  """Computes a spread-skill ratio based on the unbiased skill estimator.
 
-  This is analogous to the regular spread skill ratio but using the unbiased
-  estimator of the ensemble mean squared error. This is useful for estimating
-  the spread skill ratio for differing ensemble sizes.
+  Specifically this is the ratio:
 
-  Note that the ratio and square root are still biased, however, this is
-  negligible if the number of time points is large.
+  sqrt(unbiased estimate of the mean variance of the predictive distribution) /
+  sqrt(unbiased estimate of the MSE of the predictive distribution's mean)
+
+  This has the convenient property that the numerator and denominator are
+  equal in expectation for perfect ensemble forecasts, meaning the ratio should
+  be close to 1 in this perfect case. (Because of the non-linear division
+  operation and square root, the resulting ratio itself is not exactly 1 in
+  expectation in the perfect case, but this bias goes away as we average over
+  more forecasts.)
+
+  Another way to achieve this property is to apply a correction factor to a
+  spread-skill ratio computed using a more standard skill estimator (the MSE of
+  the ensemble mean, which is biased). This corrected spread-skill relationship
+  is described in [1].
+  Here we've decided to standardize on using the unbiased MSE estimator instead,
+  because it doesn't require a correction factor, reuses our existing
+  implementation of the unbiased MSE estimator, and makes it easier to support
+  the case of variable ensemble sizes (via skipna_ensemble) correctly.
+
+  [1] Fortin, V. et al. Why Should Ensemble Spread Match the RMSE of the
+  Ensemble Mean? J. Hydrometeorol. 15, 1708-1713 (2014).
   """
 
   def __init__(

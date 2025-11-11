@@ -333,7 +333,6 @@ def main(argv: Sequence[str]) -> None:
 
   probabilistic_metrics = {
       'crps': probabilistic.CRPSEnsemble(),
-      'spread_skill': probabilistic.SpreadSkillRatio(),
       'unbiased_spread_skill': probabilistic.UnbiasedSpreadSkillRatio(),
       'unbiased_mean_rmse': probabilistic.UnbiasedEnsembleMeanRMSE(),
       'mean_rmse': wrappers.WrappedMetric(
