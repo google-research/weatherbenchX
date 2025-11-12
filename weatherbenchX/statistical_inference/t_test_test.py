@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
+
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 from weatherbenchX.statistical_inference import t_test
 from weatherbenchX.statistical_inference import test_utils
 import xarray as xr
 
 
-class TTestTest(absltest.TestCase):
+class TTestTest(parameterized.TestCase):
 
   def test_plain_t_test(self):
     # Here we test the plain t-test with all its assumptions met. We check
@@ -34,11 +37,10 @@ class TTestTest(absltest.TestCase):
     data = xr.DataArray(data=data, dims=("samples", "replicates"))
 
     metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
-    inference = t_test.TTest(
+    inference = t_test.IID(
         metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="samples",
-        temporal_autocorrelation=False,
     )
     for alpha in [0.2, 0.1, 0.05]:
       test_utils.assert_coverage_probability_estimate_plausible(
@@ -81,12 +83,11 @@ class TTestTest(absltest.TestCase):
     (_, main_aggregated_stats
      ) = test_utils.metrics_and_agg_state_for_mean(main_data)
 
-    inference = t_test.TTest.for_baseline_comparison(
+    inference = t_test.IID.for_baseline_comparison(
         metrics=metrics,
         aggregated_statistics=main_aggregated_stats,
         baseline_aggregated_statistics=baseline_aggregated_stats,
         experimental_unit_dim="samples",
-        temporal_autocorrelation=False,
     )
     for alpha in [0.2, 0.1, 0.05]:
       test_utils.assert_coverage_probability_estimate_plausible(
@@ -100,7 +101,85 @@ class TTestTest(absltest.TestCase):
       test_utils.assert_p_value_consistent_with_confidence_interval(
           inference, null_value=true_mean_diff, metric_name="mean")
 
-  def test_t_test_with_ar2_correction(self):
+  @parameterized.named_parameters(
+      # All tests are with a fairly high level of autocorrelation, equivalent
+      # to a ~4.3x reduction in effective sample size, and with data from an
+      # AR(2) process (so consistent with the assumptions of the Geer method).
+      #
+      # Understand that accurate size control at small sample sizes is hard for
+      # a general-purpose method here, so we are not testing for perfect
+      # results in this sense at small sample sizes.
+      #
+      # We also don't check the power of the tests here. We're not aiming to be
+      # a comprehensive evaluation of these statistical tests (see the
+      # associated papers for that), just checking that some of the most
+      # important properties hold within reasonable tolerances for sample sizes
+      # we might encounter in practice.
+      dict(
+          # With a small-ish sample size of 100 (effective sample size more like
+          # 23), the Geer method shows significant size distortion (rtol=0.75
+          # below, meaning for an alpha=0.05 test we tolerate an actual size of
+          # 0.0125 - 0.0875). This is very poor.
+          testcase_name="GeerAR2Corrected_sample_100",
+          t_test_class=t_test.GeerAR2Corrected,
+          sample_size=100,
+          rtol=0.75,
+      ),
+      dict(
+          # The HAC method performs better here. There is still some size
+          # distortion (rtol=0.35 below, meaning an alpha=0.05 test we tolerate
+          # an actual size of 0.0325 - 0.0675) but it's still a lot better than
+          # the Geer method at this small sample size.
+          testcase_name="LazarusHACEWC_sample_100",
+          t_test_class=t_test.LazarusHACEWC,
+          sample_size=100,
+          rtol=0.35,
+      ),
+      dict(
+          # Further, by selecting a smaller value of v_0 than the default (0.4),
+          # we can reduce the size distortion significantly, although it will
+          # trade off against power of the test (not evaluated here).
+          # v_0 = 0.27 was chosen from table 2b in the Lazarus et al paper to
+          # be optimal for rho=0.7 and kappa=0.99 (0.99 weight on minimizing
+          # size distortion, 0.01 weight on minimizing power loss).
+          # We then get away with rtol=0.15 (tolerating a size of 0.0425-0.0575
+          # for alpha=0.05).
+          testcase_name="LazarusHACEWC_reduced_v0_sample_100",
+          t_test_class=functools.partial(t_test.LazarusHACEWC, v_0=0.27),
+          sample_size=100,
+          rtol=0.15,
+      ),
+      dict(
+          # With a larger sample size of 1000, and given that its AR(2)
+          # assumption holds in this test, the Geer method performs very well,
+          # with only minimal size distortion (rtol=0.01 below, meaning for an
+          # alpha=0.05 test we tolerate an actual size of 0.0495 - 0.0505).
+          # It may not perform as well when the AR(2) assumption does not hold
+          # however.
+          testcase_name="GeerAR2Corrected_sample_1000",
+          t_test_class=t_test.GeerAR2Corrected,
+          sample_size=1000,
+          rtol=0.01,
+      ),
+      dict(
+          # With this larger sample size the Lazarus method performs well too,
+          # size distortion is still very small (rtol=0.03 below, meaning for
+          # an alpha=0.05 test we tolerate an actual size of 0.0485 - 0.0515),
+          # although not quite as good as the Geer method. It doesn't rely on
+          # the AR(2) assumption made by the Geer test though, and may compare
+          # better when this assumption doesn't hold.
+          testcase_name="LazarusHACEWC_sample_1000",
+          t_test_class=t_test.LazarusHACEWC,
+          sample_size=1000,
+          rtol=0.03,
+      ),
+  )
+  def test_t_test_with_autocorrelation(
+      self,
+      t_test_class,
+      sample_size: int,
+      rtol: float,
+      ):
     # We'll compute confidence intervals for the mean of many different
     # AR(2) processes all drawn from the same distribution. We'll check the true
     # mean lies within the 95% CI approximately 95% of the time.
@@ -117,27 +196,27 @@ class TTestTest(absltest.TestCase):
         # We need a decent number of steps (sample size) here to get
         # confidence intervals close to their correct coverage probability.
         # This is a known shortcoming of the method.
-        steps=1000,
+        steps=sample_size,
         # Adding more replicates just means we can estimate the coverage
         # probabilities more accurately.
-        replicates=20000)
+        replicates=50000)
     data = xr.DataArray(data=data, dims=("steps", "replicates"))
 
     metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
 
-    inference = t_test.TTest(
+    inference = t_test_class(
         metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="steps",
-        temporal_autocorrelation=True,
     )
+
     for alpha in [0.2, 0.1, 0.05]:
       test_utils.assert_coverage_probability_estimate_plausible(
           inference,
           true_value=true_mean,
           metric_name="mean",
           alpha=alpha,
-          rtol=0.01,
+          rtol=rtol,
           coverage_prob_significance_level=0.1,
       )
       test_utils.assert_p_value_consistent_with_confidence_interval(
@@ -148,11 +227,10 @@ class TTestTest(absltest.TestCase):
     # variation we want a zero-width confidence interval, rather than NaNs, say.
     data = xr.DataArray(data=np.ones(100), dims=("steps",))
     metrics, aggregated_stats = test_utils.metrics_and_agg_state_for_mean(data)
-    inference = t_test.TTest(
+    inference = t_test.GeerAR2Corrected(
         metrics=metrics,
         aggregated_statistics=aggregated_stats,
         experimental_unit_dim="steps",
-        temporal_autocorrelation=True,
     )
     point_estimate = inference.point_estimates()["mean"]["variable"]
     np.testing.assert_allclose(point_estimate.data, 1.)

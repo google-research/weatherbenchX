@@ -45,9 +45,15 @@ fixed, and averaging over them before performing any statistical inference.
 
 ## Methods implemented
 
-* The standard t-test.
+* The standard IID t-test.
 * The t-test with AR(2) autocorrelation correction from [^1]
-* Both the above with delta-method confidence intervals for metrics which are
+* A version of the t-test based on a HAC (Heteroskedasticity and Autocorrelation
+  Consistent) estimator with default settings following the recommendations of
+  Lazarus et al [^2]. Their recommendation is to use an EWC estimator, with a
+  specific carefully-optimized scaling rule and constant factor for the spectral
+  cut-off used by this estimator. The method is related to the Diebold-Mariano
+  test [^8] when used to compare forecast skill of two models.
+* All the above with delta-method confidence intervals for metrics which are
   nonlinear functions of the mean statistics.
 * The IID bootstrap.
 * A cluster bootstrap [^3] [^4] which assumes independence only between
@@ -58,28 +64,24 @@ fixed, and averaging over them before performing any statistical inference.
 
 ## Methods to consider implementing in future
 
-* Diebold-Mariano test [^8] or another of the family of tests based on HAC
-  (Heteroskedasticity and Autocorrelation Consistent) variance estimators, as a
-  a better-studied and more standard alternative to [^1]. These methods also
-  have problems at small sample sizes and/or high degrees of autocorrelation
-  however, and there are a number of choices e.g. of kernel and window length
-  selection method with different trade-offs. [^10] offers a modern review and
-  some practical recommendations.
-* One of the second-order-correct block bootstrap CI methods of [^9] for smooth
-  functions of vector means, either the studentized or the BCa-style intervals.
-  Perhaps adapted to the circular block bootstrap to avoid the need to correct
-  for endpoint bias. Unlike a naive application of studentized (bootstrap-t) or
-  BCa intervals to the block bootstrap, these methods are more principled and
-  retain the good asymptotics of studentized and BCa intervals from the IID
-  case. It remains to be seen how effective they are at practical sample sizes
-  though despite the improved asymptotic order, and they also add some
-  complexity and further choices.
+* Some version of BCa bootstrap intervals [^9] or studentized bootstrap
+  intervals, which are standard best practice for the IID bootstrap.
+  Unfortunately there are significant challenges in adapting these methods in a
+  principled and effective way to the block bootstrap setting however. One
+  attempt at this is the second-order-correct block bootstrap methods of [^10]
+  for smooth functions of vector means. These could be adapted to the circular
+  block bootstrap to avoid the need to correct for endpoint bias. Unlike a naive
+  application of studentized (bootstrap-t) or BCa intervals to the block
+  bootstrap, these methods are more principled and retain the good asymptotics
+  of studentized and BCa intervals from the IID case. It remains to be seen how
+  effective they are at practical sample sizes though despite the improved
+  asymptotic order, and they also add complexity and further choices.
 
 [^1]: A. J. Geer, Significance of changes in medium-range forecast scores.
   Tellus A Dyn. Meterol. Oceanogr. 68, 30229 (2016).
 
-[^2]: Efron, B. Better bootstrap confidence intervals. J.A.S.A. 82, 171-185
-  (1987)
+[^2]: Lazarus, E., Lewis, D. J., Stock, J. H. & Watson, M. W. HAR inference:
+  Recommendations for practice. J. Bus. Econ. Stat. 36, 541–559 (2018).
 
 [^3]: Davison, A. C. & Hinkley, D. V. Bootstrap Methods and their Application
   (Cambridge University Press, 1997), pp.100-101.
@@ -102,11 +104,12 @@ fixed, and averaging over them before performing any statistical inference.
 [^8]: Diebold, F. X. & Mariano, R. S. Comparing predictive accuracy. J. Bus. Econ.
   Stat. 20, 134–144 (2002).
 
-[^9]: Götze, F. & Künsch, H. R. Second-order correctness of the blockwise
+[^9]: Efron, B. Better bootstrap confidence intervals. J.A.S.A. 82, 171-185
+  (1987)
+
+[^10]: Götze, F. & Künsch, H. R. Second-order correctness of the blockwise
   bootstrap for stationary observations. Ann. Stat. 24, 1914-1933 (1996).
 
-[^10]: Lazarus, E., Lewis, D. J., Stock, J. H. & Watson, M. W. HAR inference:
-  Recommendations for practice. J. Bus. Econ. Stat. 36, 541–559 (2018).
 
 
 
