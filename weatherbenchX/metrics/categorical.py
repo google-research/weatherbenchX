@@ -523,6 +523,69 @@ class FrequencyBias(base.PerVariableMetric):
     ) / (statistic_values['TruePositives'] + statistic_values['FalseNegatives'])
 
 
+class HSS(base.PerVariableMetric):
+  """Heidke Skill Score.
+
+  HSS = 2 * (TP * TN - FP * FN) / ((TP + FN) * (FN + TN) + (TP + FP) * (FP + TN))
+  """
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    tp = statistic_values['TruePositives']
+    tn = statistic_values['TrueNegatives']
+    fp = statistic_values['FalsePositives']
+    fn = statistic_values['FalseNegatives']
+    numerator = 2 * (tp * tn - fp * fn)
+    denominator = (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn)
+    return numerator / denominator
+
+
+class ETS(base.PerVariableMetric):
+  """Equitable Threat Score (also called Gilbert Skill Score).
+
+  ETS = (TP - TP_random) / (TP + FP + FN - TP_random)
+  where TP_random = ((TP + FP) * (TP + FN)) / (TP + FP + FN + TN).
+  """
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    tp = statistic_values['TruePositives']
+    tn = statistic_values['TrueNegatives']
+    fp = statistic_values['FalsePositives']
+    fn = statistic_values['FalseNegatives']
+    tp_plus_fp = tp + fp
+    tp_plus_fn = tp + fn
+    all_sum = tp + fp + fn + tn
+    tp_random = (tp_plus_fp * tp_plus_fn) / all_sum
+    numerator = tp - tp_random
+    denominator = tp + fp + fn - tp_random
+    return numerator / denominator
+
+
 class Reliability(base.PerVariableMetric):
   """Reliability / calibration curve.
 
