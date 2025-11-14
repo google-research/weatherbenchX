@@ -39,10 +39,12 @@ wrappers.WrappedMetric(
 import abc
 from collections.abc import Sequence
 from typing import Any, Callable, Hashable, Iterable, Mapping, Union
+
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 import xarray as xr
+import xarray.ufuncs as xu
 
 
 def binarize_thresholds(
@@ -83,7 +85,7 @@ def binarize_thresholds(
     threshold = xr.DataArray(
         thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
     )
-  return (x > threshold).where(~np.isnan(x)).astype(np.float32)
+  return (x > threshold).where(~xu.isnan(x)).astype(np.float32)
 
 
 # Transforms
@@ -301,7 +303,7 @@ def compute_cdf(
       )
   cdf = (da <= thresholds).astype('float')  # This <= makes it right-inclusive.
   # Make sure NaNs are propagated.
-  cdf = cdf.where(~np.isnan(da))
+  cdf = cdf.where(~xu.isnan(da))
   return cdf
 
 
@@ -550,7 +552,7 @@ class ReLU(InputTransform):
     return 'relu'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    return xr.where(da > 0, da, 0).where(~np.isnan(da))
+    return xr.where(da > 0, da, 0).where(~xu.isnan(da))
 
 
 class ShiftAlongNewDim(InputTransform):

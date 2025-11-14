@@ -139,7 +139,7 @@ class CRPSSkill(base.PerVariableStatistic):
       pseudo_ensemble_dim = f'{self._ensemble_dim}_PSEUDO_FOR_TARGETS'
       reduce_dims += [pseudo_ensemble_dim]
       targets = targets.rename({self._ensemble_dim: pseudo_ensemble_dim})
-    return np.abs(predictions - targets).mean(
+    return xu.abs(predictions - targets).mean(
         reduce_dims, skipna=self._skipna_ensemble
     )
 
