@@ -534,7 +534,7 @@ class BySets(Binning):
 
   def __init__(
       self,
-      sets: Mapping[str, Sequence[Any]],
+      sets: Mapping[str, Sequence[Any] | Any],
       coord_name: str,
       bin_dim_name: Optional[str] = None,
       add_set_complements: bool = False,
