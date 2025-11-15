@@ -233,10 +233,12 @@ class BinningTest(parameterized.TestCase):
         '2m_temperature'
     ]
 
+    scalar_station = statistic.stationName[0]
     bins = binning.BySets(
         {
             'set1': statistic.stationName[:10],
             'set2': statistic.stationName[10:20],
+            'scalar_set': scalar_station,
             'empty_set': [],
             'wrong_set': [1, 2, 3, 4],
         },
@@ -246,9 +248,13 @@ class BinningTest(parameterized.TestCase):
     )
 
     mask = bins.create_bin_mask(statistic)
-    self.assertLen(mask.station_subset, 5)
+    self.assertLen(mask.station_subset, 6)
     self.assertGreaterEqual(mask.sum('index').sel(station_subset='set1'), 10)
     self.assertGreaterEqual(mask.sum('index').sel(station_subset='set2'), 10)
+    self.assertEqual(
+        mask.sum('index').sel(station_subset='scalar_set'),
+        (statistic.stationName == scalar_station).sum(),
+    )
     self.assertEqual(mask.sum('index').sel(station_subset='empty_set'), 0)
     self.assertEqual(mask.sum('index').sel(station_subset='wrong_set'), 0)
     self.assertLen(statistic, mask.sum('index').sel(station_subset='global'))
@@ -278,9 +284,15 @@ class BinningTest(parameterized.TestCase):
     lon_idx = np.argmin(np.abs(statistic_values.longitude.values - 0))
 
     # Find the bin that contains the selected latitude
-    expected_bin_idx = (statistic_values.latitude.values[lat_idx] - lat_range[0]) // degrees
+    expected_bin_idx = (
+        statistic_values.latitude.values[lat_idx] - lat_range[0]
+    ) // degrees
     self.assertTrue(
-        mask.isel(latitude_bins=int(expected_bin_idx), latitude=lat_idx, longitude=lon_idx).values.all()
+        mask.isel(
+            latitude_bins=int(expected_bin_idx),
+            latitude=lat_idx,
+            longitude=lon_idx,
+        ).values.all()
     )
 
   @parameterized.parameters(
@@ -311,7 +323,11 @@ class BinningTest(parameterized.TestCase):
     expected_bin_idx = (lon_val - lon_range[0]) // degrees
 
     self.assertTrue(
-        mask.isel(longitude_bins=int(expected_bin_idx), latitude=lat_idx, longitude=lon_idx).values.all()
+        mask.isel(
+            longitude_bins=int(expected_bin_idx),
+            latitude=lat_idx,
+            longitude=lon_idx,
+        ).values.all()
     )
 
 
