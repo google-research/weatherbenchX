@@ -534,7 +534,7 @@ class BySets(Binning):
 
   def __init__(
       self,
-      sets: Mapping[str, Sequence[Any]],
+      sets: Mapping[str, Sequence[Any] | Any],
       coord_name: str,
       bin_dim_name: Optional[str] = None,
       add_set_complements: bool = False,
@@ -568,6 +568,13 @@ class BySets(Binning):
     masks = []
 
     for name, s in self.sets.items():
+      # Convert s to a numpy array to handle different input types and
+      # ensure compatibility with isin and JAX.
+      if isinstance(s, (Sequence,)) and not isinstance(s, str):
+        s = list(s)
+      else:
+        s = [s]
+      s = np.array(s)
       mask = statistic[self.coord_name].isin(s)
       mask = mask.expand_dims(self.bin_dim_name, axis=0)
       mask.coords[self.bin_dim_name] = [name]
