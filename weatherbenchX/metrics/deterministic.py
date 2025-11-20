@@ -38,13 +38,21 @@ class RelativeIntensity(base.PerVariableStatistic):
 
   """
 
+  def __init__(self, spatial_dims: Sequence[str] = ('latitude', 'longitude')):
+    """Init.
+
+    Args:
+      spatial_dims: The dimensions to compute the relative intensity over.
+    """
+    self._spatial_dims = spatial_dims
+
   def _compute_per_variable(
       self,
       predictions: xr.DataArray,
       targets: xr.DataArray,
-      spatial_dims: Sequence[str] = ('latitude', 'longitude'),
       ) -> xr.DataArray:
 
+    spatial_dims = self._spatial_dims
     prediction_mean = predictions.mean(dim=spatial_dims)
     target_mean = targets.mean(dim=spatial_dims)
     return np.abs(prediction_mean / target_mean - 1)
