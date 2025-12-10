@@ -15,7 +15,7 @@
 
 import abc
 from collections.abc import Hashable, Mapping
-from typing import Collection, Callable, Optional, Union
+from typing import Callable, Collection, Optional, Union
 import numpy as np
 from weatherbenchX import interpolations
 from weatherbenchX import xarray_tree
@@ -72,7 +72,11 @@ class DataLoader(abc.ABC):
       interpolation: Optional[interpolations.Interpolation] = None,
       compute: bool = True,
       add_nan_mask: bool = False,
-      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      process_chunk_fn: Optional[
+          Callable[
+              [Mapping[Hashable, xr.DataArray]], Mapping[Hashable, xr.DataArray]
+          ]
+      ] = None,
   ):
     """Shared initialization for data loaders.
 
@@ -84,7 +88,7 @@ class DataLoader(abc.ABC):
         False indicating NaN values. To be used for masked aggregation. Default:
         False.
       process_chunk_fn: optional function to be applied to each chunk after
-        loading, interpolation and compute, but before computing a mask.
+        loading but before interpolation, computing, and adding nan mask.
     """
     self._interpolation = interpolation
     self._compute = compute
@@ -123,6 +127,12 @@ class DataLoader(abc.ABC):
     """
     chunk = self._load_chunk_from_source(init_times, lead_times)
 
+    # TODO: https://github.com/google-research/weatherbenchX/issues/67 - add
+    # full functionality for computing derived variables, which would complement
+    # adhoc chunk processing with process_chunk_fn.
+    if self._process_chunk_fn is not None:
+      chunk = self._process_chunk_fn(chunk)
+
     if self._interpolation is not None:
       # TODO(srasp): Potentially implement consistency check between lead_times
       # and lead_time coordinate on reference.
@@ -136,12 +146,6 @@ class DataLoader(abc.ABC):
     # Compute after interpolation avoids loading unnecessary data.
     if self._compute:
       chunk = xarray_tree.map_structure(_compute_and_keep_dtype, chunk)
-
-    # TODO: https://github.com/google-research/weatherbenchX/issues/67 - add
-    # full functionality for computing derived variables, which would complement
-    # adhoc chunk processing with process_chunk_fn.
-    if self._process_chunk_fn is not None:
-      chunk = self._process_chunk_fn(chunk)
 
     if self._add_nan_mask:
       chunk = add_nan_mask_to_data(chunk)
