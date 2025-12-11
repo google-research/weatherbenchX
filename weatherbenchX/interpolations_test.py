@@ -188,5 +188,39 @@ class InterpolationsTest(absltest.TestCase):
     np.testing.assert_equal(interpolated_da['sample'].values, [1, 2])
 
 
+class CropToBoxTest(absltest.TestCase):
+
+  def test_crop_to_box_with_0_360_input(self):
+    lats = np.arange(-85, 86, 10)  # 18 elements
+    lons = np.arange(0, 359, 18)  # 20 elements
+    da = xr.DataArray(
+        name='t2m',
+        data=np.random.rand(len(lats), len(lons)),
+        coords={
+            'latitude': lats,
+            'longitude': lons,
+        },
+        dims=['latitude', 'longitude'],
+    )
+    cropper = interpolations.CropToBox(
+        lat_min=-30, lat_max=30, lon_min=60, lon_max=180
+    )
+    cropped_da = cropper.interpolate_data_array(da)
+    np.testing.assert_array_less(cropped_da.latitude.values, 30.1)
+    np.testing.assert_array_less(-30.1, cropped_da.latitude.values)
+    np.testing.assert_array_less(cropped_da.longitude.values, 180.1)
+    np.testing.assert_array_less(59.9, cropped_da.longitude.values)
+
+  def test_crop_to_box_wrap_invalid_lon(self):
+    with self.assertRaisesRegex(ValueError, 'Invalid longitudes.*'):
+      interpolations.CropToBox(lat_min=-90, lat_max=90, lon_min=300, lon_max=60)
+
+  def test_crop_to_box_invalid_lat(self):
+    with self.assertRaisesRegex(ValueError, 'Invalid latitudes.*'):
+      interpolations.CropToBox(lat_min=10, lat_max=-10, lon_min=0, lon_max=10)
+
+
+
+
 if __name__ == '__main__':
   absltest.main()

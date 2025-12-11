@@ -113,6 +113,56 @@ def interpolate_to_coords(
   return out
 
 
+class CropToBox(Interpolation):
+  """Crops the dataset to the given bounding box.
+
+  Since interpolation is called before compute(), this can be useful to reduce
+  the amount of data that is read into memory when you are only interested in
+  a particular area.
+
+  This is essentially a wrapper around an xarray.Dataset.sel() call.
+  """
+
+  def __init__(
+      self,
+      lat_min: float,
+      lat_max: float,
+      lon_min: float,
+      lon_max: float,
+  ):
+    """Init.
+
+    Args:
+      lat_min: Minimum latitude to crop to (inclusive).
+      lat_max: Maximum latitude to crop to (inclusive).
+      lon_min: Minimum longitude to crop to (exclusive).
+      lon_max: Maximum longitude to crop to (exclusive).
+    """
+    if lat_min > lat_max:
+      raise ValueError('Invalid latitudes: {lat_min} and {lat_max}')
+    if lon_min > lon_max:
+      raise ValueError('Invalid longitudes: {lon_min} and {lon_max}')
+    self._lat_min = lat_min
+    self._lat_max = lat_max
+    self._lon_min = lon_min
+    self._lon_max = lon_max
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    # Some datasets have latitude in the descending order, or longitude that
+    # wraps around, so just in case, we will sort by those coordinates first.
+    da = da.sortby('longitude', ascending=True)
+    da = da.sortby('latitude', ascending=True)
+    da = da.sel(
+        latitude=slice(self._lat_min, self._lat_max),
+        longitude=slice(self._lon_min, self._lon_max),
+    )
+    return da
+
+
 class InterpolateToFixedCoords(Interpolation):
   """Interpolate to a fixed set of coordinates.
 
