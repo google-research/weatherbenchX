@@ -586,6 +586,54 @@ class ETS(base.PerVariableMetric):
     return numerator / denominator
 
 
+class SEDI(base.PerVariableMetric):
+  """Symmetric extremal dependency index.
+
+  SEDI = (ln(F) - ln(H) + ln(1-H) - ln(1-F)) / (ln(H) + ln(F) + ln(1-H) +
+  ln(1-F))
+  where H = TP/(TP+FN) (hit rate) and F = FP/(FP+TN) (false alarm rate).
+  See Ferro and Stephenson (2011)
+  https://journals.ametsoc.org/view/journals/wefo/26/5/waf-d-10-05030_1.pdf
+  """
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'TruePositives': TruePositives(),
+        'FalsePositives': FalsePositives(),
+        'FalseNegatives': FalseNegatives(),
+        'TrueNegatives': TrueNegatives(),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    tp = statistic_values['TruePositives']
+    tn = statistic_values['TrueNegatives']
+    fp = statistic_values['FalsePositives']
+    fn = statistic_values['FalseNegatives']
+
+    h = tp / (tp + fn)
+    f = fp / (fp + tn)
+
+    # Clip rates to avoid log(0) errors and division by zero, following
+    # Ferro and Stephenson (2011)
+    h = h.clip(1e-6, 1 - 1e-6)
+    f = f.clip(1e-6, 1 - 1e-6)
+
+    log_h = np.log(h)
+    log_f = np.log(f)
+    log_1_minus_h = np.log(1 - h)
+    log_1_minus_f = np.log(1 - f)
+
+    numerator = log_f - log_h + log_1_minus_h - log_1_minus_f
+    denominator = log_h + log_f + log_1_minus_h + log_1_minus_f
+
+    return numerator / denominator
+
+
 class Reliability(base.PerVariableMetric):
   """Reliability / calibration curve.
 
