@@ -14,11 +14,12 @@
 """Implementations of categorical metrics."""
 
 from typing import Hashable, Mapping, Sequence, Union, final
+
 import numpy as np
 from weatherbenchX.metrics import base
 from weatherbenchX.metrics import wrappers
 import xarray as xr
-from xarray.core import dataarray
+import xarray.ufuncs as xu
 
 
 class TruePositives(base.PerVariableStatistic):
@@ -36,7 +37,7 @@ class TruePositives(base.PerVariableStatistic):
 
     return (
         (predictions.astype(bool) * targets.astype(bool))
-        .where(~np.isnan(predictions * targets))
+        .where(~xu.isnan(predictions * targets))
         .astype(np.float32)
     )
 
@@ -56,7 +57,7 @@ class TrueNegatives(base.PerVariableStatistic):
 
     return (
         (~predictions.astype(bool) * ~targets.astype(bool))
-        .where(~np.isnan(predictions * targets))
+        .where(~xu.isnan(predictions * targets))
         .astype(np.float32)
     )
 
@@ -76,7 +77,7 @@ class FalsePositives(base.PerVariableStatistic):
 
     return (
         (predictions.astype(bool) * ~targets.astype(bool))
-        .where(~np.isnan(predictions * targets))
+        .where(~xu.isnan(predictions * targets))
         .astype(np.float32)
     )
 
@@ -95,7 +96,7 @@ class FalseNegatives(base.PerVariableStatistic):
   ) -> xr.DataArray:
     return (
         (~predictions.astype(bool) * targets.astype(bool))
-        .where(~np.isnan(predictions * targets))
+        .where(~xu.isnan(predictions * targets))
         .astype(np.float32)
     )
 
@@ -215,7 +216,7 @@ class SEEPS(base.Statistic):
     # Convert to SI units [meters]
     dry_threshold = dry_threshold_mm / 1000.0
     dry = da <= dry_threshold
-    light = np.logical_and(
+    light = xu.logical_and(
         da > dry_threshold, da < wet_threshold_for_valid_time
     )
     heavy = da >= wet_threshold_for_valid_time
@@ -834,12 +835,12 @@ class JaccardDistant(base.PerVariableStatisticWithClimatology):
     climatology_high = aligned_climatology.sel(quantile=self._interval_high)
 
     # A ∩ B = max(min(A), min(B)) - min(max(A), max(B))
-    max_of_lows = np.maximum(predictions_low, climatology_low)
-    min_of_highs = np.minimum(predictions_high, climatology_high)
+    max_of_lows = xu.maximum(predictions_low, climatology_low)
+    min_of_highs = xu.minimum(predictions_high, climatology_high)
 
     # Length of intersection is the difference. If they don't overlap,
     # this difference could be negative, so we take the max with 0.
-    intersection_length = np.maximum(0, min_of_highs - max_of_lows)
+    intersection_length = xu.maximum(0, min_of_highs - max_of_lows)
 
     # |A ∪ B| = |A| + |B| - |A ∩ B|
     predictions_interval_length = predictions_high - predictions_low

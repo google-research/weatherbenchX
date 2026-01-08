@@ -55,7 +55,7 @@ class RelativeIntensity(base.PerVariableStatistic):
     spatial_dims = self._spatial_dims
     prediction_mean = predictions.mean(dim=spatial_dims)
     target_mean = targets.mean(dim=spatial_dims)
-    return np.abs(prediction_mean / target_mean - 1)
+    return xu.abs(prediction_mean / target_mean - 1)
 
 
 class Error(base.PerVariableStatistic):
