@@ -270,6 +270,7 @@ def compute_cdf(
     da: xr.DataArray,
     threshold_dim: str,
     enforce_monotonicity: bool,
+    right_inclusive: bool = True,
 ) -> xr.DataArray:
   """Computes the CDF of a continuous input."""
 
@@ -299,9 +300,12 @@ def compute_cdf(
           'Bin values must be monotonically increasing. To turn off this'
           ' check, set `enforce_monotonicity=False`.'
       )
-  cdf = (da <= thresholds).astype('float')  # This <= makes it right-inclusive.
-  # Make sure NaNs are propagated.
-  cdf = cdf.where(~np.isnan(da))
+  if right_inclusive:
+    cdf = (da <= thresholds).astype('float')
+  else:
+    cdf = (da < thresholds).astype('float')
+  # Make sure NaNs are propagated from da and thresholds.
+  cdf = cdf.where(~np.isnan(da)).where(~np.isnan(thresholds))
   return cdf
 
 
@@ -396,7 +400,8 @@ class ContinuousToCDF(InputTransform):
   """Converts a continuous input to a CDF.
 
   Example: If `threshold_values` are [0.5, 1.0, 1.5], the resulting output
-  will have values for [x <= 0.5, x <= 1.0, x <= 1.5].
+  will have values for `[x <= 0.5, x <= 1.0, x <= 1.5]` if `right_inclusive` is
+  `True`, or `[x < 0.5, x < 1.0, x < 1.5]` if `right_inclusive` is `False`.
 
   The resulting DataArray will have a coordinate `threshold` with the threshold
   values in the case of a 1D array, or the values of the `threshold_dim`
@@ -410,6 +415,7 @@ class ContinuousToCDF(InputTransform):
       threshold_dim: str,
       unique_name_suffix: str | None = None,
       enforce_monotonicity: bool = True,
+      right_inclusive: bool = True,
   ):
     """Initialize the transform.
 
@@ -425,6 +431,8 @@ class ContinuousToCDF(InputTransform):
       enforce_monotonicity: If True, raise an error if the bin values are not
         monotonically increasing. It might be necessary to turn this off if the
         bin_values contain NaNs, which would raise an error here. Default: True.
+      right_inclusive: If True, the CDF is right-inclusive. If False, the CDF is
+        left-inclusive. Default: True.
     """
     super().__init__(which)
     self._threshold_values = threshold_values
@@ -437,6 +445,7 @@ class ContinuousToCDF(InputTransform):
         )
     self._unique_name_suffix = unique_name_suffix
     self._enforce_monotonicity = enforce_monotonicity
+    self._right_inclusive = right_inclusive
 
   @property
   def unique_name_suffix(self) -> str:
@@ -444,7 +453,7 @@ class ContinuousToCDF(InputTransform):
       unique_name_suffix = ','.join([str(t) for t in self._threshold_values])
     else:
       unique_name_suffix = self._unique_name_suffix
-    return f'ContinuousToCDF_{self._threshold_dim}_{unique_name_suffix}'
+    return f'ContinuousToCDF_{self._threshold_dim}_{unique_name_suffix}_right_inclusive_{self._right_inclusive}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     result = compute_cdf(
@@ -452,6 +461,7 @@ class ContinuousToCDF(InputTransform):
         da=da,
         threshold_dim=self._threshold_dim,
         enforce_monotonicity=self._enforce_monotonicity,
+        right_inclusive=self._right_inclusive,
     )
     return result
 
