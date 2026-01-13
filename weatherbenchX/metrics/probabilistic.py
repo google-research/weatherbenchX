@@ -379,6 +379,7 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
       skipna_ensemble: bool = False,
       fair: bool = True,
       enforce_monotonicity: bool = True,
+      right_inclusive: bool = True,
   ):
     """Init.
 
@@ -395,6 +396,8 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
       enforce_monotonicity: If True (default), enforce monotonicity of the
         binning thresholds. If bin thresholds contain NaNs, this will raise an
         error.
+      right_inclusive: If True, the CDF is right-inclusive. If False, the CDF is
+        left-inclusive. Default: True.
     """
     self._prediction_bin_thresholds = prediction_bin_thresholds
     self._target_bin_thresholds = target_bin_thresholds
@@ -410,6 +413,7 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
         threshold_dim=bin_dim,
         unique_name_suffix=self._unique_name_suffix,
         enforce_monotonicity=enforce_monotonicity,
+        right_inclusive=right_inclusive,
     )
     binned_target_wrapper = wrappers.ContinuousToCDF(
         which='targets',
@@ -417,6 +421,7 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
         threshold_dim=bin_dim,
         unique_name_suffix=self._unique_name_suffix,
         enforce_monotonicity=enforce_monotonicity,
+        right_inclusive=right_inclusive,
     )
 
     if self._fair:
