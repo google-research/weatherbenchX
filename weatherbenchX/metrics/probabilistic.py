@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implementation of probabilistic metrics and assiciated statistics."""
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 from typing import Mapping, Tuple
 import numpy as np
 import scipy.stats
@@ -46,7 +46,7 @@ class EnsembleAveragedStatistic(base.Statistic):
 
   @property
   def unique_name(self) -> str:
-    return self._wrapped_statistic.unique_name + '_each_'  + self._ensemble_dim
+    return self._wrapped_statistic.unique_name + '_each_' + self._ensemble_dim
 
   def compute(
       self,
@@ -80,7 +80,6 @@ class EnsembleAveragedMetric(base.Metric):
   ensemble_dim in its reduce_dims. However, having the metric reduce the sample
   axis can be convenient in some cases to avoid having to specify a separate
   aggregator.
-
   """
 
   def __init__(
@@ -88,7 +87,7 @@ class EnsembleAveragedMetric(base.Metric):
       wrapped_metric: base.Metric,
       *,
       ensemble_dim: str = 'number',
-      skipna_ensemble: bool = False
+      skipna_ensemble: bool = False,
   ):
     self._wrapped_metric = wrapped_metric
     self._ensemble_dim = ensemble_dim
@@ -704,6 +703,34 @@ class WassersteinDistance(base.PerVariableStatistic):
     )
 
 
+class EnsembleErrorExceedance(deterministic.ErrorExceedance):
+  """Computes error exceedence averaged over ensemble members."""
+
+  def __init__(
+      self,
+      thresholds: Sequence[float] | xr.DataArray,
+      ensemble_dim: str = 'number',
+  ):
+    """Init.
+
+    Args:
+      thresholds: The thresholds to use for error exceedance. If a list is given
+        then it will be converted to an xr.DataArray with dim
+        `error_exceedance_thresholds`.
+      ensemble_dim: The name of the ensemble dimension. Default: 'number'.
+    """
+    super().__init__(thresholds=thresholds)
+    self._ensemble_dim = ensemble_dim
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    out = super()._compute_per_variable(predictions, targets)
+    return out.mean(dim=self._ensemble_dim)
+
+
 class UnbiasedEnsembleMeanRMSE(base.PerVariableMetric):
   """Square root of the unbiased estimate of the ensemble mean MSE."""
 
@@ -741,7 +768,8 @@ def SpreadSkillRatio(**unused_kwargs):  # pylint: disable=invalid-name
   raise ValueError(
       'SpreadSkillRatio is no longer supported as it was not correctly '
       'implemented. Please use UnbiasedSpreadSkillRatio instead and see '
-      'the docstring of that class for more details.')
+      'the docstring of that class for more details.'
+  )
 
 
 class UnbiasedSpreadSkillRatio(base.PerVariableMetric):
@@ -876,7 +904,8 @@ def _select_optimal_thresholds(
     # for their last axis (which will respectively contain thresholds, and
     # indexes into the threshold dimension for each cost/loss ratio).
     values, indices = xr.broadcast(
-        values, optimal_indices, exclude=['threshold', 'cost_loss_ratio'])
+        values, optimal_indices, exclude=['threshold', 'cost_loss_ratio']
+    )
 
     # We then apply a one-dimensional multiple-index slice, vmap'd once
     # for each of the aligned leading axes to make it vectorize over these
@@ -886,10 +915,12 @@ def _select_optimal_thresholds(
       select = jax.vmap(select, in_axes=0, out_axes=0)
 
     return xr.apply_ufunc(
-        select, values, indices,
+        select,
+        values,
+        indices,
         input_core_dims=[['threshold'], ['cost_loss_ratio']],
-        output_core_dims=[['cost_loss_ratio']]
-        )
+        output_core_dims=[['cost_loss_ratio']],
+    )
   else:
     # Much simpler:
     result = values.isel(threshold=optimal_indices)
@@ -923,8 +954,9 @@ class RelativeEconomicValue(base.Metric):
       ensemble_size: int | None = None,
       probability_thresholds: np.ndarray | None = None,
       cost_loss_ratios: np.ndarray | None = None,
-      optimal_thresholds: xr.DataArray | Mapping[Hashable, xr.DataArray] | None
-      = None,
+      optimal_thresholds: (
+          xr.DataArray | Mapping[Hashable, xr.DataArray] | None
+      ) = None,
       optimal_thresholds_select_nearest: bool = False,
       statistic_suffix: str | None = None,
   ):
@@ -934,10 +966,10 @@ class RelativeEconomicValue(base.Metric):
       ensemble_size: The size of the ensemble; if specified, we compute
         statistics for binary predictions at all possible probability thresholds
         for the given ensemble size. Specifically the possible empirical
-        probabilities for an ensemble of size N are 0/N, 1/N, 2/N, ..., N/N,
-        and the thresholds between them are 0.5/N, 1.5/N, ..., (N-0.5)/N.
-        Please specify either `ensemble_size` or `probability_thresholds`, but
-        not both.
+        probabilities for an ensemble of size N are 0/N, 1/N, 2/N, ..., N/N, and
+        the thresholds between them are 0.5/N, 1.5/N, ..., (N-0.5)/N. Please
+        specify either `ensemble_size` or `probability_thresholds`, but not
+        both.
       probability_thresholds: If specified, we compute statistics for binary
         predictions at only these specific probability thresholds. This can be
         useful when dealing with large ensembles where we don't need to evaluate
@@ -947,20 +979,18 @@ class RelativeEconomicValue(base.Metric):
         geometric progression from 0.005 to 1, not including 1.
       optimal_thresholds: Optionally specifies optimal probability thresholds
         (out of those specified by `probability_thresholds` or `ensemble_size`)
-        to use for each of the specified `cost_lost_ratios`.
-        Thresholds can be specified as a DataArray with a 'cost_loss_ratio'
-        dimension whose coordinate matches the `cost_loss_ratios` argument.
-        It may also have dimensions aligning with other dimensions present in
-        the statistics, where an optimal threshold has been selected separately
-        for each value along those dimensions (e.g. lead_time).
-        Thresholds can also be specified as a mapping from variable name to
-        DataArray, where different thresholds have been selected for each
-        variable.
-        If specified, we will evaluate REV only at these optimal thresholds,
-        and there will be no `threshold` dimension in the result.
-        If not specified, REV is computed for all probability thresholds and all
-        cost/loss ratios, and there will be a `threshold` dimension in the
-        result.
+        to use for each of the specified `cost_lost_ratios`. Thresholds can be
+        specified as a DataArray with a 'cost_loss_ratio' dimension whose
+        coordinate matches the `cost_loss_ratios` argument. It may also have
+        dimensions aligning with other dimensions present in the statistics,
+        where an optimal threshold has been selected separately for each value
+        along those dimensions (e.g. lead_time). Thresholds can also be
+        specified as a mapping from variable name to DataArray, where different
+        thresholds have been selected for each variable. If specified, we will
+        evaluate REV only at these optimal thresholds, and there will be no
+        `threshold` dimension in the result. If not specified, REV is computed
+        for all probability thresholds and all cost/loss ratios, and there will
+        be a `threshold` dimension in the result.
       optimal_thresholds_select_nearest: Only relevant if optimal_thresholds are
         specified. If True, will select the nearest available thresholds to the
         optimal_thresholds specified. If False (the default), only exact matches
@@ -1003,8 +1033,7 @@ class RelativeEconomicValue(base.Metric):
         self._thresholds <= 1.0
     ):
       raise ValueError(
-          'Probability thresholds must be in [0, 1], got'
-          f' {self._thresholds=}.'
+          f'Probability thresholds must be in [0, 1], got {self._thresholds=}.'
       )
 
     self._unique_name_suffix = statistic_suffix or ''
@@ -1082,11 +1111,13 @@ class RelativeEconomicValue(base.Metric):
     # PerVariableMetrics and all subclasses to take this extra var_name
     # argument.
     common_variables = set.intersection(
-        *[set(statistic_values[s]) for s in self.statistics])
+        *[set(statistic_values[s]) for s in self.statistics]
+    )
     values = {}
     for var_name in common_variables:
-      stats_per_variable = {s: statistic_values[s][var_name]
-                            for s in self.statistics}
+      stats_per_variable = {
+          s: statistic_values[s][var_name] for s in self.statistics
+      }
       values[var_name] = self._values_from_mean_statistics_per_variable(
           stats_per_variable, var_name
       )
@@ -1169,12 +1200,14 @@ class RankHistogram(base.PerVariableStatistic):
       targets: xr.DataArray,
   ) -> xr.DataArray:
     num_bins = predictions.sizes[self._ensemble_dim] + 1
-    ranks = (predictions < targets).astype(int).sum(
-        self._ensemble_dim, skipna=False)
+    ranks = (
+        (predictions < targets)
+        .astype(int)
+        .sum(self._ensemble_dim, skipna=False)
+    )
 
     categories = xr.DataArray(np.arange(num_bins), dims=['rank'])
     categories.coords['rank'] = categories
 
     # Transform to floating point for the subsequent aggregation.
     return (ranks == categories).astype(np.float32)
-
