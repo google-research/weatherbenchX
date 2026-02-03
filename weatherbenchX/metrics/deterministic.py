@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Implementation of deterministic metrics and assiciated statistics."""
-
+from absl import logging
 from collections.abc import Hashable
 from typing import Iterable, Mapping, Sequence, Union
+import jax
 import numpy as np
+import jax.numpy as jnp
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 import xarray as xr
@@ -53,9 +55,37 @@ class RelativeIntensity(base.PerVariableStatistic):
       ) -> xr.DataArray:
 
     spatial_dims = self._spatial_dims
-    prediction_mean = predictions.mean(dim=spatial_dims)
-    target_mean = targets.mean(dim=spatial_dims)
-    return np.abs(prediction_mean / target_mean - 1)
+    # Add a small epsilon to both denominator and numerator to avoid division by
+    # zero and ensure RIE is 0 when both are 0.
+    epsilon = 1e-6
+
+    if 'mask' in targets.coords:
+      # If mask is present, we compute mean only over mask==1 region.
+      # If any value in that region is NaN, the mean will be NaN.
+      # So, we set masked-out values to 0, then sum with skipna=False,
+      # and divide by the count of unmasked values.
+      mask = targets.mask == 1
+      count = mask.sum(dim=spatial_dims, skipna=False)
+      prediction_sum = predictions.where(mask, 0).sum(
+          dim=spatial_dims, skipna=False
+      )
+      target_sum = targets.where(mask, 0).sum(dim=spatial_dims, skipna=False)
+      prediction_mean = prediction_sum / count
+      prediction_mean = prediction_mean.where(count > 0, 0.0)
+      target_mean = target_sum / count
+      target_mean = target_mean.where(count > 0, 0.0)
+      ratio = (prediction_mean + epsilon) / (target_mean + epsilon)
+      result = abs(ratio - 1)
+      # The mask is 1 if there was at least one valid value in the aggregation.
+      # Otherwise, it is 0.
+      result.coords['mask'] = (count > 0).astype(int)
+    else:
+      prediction_mean = predictions.mean(dim=spatial_dims, skipna=False)
+      target_mean = targets.mean(dim=spatial_dims, skipna=False)
+      ratio = (prediction_mean + epsilon) / (target_mean + epsilon)
+      result = abs(ratio - 1)
+
+    return result
 
 
 class Error(base.PerVariableStatistic):
