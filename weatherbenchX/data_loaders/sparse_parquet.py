@@ -92,7 +92,9 @@ class SparseObservationsFromParquet(base.DataLoader):
       split_variables: bool = False,
       dropna: bool = False,
       add_nan_mask: bool = False,
-      tolerance: Optional[np.timedelta64] = None,
+      tolerance: Optional[
+          np.timedelta64 | tuple[np.timedelta64, np.timedelta64]
+      ] = None,
       rename_variables: Optional[Mapping[str, str]] = None,
       include_slice_end_time: bool = False,
       remove_duplicates: bool = False,
@@ -125,11 +127,13 @@ class SparseObservationsFromParquet(base.DataLoader):
         (variables will be split into DataArrays if they aren't already), with
         False indicating NaN values. To be used for masked aggregation. Default:
         False.
-      tolerance: (Optional) Tolerance around the given valid time. Data within
-        valid_time +/- tolerance will be returned. This is only supported for
-        exact lead_times. The resulting init and lead time coordinates will be
-        those requested. The valid_time dimension will reflect the original time
-        for each observation.
+      tolerance: (Optional) Tolerance around the given valid time. If tolerance
+        is a single timedelta, data within valid_time +/- tolerance will be
+        returned. If tolerance is a 2-tuple of timedeltas, data within
+        [valid_time + tolerance[0], valid_time + tolerance[1]] will be returned.
+        This is only supported for exact lead_times. The resulting init and lead
+        time coordinates will be those requested. The valid_time dimension will
+        reflect the original time for each observation.
       rename_variables: (Optional) Renaming dictionary.
       include_slice_end_time: Whether slice end time is included. Default: False
       remove_duplicates: For exact lead times, whether duplicate stations
@@ -169,10 +173,18 @@ class SparseObservationsFromParquet(base.DataLoader):
     self._coordinate_variables = list(coordinate_variables) + ['valid_time']
     self._split_variables = split_variables
     self._dropna = dropna
-    if tolerance == np.timedelta64(0, 'h'):
-      raise ValueError(
-          'Tolerance should not be zero. This will always return an emptyarray.'
-      )
+    if tolerance is not None:
+      if isinstance(tolerance, np.timedelta64):
+        tolerance = (-tolerance, tolerance)
+      if len(tolerance) != 2:
+        raise ValueError(
+            'Tolerance must be a a single np.timedelta64 or a 2-tuple.'
+        )
+      if (tolerance[1] - tolerance[0]) <= np.timedelta64(0, 'h'):
+        raise ValueError(
+            'Tolerance range should be non-empty. This will always return an'
+            ' empty array.'
+        )
     self._tolerance = tolerance
     self._rename_variables = rename_variables
     self._include_slice_end_time = include_slice_end_time
@@ -225,8 +237,8 @@ class SparseObservationsFromParquet(base.DataLoader):
         stop_time = valid_time + lead_time_slice.stop
 
     else:
-      start_time = valid_time - self._tolerance
-      stop_time = valid_time + self._tolerance
+      start_time = valid_time + self._tolerance[0]
+      stop_time = valid_time + self._tolerance[1]
 
     # Get subset of files since filtering can take a very long time.
     # Also create additional filters to exactly get required times.
