@@ -109,9 +109,9 @@ class LandSea(Binning):
         land_sea_fraction >= land_sea_threshold. (Default of 0.5 follows ECMWF
         convention).
       bin_dim_name: Name of binning dimension. Default: 'land_sea'
-      include_global_mask: If True, the output mask will consist of
-        ['land', 'sea', 'global'], otherwise ['land', 'sea']. 'global' is the
-        union of land and sea. Default: False.
+      include_global_mask: If True, the output mask will consist of ['land',
+        'sea', 'global'], otherwise ['land', 'sea']. 'global' is the union of
+        land and sea. Default: False.
     """
     super().__init__(bin_dim_name)
     # Force to bool to make sure it is a boolean mask.
@@ -136,7 +136,10 @@ class LandSea(Binning):
       masks.append(xr.ones_like(self._land_mask))
       labels.append('global')
 
-    masks = xr.concat(masks, dim=self.bin_dim_name,)
+    masks = xr.concat(
+        masks,
+        dim=self.bin_dim_name,
+    )
     masks.coords[self.bin_dim_name] = np.array(labels)
     return masks
 
@@ -352,6 +355,44 @@ class ByExactCoord(Binning):
     return masks
 
 
+def _extract_time_unit(
+    time_coord: xr.DataArray,
+    unit: str,
+) -> xr.DataArray:
+  """Extract time unit values from a datetime/timedelta coordinate.
+
+  Args:
+    time_coord: A datetime64 or timedelta64 xarray DataArray.
+    unit: Time unit to extract, e.g. 'second', 'minute', 'hour', 'day', 'week',
+      'year', 'month', 'dayofyear', etc.
+
+  Returns:
+    DataArray containing the extracted time unit values.
+
+  Raises:
+    ValueError: If the unit is not supported for timedelta coordinates.
+  """
+  dt = time_coord.dt
+  if isinstance(dt, xr.core.accessor_dt.TimedeltaAccessor):
+    coord = time_coord.dt.total_seconds()
+    if unit == 'minute':
+      coord = coord // (60)
+    elif unit == 'hour':
+      coord = coord // (60 * 60)
+    elif unit == 'day':
+      coord = coord // (60 * 60 * 24)
+    elif unit == 'week':
+      coord = coord // (60 * 60 * 24 * 7)
+    elif unit == 'year':
+      coord = coord // (60 * 60 * 24 * 365)
+    elif unit != 'second':
+      raise ValueError(f'Unsupported unit for timedelta: {unit}')
+  else:
+    assert isinstance(dt, xr.core.accessor_dt.DatetimeAccessor)
+    coord = getattr(time_coord.dt, unit)
+  return coord
+
+
 class ByTimeUnit(Binning):
   """Bin by time unit for given axis.
 
@@ -372,7 +413,6 @@ class ByTimeUnit(Binning):
   """
 
   def __init__(self, unit: str, time_dim: str, add_global_bin: bool = False):
-    # TODO(srasp): Add support for sequence of units.
     """Init.
 
     Args:
@@ -391,24 +431,7 @@ class ByTimeUnit(Binning):
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
-    dt = statistic[self.time_dim].dt
-    if isinstance(dt, xr.core.accessor_dt.TimedeltaAccessor):
-      coord = statistic[self.time_dim].dt.total_seconds()
-      if self.unit == 'minute':
-        coord = coord // (60)
-      elif self.unit == 'hour':
-        coord = coord // (60 * 60)
-      elif self.unit == 'day':
-        coord = coord // (60 * 60 * 24)
-      elif self.unit == 'week':
-        coord = coord // (60 * 60 * 24 * 7)
-      elif self.unit == 'year':
-        coord = coord // (60 * 60 * 24 * 365)
-      elif self.unit != 'second':
-        raise ValueError(f'Unsupported unit: {self.unit}')
-    else:
-      assert isinstance(dt, xr.core.accessor_dt.DatetimeAccessor)
-      coord = getattr(statistic[self.time_dim].dt, self.unit)
+    coord = _extract_time_unit(statistic[self.time_dim], self.unit)
     masks = vectorized_coord_mask(
         coord,
         self.time_dim,
@@ -416,6 +439,79 @@ class ByTimeUnit(Binning):
         self.add_global_bin,
     )
     return masks
+
+
+class ByTimeUnitSets(Binning):
+  """Bin by sets of time unit values for a given axis.
+
+  This combines the time unit extraction logic of ByTimeUnit with the set-based
+  binning logic of BySets. It allows grouping by arbitrary sets of time unit
+  values, for example grouping hours 0 and 12 together, and hours 6 and 18
+  together.
+
+  Example:
+    ```
+    sets = {'00/12': [0, 12], '06/18': [6, 18]}
+    unit = 'hour'
+    dim = 'init_time'
+    ```
+    This will create two bins: one for data initialized at hours 0 or 12, and
+    another for data initialized at hours 6 or 18.
+  """
+
+  def __init__(
+      self,
+      sets: Mapping[str, Sequence[Any] | Any],
+      unit: str,
+      dim: str,
+      bin_dim_name: Optional[str] = None,
+      add_global_bin: bool = False,
+  ):
+    """Init.
+
+    Args:
+      sets: Dictionary specifying sets of time unit values to bin by. Keys are
+        bin names, values are sequences of time unit values (e.g. hours).
+      unit: Time unit to extract, e.g. 'hour', 'day', 'month', 'dayofyear'.
+      dim: Time dimension/coordinate to bin by.
+      bin_dim_name: Name of binning dimension. Default: `{dim}_{unit}_sets`.
+      add_global_bin: If True, add a global bin containing all data. Default:
+        False.
+    """
+    if bin_dim_name is None:
+      bin_dim_name = f'{dim}_{unit}_sets'
+    super().__init__(bin_dim_name)
+    self.sets = sets
+    self.unit = unit
+    self.dim = dim
+    self.add_global_bin = add_global_bin
+
+  def create_bin_mask(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    time_unit_values = _extract_time_unit(statistic[self.dim], self.unit)
+
+    masks = []
+    for name, s in self.sets.items():
+      if isinstance(s, (Sequence,)) and not isinstance(s, str):
+        s = list(s)
+      else:
+        s = [s]
+      s = np.array(s)
+      mask = time_unit_values.isin(s)
+      mask = mask.expand_dims(self.bin_dim_name, axis=0)
+      mask.coords[self.bin_dim_name] = [name]
+      masks.append(mask)
+
+    if self.add_global_bin:
+      mask = xr.full_like(time_unit_values, True, dtype=bool).expand_dims(
+          self.bin_dim_name
+      )
+      mask.coords[self.bin_dim_name] = ['global']
+      masks.append(mask)
+
+    return xr.concat(masks, self.bin_dim_name)
 
 
 class ByTimeUnitFromSeconds(Binning):
@@ -436,8 +532,8 @@ class ByTimeUnitFromSeconds(Binning):
       unit: Time unit to bin by, one of 'second', 'minute', 'hour'.
       time_dim: Time dimension to bin by.
       bins: Sequence of bins to bin by. If None, will use default bins depending
-      on the unit (e.g. 0 through 23 for hour). Note that these defaults won't
-      always make sense (e.g. if binning by lead time, hours can be > 23).
+        on the unit (e.g. 0 through 23 for hour). Note that these defaults won't
+        always make sense (e.g. if binning by lead time, hours can be > 23).
     """
 
     super().__init__(f'{time_dim}_{unit}')
@@ -464,9 +560,8 @@ class ByTimeUnitFromSeconds(Binning):
       raise ValueError(f'Unsupported unit: {self.unit}')
 
     bin_dim_name = f'{self.time_dim}_{self.unit}'
-    masks = (
-        coord ==
-        xr.DataArray(bins, dims=[bin_dim_name]).broadcast_like(coord)
+    masks = coord == xr.DataArray(bins, dims=[bin_dim_name]).broadcast_like(
+        coord
     )
     masks = masks.assign_coords({bin_dim_name: bins})
     return masks
@@ -514,8 +609,8 @@ class ByCoordBins(Binning):
           .drop(self.dim_name)
           .expand_dims(
               {
-                  self.dim_name: xr.DataArray([], dims=[self.dim_name]).astype(
-                      dtype
+                  self.dim_name: (
+                      xr.DataArray([], dims=[self.dim_name]).astype(dtype)
                   )
               },
               axis=0,

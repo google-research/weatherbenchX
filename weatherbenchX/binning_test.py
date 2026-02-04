@@ -330,6 +330,68 @@ class BinningTest(parameterized.TestCase):
         ).values.all()
     )
 
+  def test_by_time_unit_sets_with_datetime64(self):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-02T00',
+        time_resolution='6 hr',
+    )['2m_temperature']
+    binning_obj = binning.ByTimeUnitSets(
+        sets={'00/12': [0, 12], '06/18': [6, 18]},
+        unit='hour',
+        dim='time',
+        bin_dim_name='init_hour_sets',
+    )
+    mask = binning_obj.create_bin_mask(statistic_values)
+
+    self.assertEqual(mask.init_hour_sets.shape[0], 2)
+    np.testing.assert_array_equal(
+        mask.init_hour_sets.values, ['00/12', '06/18']
+    )
+    self.assertTrue(mask.sel(init_hour_sets='00/12').isel(time=0).all())
+    self.assertTrue(mask.sel(init_hour_sets='06/18').isel(time=1).all())
+    self.assertFalse(mask.sel(init_hour_sets='00/12').isel(time=1).any())
+    self.assertFalse(mask.sel(init_hour_sets='06/18').isel(time=0).any())
+
+  def test_by_time_unit_sets_with_timedelta64(self):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-01T01',
+        time_resolution='1 hr',
+        lead_resolution='6 hour',
+        lead_stop='24 hour',
+    )['2m_temperature']
+    binning_obj = binning.ByTimeUnitSets(
+        sets={'short': [0, 6], 'long': [12, 18, 24]},
+        unit='hour',
+        dim='prediction_timedelta',
+    )
+    mask = binning_obj.create_bin_mask(statistic_values)
+
+    self.assertEqual(mask[binning_obj.bin_dim_name].shape[0], 2)
+    short_mask = mask.sel(**{binning_obj.bin_dim_name: 'short'})
+    long_mask = mask.sel(**{binning_obj.bin_dim_name: 'long'})
+    self.assertEqual(short_mask.sum('prediction_timedelta').item(), 2)
+    self.assertEqual(long_mask.sum('prediction_timedelta').item(), 3)
+
+  def test_by_time_unit_sets_with_global_bin(self):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-02T00',
+        time_resolution='6 hr',
+    )['2m_temperature']
+    binning_obj = binning.ByTimeUnitSets(
+        sets={'00/12': [0, 12]},
+        unit='hour',
+        dim='time',
+        add_global_bin=True,
+    )
+    mask = binning_obj.create_bin_mask(statistic_values)
+
+    self.assertLen(mask[binning_obj.bin_dim_name], 2)
+    self.assertIn('global', mask[binning_obj.bin_dim_name].values)
+    self.assertTrue(mask.sel(**{binning_obj.bin_dim_name: 'global'}).all())
+
 
 if __name__ == '__main__':
   absltest.main()
