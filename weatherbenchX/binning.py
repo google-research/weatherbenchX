@@ -570,16 +570,24 @@ class ByTimeUnitFromSeconds(Binning):
 class ByCoordBins(Binning):
   """Binning by specified bins over a coordinate."""
 
-  def __init__(self, dim_name: str, bin_edges: np.ndarray):
+  def __init__(
+      self,
+      dim_name: str,
+      bin_edges: np.ndarray,
+      add_global_bin: bool = False,
+  ):
     """Init.
 
     Args:
       dim_name: Name of dimension to bin by.
       bin_edges: Bin edges to bin by.
+      add_global_bin: If True, add a global bin containing all data. Default:
+        False.
     """
     super().__init__(dim_name)
     self.dim_name = dim_name
     self.bin_edges = bin_edges
+    self.add_global_bin = add_global_bin
 
   def create_bin_mask(
       self,
@@ -594,7 +602,8 @@ class ByCoordBins(Binning):
           statistic.coords[self.dim_name] < stop,
       )
       mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
-      mask.coords[self.dim_name] = np.array([start])
+      coord_val = str(start) if self.add_global_bin else start
+      mask.coords[self.dim_name] = np.array([coord_val])
       mask.assign_coords({
           self.dim_name
           + '_left_edge': xr.DataArray([start], dims=[self.dim_name]),
@@ -602,6 +611,13 @@ class ByCoordBins(Binning):
           + '_right_edge': xr.DataArray([stop], dims=[self.dim_name]),
       })
       masks.append(mask)
+
+    if self.add_global_bin:
+      mask = xr.full_like(statistic.coords[self.dim_name], True, dtype=bool)
+      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
+      mask.coords[self.dim_name] = ['global']
+      masks.append(mask)
+
     if not masks:  # Catch possibility of empty input arrays.
       dtype = statistic[self.dim_name].dtype
       masks = (
