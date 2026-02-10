@@ -174,7 +174,11 @@ class Statistic(Metric):
 
 
 class PerVariableStatistic(Statistic):
-  """Abstract base class for statistics that are computed per variable."""
+  """Abstract base class for statistics that are computed per variable.
+
+  The statistic will be computed independently for each variable that is
+  present in both predictions and targets.
+  """
 
   @final
   def compute(
@@ -183,22 +187,22 @@ class PerVariableStatistic(Statistic):
       targets: Mapping[Hashable, xr.DataArray],
   ) -> Mapping[Hashable, xr.DataArray]:
     """Maps computation over all variables."""
-    # Ensure both inputs are dictionaries.
-    # This is because sometimes mask coordinates can get lost if xarray_tree
-    # combines variables into a Dataset.
-    predictions = dict(predictions)
-    targets = dict(targets)
-    return xarray_tree.map_structure(
-        self._compute_per_variable, predictions, targets
-    )
+    result = {}
+    for var_name in predictions.keys():
+      if var_name in targets.keys():
+        per_var_result = self._compute_per_variable(
+            predictions[var_name], targets[var_name])
+        if per_var_result is not None:
+          result[var_name] = per_var_result
+    return result
 
   @abc.abstractmethod
   def _compute_per_variable(
       self,
       predictions: xr.DataArray,
       targets: xr.DataArray,
-  ) -> xr.DataArray:
-    """Computes statistics per variable."""
+  ) -> xr.DataArray | None:
+    """Computes statistic for a variable, or None if it's not defined."""
 
 
 class PerVariableMetric(Metric):

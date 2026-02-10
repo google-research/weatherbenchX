@@ -497,6 +497,9 @@ class BeamPipelineTest(parameterized.TestCase):
     expected = xr.Dataset({'rmse.2m_temperature': xr.DataArray()})
     xr.testing.assert_allclose(metrics_results, expected)
 
+  # TODO(matthjw): Add a test where statistics are not defined for all
+  # variables.
+
 
 if __name__ == '__main__':
   absltest.main()
