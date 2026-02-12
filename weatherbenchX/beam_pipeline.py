@@ -271,9 +271,15 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
       # combine_by_coords will return a Dataset if there are any names on the
       # input DataArrays, so we remove the names before calling it.
       # We also drop zero-sized arrays since combine_by_cannot deal with them.
-      data_arrays = [d.rename(None) for d in data_arrays if d.size > 0]
+      # Also drop non-dimension coordinates to avoid error in combine_by_coords.
+      data_arrays = [
+          d.rename(None).reset_coords(drop=True)
+          for d in data_arrays
+          if d.size > 0
+      ]
       # If all arrays are empty, we need to manually return an empty DataArray,
       # since combine_by_coords will return a Dataset in this case.
+
       if not data_arrays:
         return key, xr.DataArray()
       return key, xr.combine_by_coords(data_arrays)
