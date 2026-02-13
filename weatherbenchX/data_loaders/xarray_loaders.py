@@ -13,12 +13,13 @@
 # limitations under the License.
 """Data loaders for reading gridded Zarr files."""
 
-from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Union
+from collections.abc import Hashable
+from typing import Any, Callable, Iterable, Mapping, Optional, Union
+
+from absl import logging
 import numpy as np
-from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
-from absl import logging
 
 
 def _rename_dataset(
@@ -63,11 +64,8 @@ class XarrayDataLoader(base.DataLoader):
       rename_dimensions: Optional[Union[Mapping[str, str], str]] = 'ecmwf',
       automatically_convert_lat_lon_to_latitude_longitude: bool = True,
       rename_variables: Optional[Mapping[str, str]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
-      compute: bool = True,
-      add_nan_mask: bool = False,
       preprocessing_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
-      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      **kwargs,
   ):
     """Init.
 
@@ -91,16 +89,9 @@ class XarrayDataLoader(base.DataLoader):
         automatically convert 'lat' and 'lon' dimensions to 'latitude' and
         'longitude'. Default: True.
       rename_variables: (Optional) Dictionary of variables to rename.
-      interpolation: (Optional) Interpolation instance.
-      compute: Whether to load data into memory. Default: True.
-      add_nan_mask: Adds a boolean coordinate named 'mask' to each variable
-        (variables will be split into DataArrays if they aren't already), with
-        False indicating NaN values. To be used for masked aggregation. Default:
-        False.
       preprocessing_fn: (Optional) A function that is applied to the dataset
         right after it is opened.
-      process_chunk_fn: (Optional) A function that is applied to each chunk
-        after loading, interpolation and compute, but before computing a mask.
+      **kwargs: Keyword arguments to pass to base.DataLoader.
     """
     if path is not None and ds is not None:
       raise ValueError('Only one of path or ds can be specified, not both.')
@@ -120,12 +111,7 @@ class XarrayDataLoader(base.DataLoader):
     self._preprocessing_fn = preprocessing_fn
 
     self._preprocessed = False
-    super().__init__(
-        interpolation=interpolation,
-        compute=compute,
-        add_nan_mask=add_nan_mask,
-        process_chunk_fn=process_chunk_fn,
-    )
+    super().__init__(**kwargs)
 
   def maybe_prepare_dataset(self):
     """Prepares the dataset (reads and preprocesses it, if not already done)."""

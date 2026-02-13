@@ -77,6 +77,7 @@ class DataLoader(abc.ABC):
               [Mapping[Hashable, xr.DataArray]], Mapping[Hashable, xr.DataArray]
           ]
       ] = None,
+      add_values_to_coords: bool = False,
   ):
     """Shared initialization for data loaders.
 
@@ -89,11 +90,15 @@ class DataLoader(abc.ABC):
         False.
       process_chunk_fn: optional function to be applied to each chunk after
         loading but before interpolation, computing, and adding nan mask.
+      add_values_to_coords: If True, add returned values to coordinates. These
+        will propagate into the statistics, and can therefore be used for
+        binning. Default: False.
     """
     self._interpolation = interpolation
     self._compute = compute
     self._add_nan_mask = add_nan_mask
     self._process_chunk_fn = process_chunk_fn
+    self._add_values_to_coords = add_values_to_coords
 
   @abc.abstractmethod
   def _load_chunk_from_source(
@@ -149,4 +154,10 @@ class DataLoader(abc.ABC):
 
     if self._add_nan_mask:
       chunk = add_nan_mask_to_data(chunk)
+
+    if self._add_values_to_coords:
+      chunk = xarray_tree.map_structure(
+          lambda da: da.assign_coords(values_as_coord=da), chunk
+      )
+
     return chunk

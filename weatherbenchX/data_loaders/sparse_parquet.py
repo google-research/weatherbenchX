@@ -13,13 +13,13 @@
 # limitations under the License.
 """Data loaders for tabular data stored in Parquet format."""
 
+from collections.abc import Hashable
 import functools
 import os
-from typing import Callable, Hashable, Mapping, Optional, Sequence, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import pyarrow
-from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
 
@@ -91,7 +91,6 @@ class SparseObservationsFromParquet(base.DataLoader):
       coordinate_variables: Sequence[str] = (),
       split_variables: bool = False,
       dropna: bool = False,
-      add_nan_mask: bool = False,
       tolerance: Optional[
           np.timedelta64 | tuple[np.timedelta64, np.timedelta64]
       ] = None,
@@ -102,8 +101,7 @@ class SparseObservationsFromParquet(base.DataLoader):
       observation_dim: Optional[str] = None,
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
-      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      **kwargs,
   ):
     """Init.
 
@@ -123,10 +121,6 @@ class SparseObservationsFromParquet(base.DataLoader):
       dropna: Whether to drop missing values. If split_variables is True, values
         will be dropped for each variable separately. Otherwise, only indices
         where all variables are non-NaN will be returned.
-      add_nan_mask: Adds a boolean coordinate named 'mask' to each variable
-        (variables will be split into DataArrays if they aren't already), with
-        False indicating NaN values. To be used for masked aggregation. Default:
-        False.
       tolerance: (Optional) Tolerance around the given valid time. If tolerance
         is a single timedelta, data within valid_time +/- tolerance will be
         returned. If tolerance is a 2-tuple of timedeltas, data within
@@ -153,16 +147,12 @@ class SparseObservationsFromParquet(base.DataLoader):
         1h
       preprocessing_fn: (Optional) Function to apply to the dataframe after
         reading.
-      interpolation: (Optional) Interpolation to be applied to the data.
-      process_chunk_fn: (Optional) Function to apply to the chunk of data after
-        loading.
+      **kwargs: Additional keyword arguments passed to the base DataLoader.
     """
 
     super().__init__(
-        interpolation=interpolation,
         compute=False,  # Data is already loaded.
-        add_nan_mask=add_nan_mask,
-        process_chunk_fn=process_chunk_fn,
+        **kwargs
     )
     self._path = path
     if partitioned_by not in ['hour', 'day', 'month']:
@@ -479,7 +469,6 @@ class METARFromParquet(SparseObservationsFromParquet):
       time_dim: str,
       split_variables: bool = False,
       dropna: bool = False,
-      add_nan_mask: bool = False,
       tolerance: Optional[np.timedelta64] = None,
       partitioned_by: str = 'month',
       rename_variables: Optional[Mapping[str, str]] = None,
@@ -488,8 +477,7 @@ class METARFromParquet(SparseObservationsFromParquet):
       pick_closest_duplicate_by: Optional[str] = None,
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
-      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      **kwargs,
   ):
     def metar_preprocessing_fn(
         df: pd.DataFrame,
@@ -521,7 +509,6 @@ class METARFromParquet(SparseObservationsFromParquet):
         observation_dim='stationName',
         split_variables=split_variables,
         dropna=dropna,
-        add_nan_mask=add_nan_mask,
         tolerance=tolerance,
         partitioned_by=partitioned_by,
         rename_variables=METAR_TO_ERA5_NAMES,
@@ -532,6 +519,5 @@ class METARFromParquet(SparseObservationsFromParquet):
         preprocessing_fn=functools.partial(
             metar_preprocessing_fn, preprocessing_fn=preprocessing_fn
         ),
-        interpolation=interpolation,
-        process_chunk_fn=process_chunk_fn,
+        **kwargs,
     )
