@@ -26,7 +26,7 @@ print("sys.path:", sys.path)
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "WeatherBench-X"
-copyright = "2025, WeatherBench-X authors"
+copyright = "2026, WeatherBench-X authors"
 author = "WeatherBench-X authors"
 
 # -- General configuration ---------------------------------------------------
