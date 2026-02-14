@@ -126,7 +126,12 @@ class BeamPipelineTest(parameterized.TestCase):
     metrics_results = xr.open_dataset(metrics_path).compute()
 
     # There can be small differences due to numerical errors.
-    xr.testing.assert_allclose(direct_metrics, metrics_results, atol=1e-5)
+    # Aldo drop non-dimension coords which are not retained in beam pipeline.
+    xr.testing.assert_allclose(
+        direct_metrics.reset_coords(drop=True),
+        metrics_results.reset_coords(drop=True),
+        atol=1e-5,
+    )
 
     aggregation_state_results = aggregation.AggregationState.from_dataset(
         xr.open_dataset(aggregation_state_path).compute()
