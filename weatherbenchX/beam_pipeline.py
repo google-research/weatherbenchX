@@ -260,6 +260,7 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
     def combine_data_arrays_by_coords(
         key: _AggregationKey, data_arrays: Iterable[xr.DataArray]
     ) -> tuple[_AggregationKey, xr.DataArray]:
+
       # To deal with overlapping coordinates to be combined other than init_time
       # and lead_time, we align them here first.
       data_arrays = xr.align(
@@ -270,8 +271,23 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
       )
       # combine_by_coords will return a Dataset if there are any names on the
       # input DataArrays, so we remove the names before calling it.
-      # We also drop zero-sized arrays since combine_by_cannot deal with them.
+      # We also drop zero-sized arrays since combine_by_coords cannot deal with
+      # them.
       data_arrays = [d.rename(None) for d in data_arrays if d.size > 0]
+      # Drop non-dimension coordinates that are not present in all arrays,
+      # since combine_by_coords cannot handle mismatched coordinates.
+      if data_arrays:
+        shared_non_dim_coords = set.intersection(
+            *[set(d.coords) - set(d.dims) for d in data_arrays]
+        )
+        data_arrays = [
+            d.drop_vars([
+                c
+                for c in set(d.coords) - set(d.dims)
+                if c not in shared_non_dim_coords
+            ])
+            for d in data_arrays
+        ]
       # If all arrays are empty, we need to manually return an empty DataArray,
       # since combine_by_coords will return a Dataset in this case.
       if not data_arrays:

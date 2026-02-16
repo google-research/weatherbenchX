@@ -14,6 +14,7 @@
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import apache_beam as beam
 from apache_beam.testing import test_pipeline
 import numpy as np
 import pandas as pd
@@ -30,6 +31,25 @@ from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.metrics import deterministic
 from weatherbenchX.metrics import wrappers
 import xarray as xr
+
+
+def _check_combine_result(elements, lead_time_a, lead_time_b):
+  assert len(elements) == 1
+  _, result_da = elements[0]
+  assert result_da.sizes['lead_time'] == 2
+  np.testing.assert_array_equal(
+      result_da.sel(lead_time=lead_time_a[0]).values,
+      np.zeros((3, 2), dtype=np.float32),
+  )
+  np.testing.assert_array_equal(
+      result_da.sel(lead_time=lead_time_b[0]).values,
+      np.ones((3, 2), dtype=np.float32),
+  )
+  assert 'non_dim_coord_a' not in result_da.coords
+  assert 'non_dim_coord_shared' in result_da.coords
+  np.testing.assert_array_equal(
+      result_da.coords['non_dim_coord_shared'].values, [12, 24]
+  )
 
 
 class BeamPipelineTest(parameterized.TestCase):
@@ -126,7 +146,11 @@ class BeamPipelineTest(parameterized.TestCase):
     metrics_results = xr.open_dataset(metrics_path).compute()
 
     # There can be small differences due to numerical errors.
-    xr.testing.assert_allclose(direct_metrics, metrics_results, atol=1e-5)
+    xr.testing.assert_allclose(
+        direct_metrics,
+        metrics_results,
+        atol=1e-5,
+    )
 
     aggregation_state_results = aggregation.AggregationState.from_dataset(
         xr.open_dataset(aggregation_state_path).compute()
@@ -496,6 +520,70 @@ class BeamPipelineTest(parameterized.TestCase):
     metrics_results = xr.open_dataset(metrics_path).compute()
     expected = xr.Dataset({'rmse.2m_temperature': xr.DataArray()})
     xr.testing.assert_allclose(metrics_results, expected)
+
+  def test_combine_data_arrays_with_non_dimension_coordinate(self):
+    """Tests combining DataArrays with mismatched non-dimension coordinates.
+
+    da_a has non_dim_coord_a (not on da_b) — this should be dropped.
+    Both arrays have non_dim_coord_shared — this should be retained.
+    """
+
+    lead_time_a = np.array([np.timedelta64(12, 'h')])
+    da_a = xr.DataArray(
+        np.zeros((3, 2, 1), dtype=np.float32),
+        dims=['latitude', 'longitude', 'lead_time'],
+        coords={
+            'latitude': [0.0, 1.0, 2.0],
+            'longitude': [0.0, 1.0],
+            'lead_time': lead_time_a,
+            'non_dim_coord_a': ('lead_time', [43200]),
+            'non_dim_coord_shared': ('lead_time', [12]),
+        },
+    )
+
+    lead_time_b = np.array([np.timedelta64(24, 'h')])
+    da_b = xr.DataArray(
+        np.ones((3, 2, 1), dtype=np.float32),
+        dims=['latitude', 'longitude', 'lead_time'],
+        coords={
+            'latitude': [0.0, 1.0, 2.0],
+            'longitude': [0.0, 1.0],
+            'lead_time': lead_time_b,
+            'non_dim_coord_shared': ('lead_time', [24]),
+        },
+    )
+
+    key_a = beam_pipeline._AggregationKey(
+        type='sum_weighted_statistics',
+        statistic_name='squared_error',
+        variable_name='mask',
+        init_time_offset=None,
+        lead_time_offset=0,
+    )
+    key_b = beam_pipeline._AggregationKey(
+        type='sum_weighted_statistics',
+        statistic_name='squared_error',
+        variable_name='mask',
+        init_time_offset=None,
+        lead_time_offset=1,
+    )
+
+    with test_pipeline.TestPipeline() as p:
+      result = (
+          p
+          | beam.Create([(key_a, da_a), (key_b, da_b)])
+          | beam_pipeline.ConcatPerStatisticPerVariable()
+      )
+
+      _ = (
+          result
+          | beam.combiners.ToList()
+          | beam.Map(
+              _check_combine_result,
+              lead_time_a=lead_time_a,
+              lead_time_b=lead_time_b,
+          )
+      )
 
   # TODO(matthjw): Add a test where statistics are not defined for all
   # variables.
