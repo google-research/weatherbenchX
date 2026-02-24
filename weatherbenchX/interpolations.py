@@ -433,3 +433,39 @@ class NeighborhoodThresholdProbabilities(Interpolation):
         ),
     )
     return out
+
+
+class Subsample(Interpolation):
+  """Subsample a DataArray along specified dimensions.
+
+  This is useful for reducing the resolution of a dataset without interpolation,
+  e.g. for faster evaluation at lower resolution.
+  """
+
+  def __init__(
+      self,
+      dims: Sequence[str],
+      stride: int,
+  ):
+    """Init.
+
+    Args:
+      dims: Dimensions along which to subsample.
+      stride: Stride for subsampling. Must be a positive integer.
+    """
+    if stride < 1:
+      raise ValueError(f'stride must be >= 1, got {stride}')
+    self._dims = dims
+    self._stride = stride
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    isel_kwargs = {
+        dim: slice(None, None, self._stride)
+        for dim in self._dims
+        if dim in da.dims
+    }
+    return da.isel(**isel_kwargs)
