@@ -13,7 +13,8 @@
 # limitations under the License.
 """Latency wrappers."""
 
-from typing import Any, Hashable, Mapping, Optional, Union
+from typing import Hashable, Mapping, Optional, Union
+
 from absl import logging
 import numpy as np
 from weatherbenchX import xarray_tree
@@ -91,13 +92,25 @@ class ConstantLatencyWrapper(base.DataLoader):
         process_chunk_fn=data_loader._process_chunk_fn,
     )
 
-  def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
-    """Return most recent available nominal init time for requested init time."""
+  def get_available_init_time(
+      self, init_time: np.datetime64
+  ) -> np.datetime64 | None:
+    """Returns the most recent available nominal init time.
+
+    This finds the most recent available nominal init time for the requested
+    `init_time`, considering the constant latency.
+
+    Args:
+      init_time: The requested initialization time.
+    """
     issue_time = self.nominal_init_times + self.latency
     diff = (issue_time - init_time).astype(int)
     # Find index of issue time that is closest to requested init_time.
     # on the left, i.e. with issue_time > nominal init_time.
-    available_idx = np.nanargmax(np.where(diff <= 0, diff, np.nan))
+    diff = np.where(diff <= 0, diff, np.nan)
+    if np.all(np.isnan(diff)):
+      return None
+    available_idx = np.nanargmax(diff)
     available_init_time = self.nominal_init_times[available_idx]
     return available_init_time
 
@@ -135,14 +148,16 @@ class ConstantLatencyWrapper(base.DataLoader):
       adjusted_lead_times = lead_times + lead_time_offset
       logging.info(
           'LatencyWrapper: loading chunk for init time %s, using available init'
-          ' time %s, adjusted lead times %s',
+          ' time %s, adjusted lead times %s min',
           init_time,
           available_init_time,
           adjusted_lead_times.astype('timedelta64[m]'),
       )
-      raw_chunk = self.data_loader._load_chunk_from_source(  # pystyle: disable=protected-access
+      # pystyle: disable=protected-access
+      raw_chunk = self.data_loader._load_chunk_from_source(
           np.array([available_init_time]), adjusted_lead_times
       )
+      # pystyle: enable=protected-access
 
       # Adjust nominal init and lead times to the query values.
       # Doing this by adding/subtracting the offset also works for sparse data
@@ -171,10 +186,10 @@ class ConstantLatencyWrapper(base.DataLoader):
 
 
 class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
-  """Shortcut for wrapping a xarray_loaders.XarrayDataLoader data loader in a latency wrapper.
+  """Wraps an XarrayDataLoader in a latency wrapper.
 
-  This simply uses the init_time coordinate on the Zarr file to determine the
-  nominal init times.
+  This is a shortcut that uses the init_time coordinate on the Zarr file to
+  determine the nominal init times.
   """
 
   def __init__(
@@ -259,13 +274,20 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
     lead_time_offsets_and_latencies = []
     for data_loader in self._data_loaders:
       available_init_time = data_loader.get_available_init_time(init_time)
-      lead_time_offset = init_time - available_init_time
-      # Break ties by picking the data loader with largest latency -- note that
-      # we make latency negative here because we want the smallest
-      # lead_time_offset, but the largest data loader latency.
-      lead_time_offsets_and_latencies.append(
-          (lead_time_offset, -data_loader.latency)
-      )
+      if available_init_time is None:
+        # If there is no available init time, we will assign an infinite lead
+        # time offset and latency. Since there is no actual "inf" timedelta,
+        # we'll just use 1e6 days.
+        inf_time = np.timedelta64(int(1e6), 'D')
+        lead_time_offsets_and_latencies.append((inf_time, inf_time))
+      else:
+        lead_time_offset = init_time - available_init_time
+        # Break ties by picking the data loader with largest latency -- note
+        # that we make latency negative here because we want the smallest
+        # lead_time_offset, but the largest data loader latency.
+        lead_time_offsets_and_latencies.append(
+            (lead_time_offset, -data_loader.latency)
+        )
     lead_time_offsets_and_latencies = np.array(
         lead_time_offsets_and_latencies,
         dtype=[
@@ -279,9 +301,9 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
     )
     most_recent_data_loader = self._data_loaders[idx[0]]
     logging.info(
-        'Init time: %s, data loader latency: %s',
+        'Init time: %s, data loader latency: %s min',
         init_time,
-        most_recent_data_loader.latency,
+        most_recent_data_loader.latency.astype('timedelta64[m]'),
     )
     return most_recent_data_loader
 
