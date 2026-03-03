@@ -65,15 +65,18 @@ def binarize_thresholds(
   """
   if isinstance(thresholds, xr.Dataset):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     assert x.name in thresholds.data_vars, (
-        f'Input DataArray name ({x.name}) not found in thresholds ({thresholds.data_vars})'
+        f'Input DataArray name ({x.name}) not found in thresholds'
+        f' ({thresholds.data_vars})'
     )
     threshold = thresholds[x.name]
   elif isinstance(thresholds, xr.DataArray):
     assert threshold_dim in thresholds.dims, (
-        f'threshold_dim ({threshold_dim}) not found in thresholds ({thresholds.dims})'
+        f'threshold_dim ({threshold_dim}) not found in thresholds'
+        f' ({thresholds.dims})'
     )
     threshold = thresholds
   else:
@@ -111,7 +114,13 @@ class InputTransform(abc.ABC):
 class EnsembleMean(InputTransform):
   """Compute ensemble mean."""
 
-  def __init__(self, which: str, ensemble_dim='number', skipna=False):
+  def __init__(
+      self,
+      which: str,
+      ensemble_dim='number',
+      skipna=False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
     """Init.
 
     Args:
@@ -119,16 +128,21 @@ class EnsembleMean(InputTransform):
         'targets', or 'both'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
       skipna: If True, skip NaNs in the ensemble mean. Default: False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble mean if the
+        ensemble dimension is missing. Default: False.
     """
     super().__init__(which)
     self._ensemble_dim = ensemble_dim
     self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
 
   @property
   def unique_name_suffix(self) -> str:
     return f'ensemble_mean_{self._ensemble_dim=}_{self._skipna=}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
@@ -144,14 +158,20 @@ class ContinuousToBinary(InputTransform):
       which: str,
       threshold_value: Union[float, Iterable[float], xr.DataArray, xr.Dataset],
       threshold_dim: str,
+      unique_name_suffix: str | None = None,
   ):
     """Init.
 
     Args:
       which: Which input to apply the wrapper to. Must be one of 'predictions',
         'targets', or 'both'.
-      threshold_value: Threshold value, list of values, xarray.DataArray or xarray.Dataset.
+      threshold_value: Threshold value, iterable of values, xarray.DataArray or
+        xarray.Dataset.
       threshold_dim: Name of dimension to use for threshold values.
+      unique_name_suffix: Suffix to add to the unique name. If
+        `threshold_values` is an xarray.DataArray or xarray.Dataset, this must
+        be provided, and must be unique over all the threshold_value that you
+        intend to use within a set of Metrics that are computed together.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
@@ -162,24 +182,301 @@ class ContinuousToBinary(InputTransform):
     )
     self._threshold_dim = threshold_dim
 
+    if isinstance(self._threshold_value, (xr.DataArray, xr.Dataset)):
+      if unique_name_suffix is None:
+        raise ValueError(
+            'unique_name_suffix must be provided if threshold_value is an'
+            ' xarray.DataArray or xarray.Dataset.'
+        )
+    self._unique_name_suffix = unique_name_suffix
+
   @property
   def unique_name_suffix(self) -> str:
-    threshold_value_str = ','.join([str(t) for t in self._threshold_value])
-    return f'{self._threshold_dim}={threshold_value_str}'
+    if self._unique_name_suffix is None:
+      unique_name_suffix = ','.join([str(t) for t in self._threshold_value])
+    else:
+      unique_name_suffix = self._unique_name_suffix
+    return f'{self._threshold_dim}={unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
 
 
-class WeibullEnsembleToProbabilistic(InputTransform):
-  """
-  Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
-  The forecasts should be binarized before applying this wrapper and
-  you can wrap the metric with the ContinuousToBinary firstly.
+def select_bin_thresholds_by_time_from_chunk(
+    bin_thresholds: xr.DataArray,
+    chunk: xr.DataArray,
+) -> xr.DataArray:
+  """Selects bin thresholds by time from target or prediction data array.
 
-  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied Meteorology and Climatology,
+  This function is used to select bin thresholds using the time coordinates of
+  the target / prediction data array da.
+
+  Chunk must have dimensions (`init_time`, `lead_time`), `valid_time` or no time
+  dimensions. In the latter case, the bin thresholds are returned unchanged.
+  Options for bin_threshold time dimensions are:
+  - `valid_time`
+  - `init_time` and `lead_time` (only compatible for init/lead_time chunks)
+  - `dayofyear` (with `lead_time` for init/lead_time chunks)
+  - No time dimensions (in which case the bin thresholds are returned
+    unchanged)
+
+  Args:
+    bin_thresholds: Data array containing bin thresholds.
+    chunk: Data array of targets or predictions to use for selecting bin
+      thresholds according to their time coordinates.
+
+  Returns:
+    Data array containing bin thresholds selected by time.
+  """
+
+  if {'init_time', 'lead_time'}.issubset(chunk.dims):
+    if 'valid_time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(
+          valid_time=chunk.init_time + chunk.lead_time
+      )
+
+    elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
+      bin_thresholds = bin_thresholds.sel(
+          init_time=chunk.init_time, lead_time=chunk.lead_time
+      )
+    elif {'dayofyear', 'lead_time'}.issubset(bin_thresholds.dims):
+      bin_thresholds = bin_thresholds.sel(
+          dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
+      )
+    else:
+      # No time dimensions in bin_thresholds, so just return it.
+      return bin_thresholds
+
+  elif 'valid_time' in chunk.dims:
+    if 'valid_time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(valid_time=chunk.valid_time)
+    elif 'dayofyear' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(
+          dayofyear=chunk.valid_time.dt.dayofyear
+      )
+    else:
+      # No time dimensions in bin_thresholds, so just return it.
+      return bin_thresholds
+
+  else:
+    # No time dimensions in chunk, so just return thresholds.
+    return bin_thresholds
+
+  return bin_thresholds.compute()
+
+
+def compute_cdf(
+    threshold_values: Union[Iterable[float], xr.DataArray, xr.Dataset],
+    da: xr.DataArray,
+    threshold_dim: str,
+    enforce_monotonicity: bool,
+    right_inclusive: bool = True,
+) -> xr.DataArray:
+  """Computes the CDF of a continuous input."""
+
+  if isinstance(threshold_values, (xr.DataArray, xr.Dataset)):
+    if isinstance(threshold_values, xr.Dataset):
+      thresholds = threshold_values[da.name]  # Select appropriate variable.
+    else:
+      thresholds = threshold_values
+    thresholds = select_bin_thresholds_by_time_from_chunk(thresholds, da)
+  elif isinstance(threshold_values, Iterable):
+    # Need to convert to array because xarray does not interpret tuples
+    # correctly.
+    threshold_values = np.array(threshold_values)
+    # Convert to DataArray
+    thresholds = xr.DataArray(
+        threshold_values,
+        dims=[threshold_dim],
+        coords={threshold_dim: threshold_values},
+    )
+  else:
+    raise ValueError(
+        'Bin values must be an Iterable, xr.DataArray, or xr.Dataset.'
+    )
+  if enforce_monotonicity:
+    if not np.all(thresholds.diff(threshold_dim) > 0):
+      raise ValueError(
+          'Bin values must be monotonically increasing. To turn off this'
+          ' check, set `enforce_monotonicity=False`.'
+      )
+  if right_inclusive:
+    cdf = (da <= thresholds).astype('float')
+  else:
+    cdf = (da < thresholds).astype('float')
+  # Make sure NaNs are propagated from da and thresholds.
+  cdf = cdf.where(~np.isnan(da)).where(~np.isnan(thresholds))
+  return cdf
+
+
+class ContinuousToBins(InputTransform):
+  """Converts a continuous input to a binned one.
+
+  The bins are right-inclusive, i.e., `threshold[i-1] < x <= threshold[i]`. For
+  example, if `bin_values` is [0.5, 1.0, 1.5], then the bins will be
+  (0.5, 1.0] and (1.0, 1.5]. To have open-ended bins, the `bin_values` have to
+  specify the `-np.inf` and `np.inf` values at the edges. That means that the
+  size of the binning dimension is len(bin_values) -1 .
+
+  The output DataArray will have two new coordinates: `{bin_dim}_left` and
+  `{bin_dim}_right`, which will contain the left and right bin edges,
+  respectively in the case where the bin_values are a 1D array.
+
+  If the bin_values are a n-dimensional DataArray or Dataset (the dataset
+  variables must match those of the DataArray), they have to have a bin_dim
+  coordinate. The new coordinates in this case will not be the actual values
+  used for binning (since they will be n-dimensional) but rather the values
+  of the bin_dim coordinate.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_values: Union[Iterable[float], xr.DataArray, xr.Dataset],
+      bin_dim: str,
+      unique_name_suffix: str | None = None,
+      enforce_monotonicity: bool = True,
+  ):
+    """Initialize the transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_values: Iterable of threshold values or xarray.DataArray. Must be
+        monotonically increasing.
+      bin_dim: Name of dimension to use for threshold values.
+      unique_name_suffix: Suffix to add to the unique name. If `bin_values` is
+        an xarray.DataArray or xarray.Dataset, this must be provided.
+      enforce_monotonicity: If True, raise an error if the bin values are not
+        monotonically increasing. It might be necessary to turn this off if the
+        bin_values contain NaNs, which would raise an error here. Default: True.
+    """
+    super().__init__(which)
+    self._bin_values = bin_values
+    self._bin_dim = bin_dim
+    if isinstance(self._bin_values, (xr.DataArray, xr.Dataset)):
+      if unique_name_suffix is None:
+        raise ValueError(
+            'unique_name_suffix must be provided if bin_values is an'
+            ' xarray.DataArray or xarray.Dataset.'
+        )
+    self._unique_name_suffix = unique_name_suffix
+    self._enforce_monotonicity = enforce_monotonicity
+
+  @property
+  def unique_name_suffix(self) -> str:
+    if self._unique_name_suffix is None:
+      unique_name_suffix = ','.join([str(t) for t in self._bin_values])
+    else:
+      unique_name_suffix = self._unique_name_suffix
+    return f'ContinuousToBins_{self._bin_dim}_{unique_name_suffix}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    cdf = compute_cdf(
+        threshold_values=self._bin_values,
+        da=da,
+        threshold_dim=self._bin_dim,
+        enforce_monotonicity=self._enforce_monotonicity,
+    )
+    left_edges = cdf[self._bin_dim].values[:-1]
+    right_edges = cdf[self._bin_dim].values[1:]
+    result = cdf.diff(self._bin_dim)
+    bin_names = [
+        f'{left:.2f} < p <= {right:.2f}'
+        for left, right in zip(left_edges, right_edges)
+    ]
+    result = result.assign_coords({self._bin_dim: bin_names})
+    result = result.assign_coords(
+        {f'{self._bin_dim}_left': (self._bin_dim, left_edges)}
+    )
+    result = result.assign_coords(
+        {f'{self._bin_dim}_right': (self._bin_dim, right_edges)}
+    )
+
+    return result
+
+
+class ContinuousToCDF(InputTransform):
+  """Converts a continuous input to a CDF.
+
+  Example: If `threshold_values` are [0.5, 1.0, 1.5], the resulting output
+  will have values for `[x <= 0.5, x <= 1.0, x <= 1.5]` if `right_inclusive` is
+  `True`, or `[x < 0.5, x < 1.0, x < 1.5]` if `right_inclusive` is `False`.
+
+  The resulting DataArray will have a coordinate `threshold` with the threshold
+  values in the case of a 1D array, or the values of the `threshold_dim`
+  coordinate in the case of a n-dimensional DataArray or Dataset.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      threshold_values: Union[Iterable[float], xr.DataArray, xr.Dataset],
+      threshold_dim: str,
+      unique_name_suffix: str | None = None,
+      enforce_monotonicity: bool = True,
+      right_inclusive: bool = True,
+  ):
+    """Initialize the transform.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      threshold_values: Iterable of threshold values or xarray.DataArray. Must
+        be monotonically increasing.
+      threshold_dim: Name of dimension to use for threshold values.
+      unique_name_suffix: Suffix to add to the unique name. If
+        `threshold_values` is an xarray.DataArray or xarray.Dataset, this must
+        be provided.
+      enforce_monotonicity: If True, raise an error if the bin values are not
+        monotonically increasing. It might be necessary to turn this off if the
+        bin_values contain NaNs, which would raise an error here. Default: True.
+      right_inclusive: If True, the CDF is right-inclusive. If False, the CDF is
+        left-inclusive. Default: True.
+    """
+    super().__init__(which)
+    self._threshold_values = threshold_values
+    self._threshold_dim = threshold_dim
+    if isinstance(self._threshold_values, (xr.DataArray, xr.Dataset)):
+      if unique_name_suffix is None:
+        raise ValueError(
+            'unique_name_suffix must be provided if threshold_values is an'
+            ' xarray.DataArray or xarray.Dataset.'
+        )
+    self._unique_name_suffix = unique_name_suffix
+    self._enforce_monotonicity = enforce_monotonicity
+    self._right_inclusive = right_inclusive
+
+  @property
+  def unique_name_suffix(self) -> str:
+    if self._unique_name_suffix is None:
+      unique_name_suffix = ','.join([str(t) for t in self._threshold_values])
+    else:
+      unique_name_suffix = self._unique_name_suffix
+    return f'ContinuousToCDF_{self._threshold_dim}_{unique_name_suffix}_right_inclusive_{self._right_inclusive}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    result = compute_cdf(
+        threshold_values=self._threshold_values,
+        da=da,
+        threshold_dim=self._threshold_dim,
+        enforce_monotonicity=self._enforce_monotonicity,
+        right_inclusive=self._right_inclusive,
+    )
+    return result
+
+
+class WeibullEnsembleToProbabilistic(InputTransform):
+  """Convert ensemble forecasts into probabilitic forecast using the Weibull’s plotting position (Makkonen, 2006).
+
+  The forecasts should be binarized before applying this wrapper and you can
+  wrap the metric with the ContinuousToBinary firstly.
+
+  Makkonen, L.: Plotting Positions in Extreme Value Analysis, Journal of Applied
+  Meteorology and Climatology,
       45, 334–340, https://doi.org/10.1175/JAM2349.1, 2006.
-"""
+  """
+
   def __init__(self, which, ensemble_dim='number', skipna=False):
     """Init.
 
@@ -187,7 +484,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
       which: Which input to apply the wrapper to. Must be 'predictions'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
     """
-    assert which == 'predictions', 'Only predictions can be converted to probabilities'
+    assert (
+        which == 'predictions'
+    ), 'Only predictions can be converted to probabilities'
     super().__init__(which)
     self._ensemble_dim = ensemble_dim
     self._skipna = skipna
@@ -198,7 +497,9 @@ class WeibullEnsembleToProbabilistic(InputTransform):
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     ensemble_members = da.sizes[self._ensemble_dim]
-    return da.sum(self._ensemble_dim, skipna=self._skipna)/(ensemble_members+1)
+    return da.sum(self._ensemble_dim, skipna=self._skipna) / (
+        ensemble_members + 1
+    )
 
 
 class Inline(InputTransform):
@@ -469,6 +770,7 @@ class WrappedStatistic(base.Statistic):
   """Wraps a statistic with an input transform.
 
   Also adds suffix to unique name.
+  TODO(srasp): Add option for multiple transforms.
   """
 
   def __init__(self, statistic: base.Statistic, transform: InputTransform):
@@ -562,13 +864,11 @@ class WrappedMetric(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)
 
 
 class SubselectVariablesForStatistic(base.Statistic):
@@ -622,10 +922,15 @@ class SubselectVariables(base.Metric):
       stats[name] = stat
     return stats
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
-    return self.metric._values_from_mean_statistics_with_internal_names(  # pylint: disable=protected-access
-        statistic_values
-    )
+    return self.metric.values_from_mean_statistics(statistic_values)
+
+
+# These wrappers are no longer needed, since PerVariableStatistic and
+# PerVariableMetric already do this. We maintain aliases for backwards
+# compatibility, but they are deprecated and will be removed in the future.
+IntersectPredictionAndTargetVariablesForStatistic = lambda statistic: statistic  # pylint: disable=invalid-name
+IntersectPredictionAndTargetVariables = lambda metric: metric  # pylint: disable=invalid-name

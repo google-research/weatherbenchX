@@ -17,6 +17,7 @@ from weatherbenchX import aggregation
 from weatherbenchX import binning
 from weatherbenchX import test_utils
 from weatherbenchX import weighting
+from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base as data_loaders_base
 from weatherbenchX.metrics import base as metrics_base
 from weatherbenchX.metrics import deterministic
@@ -35,6 +36,22 @@ class AggregationTest(absltest.TestCase):
     predictions = xr.zeros_like(template)
     targets = xr.ones_like(template)
     return predictions, targets
+
+  def _get_example_aggregation_state(self):
+    return aggregation.AggregationState(
+        sum_weighted_statistics={
+            'stat_name': {
+                'var1': xr.DataArray([1, 2], dims=['x']),
+                'var2': xr.DataArray([3, 4], dims=['x']),
+            }
+        },
+        sum_weights={
+            'stat_name': {
+                'var1': xr.DataArray([5, 6], dims=['x']),
+                'var2': xr.DataArray([7, 8], dims=['x']),
+            }
+        },
+    )
 
   def _aggregate(self, all_metrics, predictions, targets, aggregation_kwargs):
 
@@ -226,6 +243,30 @@ class AggregationTest(absltest.TestCase):
     # Test for correct dimensions.
     self.assertEqual(
         set(actual.dims), set(['bins1', 'bins2', 'lead_time', 'level'])
+    )
+
+  def test_aggregation_state_round_trip_data_tree(self):
+    aggregation_state = self._get_example_aggregation_state()
+    data_tree = aggregation_state.to_data_tree()
+    roundtripped = aggregation.AggregationState.from_data_tree(data_tree)
+    xarray_tree.map_structure(
+        xr.testing.assert_allclose,
+        (aggregation_state.sum_weighted_statistics,
+         aggregation_state.sum_weights),
+        (roundtripped.sum_weighted_statistics,
+         roundtripped.sum_weights),
+    )
+
+  def test_aggregation_state_round_trip_dataset(self):
+    aggregation_state = self._get_example_aggregation_state()
+    data_tree = aggregation_state.to_dataset()
+    roundtripped = aggregation.AggregationState.from_dataset(data_tree)
+    xarray_tree.map_structure(
+        xr.testing.assert_allclose,
+        (aggregation_state.sum_weighted_statistics,
+         aggregation_state.sum_weights),
+        (roundtripped.sum_weighted_statistics,
+         roundtripped.sum_weights),
     )
 
 

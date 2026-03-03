@@ -16,12 +16,13 @@ import setuptools
 
 base_requires = [
     "apache_beam[gcp]>=2.31.0",
+    "arch>=5.0",
     "cftime>=1.6.2",
     "numpy>=2.1.3",
     "pandas>=2.2.3",
     "scipy",
     "scikit-learn",
-    "xarray>=2024.11.0",
+    "xarray>=2025.7.0",
     "zarr",
     "fsspec",
     "gcsfs",
@@ -29,6 +30,7 @@ base_requires = [
     "pyarrow",
     "opt_einsum",
     "xarray-beam",
+    "jax[cpu]",
 ]
 docs_requires = [
     "myst-nb",

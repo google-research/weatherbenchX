@@ -13,124 +13,89 @@
 # limitations under the License.
 r"""Beam-specific utils for beam pipelines."""
 
-import math
-from typing import Sequence, Tuple, TypeVar
+from collections.abc import Iterable
+import contextlib
+import os
+import uuid
 
 import apache_beam as beam
+import fsspec
 from weatherbenchX import aggregation
+import xarray as xr
 
 
-class SumAggregationStates(beam.transforms.CombineFn):
-  """An object to sum all AggregationState."""
+_Accumulator = xr.DataArray | None
 
-  def create_accumulator(self) -> aggregation.AggregationState:
-    return aggregation.AggregationState.zero()
+
+class CombiningSum(beam.transforms.CombineFn):
+  """CombineFn for DataArrays, wrapping aggregation.combining_sum."""
+
+  def create_accumulator(self) -> _Accumulator:
+    return None
 
   def add_input(
-      self,
-      accumulator: aggregation.AggregationState,
-      new_element: aggregation.AggregationState,
-  ) -> aggregation.AggregationState:
-    return accumulator + new_element
+      self, accumulator: _Accumulator, element: xr.DataArray
+  ) -> _Accumulator:
+    if accumulator is None:
+      return element
+    else:
+      return aggregation.combining_sum([accumulator, element])
 
   def merge_accumulators(
-      self, accumulators: Sequence[aggregation.AggregationState]
-  ) -> aggregation.AggregationState:
-    return sum(accumulators, aggregation.AggregationState.zero())
+      self, accumulators: Iterable[_Accumulator]) -> _Accumulator:
+    accumulators = [a for a in accumulators if a is not None]
+    return aggregation.combining_sum(accumulators) if accumulators else None
 
-  def extract_output(
-      self, accumulator: aggregation.AggregationState
-  ) -> aggregation.AggregationState:
+  def extract_output(self, accumulator: _Accumulator) -> _Accumulator:
     return accumulator
 
 
-Element = TypeVar("Element")
-ElementWithKey = Tuple[int, Element]
+class GroupAll(beam.PTransform):
+  """Groups all elements into a single group."""
+
+  def expand(self, pcoll: beam.PCollection) -> beam.PCollection:
+    return (
+        pcoll
+        | 'AddDummyKey' >> beam.Map(lambda x: (None, x))
+        | 'GroupByDummyKey' >> beam.GroupByKey()
+        | 'DropDummyKey' >> beam.Values())
 
 
-class CombineMultiStage(beam.PTransform):
-  """Performs a Combination in multiple stages.
+def atomic_write(
+    file_path: str,
+    data: bytes,
+    auto_mkdir: bool = True,
+) -> None:
+  """Writes bytes to an fsspec path, atomically for supporting filesystems.
 
-  It requires the input to be a `ElementWithKey`, where the first
-  element is an integer key in the [0, total_num_elements) interval.
+  This is important to avoid write races when multiple beam workers attempt to
+  write to the same file, which can happen e.g. due to a beam runner scheduling
+  redundant backup attempts for slow workers at the final stage.
 
-  Then it performs the aggregation such that each worker at most merges
-  `max_bin_size` object, by splitting the work into multiple bins. Once
-  a stage is finished, the output for each bins becomes the input for the next
-  stage.
+  This assumes that the fsspec.mv move operation is atomic for the filesystem
+  in use, which is not necessarily the case for all filesystems, but is about
+  the best we can do using a general API like fsspec.
 
-  The keys at any given stage are simply the keys of the previous stage,
-  modulo the number of bins.
-
-  The combine operation returns a single `Element` object.
-
-  (The reason for not using Beam's built-in aggregation is that, at the point we
-  tested it was only possible to split the aggregation to two stages using the 
-  `fanout` parameter. However, large datasets require more than two stages.)
+  Args:
+    file_path: The path to write to.
+    data: The data to write.
+    auto_mkdir: Whether to create directories if they don't exist.
   """
+  filesystem, file_path = fsspec.core.url_to_fs(file_path)
 
-  def __init__(
-      self,
-      total_num_elements: int,
-      max_bin_size: int,
-      combine_fn: beam.transforms.CombineFn,
-  ):
-    """Inits the object.
+  dir_path, name = os.path.split(file_path)
 
-    Args:
-      total_num_elements: Number of elements to aggregate, incoming with integer
-        keys in the [0, total_num_elements) interval. Neither the number of
-        elements nor the keys need to be exact, as this is only used to estimate
-        the number of stages and number of bins per stage.
-      max_bin_size: Maximum number of elements that will be aggregated in each
-        bin at any given stage.
-      combine_fn: `beam.transforms.CombineFn` used tocombine data.
-    """
-    super().__init__()
+  if auto_mkdir:
+    filesystem.makedirs(dir_path, exist_ok=True)
+  tmp_name = f'tmp.{uuid.uuid1()}.{name}'
+  tmp_file_path = os.path.join(dir_path, tmp_name)
 
-    if max_bin_size < 2:
-      raise ValueError("The maximum bin size must be at least 2.")
-
-    # We will divide the aggregation into multiple stages, such that at any
-    # stage, no accumulator has to accumulate more than `max_group_size`
-    # elements.
-    num_current_elements = total_num_elements
-    num_bins_per_stage = []
-    while num_current_elements > max_bin_size:
-      num_bins = math.ceil(num_current_elements / max_bin_size)
-      num_bins_per_stage.append(num_bins)
-      num_current_elements = num_bins
-    num_bins_per_stage.append(1)
-    self._num_bins_per_stage = num_bins_per_stage
-    self._combine_fn = combine_fn
-
-  def _aggregation_stage(
-      self, pcoll: beam.pvalue.PCollection, num_bins: int
-  ) -> beam.pvalue.PCollection:
-    # Add a key according to the bin size for this stage.
-    def _bin_key(inputs: ElementWithKey) -> ElementWithKey:
-      input_key, element = inputs
-      output_key = input_key % num_bins
-      return output_key, element
-
-    return (
-        pcoll
-        | f"AddKeyForBins{num_bins}" >> beam.Map(_bin_key)
-        | f"SumForBins{num_bins}" >> beam.CombinePerKey(self._combine_fn)
-    )
-
-  def expand(self, pcoll: beam.pvalue.PCollection) -> beam.pvalue.PCollection:
-    for num_bins in self._num_bins_per_stage:
-      pcoll = self._aggregation_stage(pcoll, num_bins)
-
-    def remove_key(inputs: ElementWithKey) -> Element:
-      key, element = inputs
-      assert key == 0  # All keys should be the same at this point.
-      return element
-
-    return (
-        pcoll
-        # Using beam.Values() seems to fail, because it does not do type
-        # inference correctly, and uses the wrong encoder for the next stage.
-        | "RemoveRedundantKey" >> beam.Map(remove_key)
-    )
+  try:
+    with filesystem.open(tmp_file_path, mode='wb') as f:
+      f.write(data)
+  except BaseException:
+    with contextlib.suppress(FileNotFoundError):
+      filesystem.rm(tmp_file_path)
+    raise
+  else:
+    filesystem.mv(tmp_file_path, file_path, overwrite=True)

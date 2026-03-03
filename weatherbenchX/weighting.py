@@ -58,7 +58,8 @@ def _is_uniformly_spaced(vector):
   return np.all(np.isclose(expected_diff, diff, rtol=1e-4))
 
 
-def _latitude_cell_bounds(x: np.ndarray) -> np.ndarray:
+def latitude_cell_bounds(x: np.ndarray) -> np.ndarray:
+  """Bounds for latitude cells, given increasing cell centers in radians."""
   assert _is_increasing(x), 'Points must be increasing.'
   diff = np.diff(x)
 
@@ -77,9 +78,9 @@ def _latitude_cell_bounds(x: np.ndarray) -> np.ndarray:
   ])
 
 
-def _cell_area_from_latitude(points: np.ndarray) -> np.ndarray:
+def cell_area_from_latitude(points: np.ndarray) -> np.ndarray:
   """Calculate the area overlap as a function of latitude."""
-  bounds = _latitude_cell_bounds(points)
+  bounds = latitude_cell_bounds(points)
   upper = bounds[1:]
   lower = bounds[:-1]
   # Normalized cell area: integral from lower to upper of cos(latitude).
@@ -119,7 +120,7 @@ class GridAreaWeighting(Weighting):
     else:
       needs_reversing = False
 
-    weights = _cell_area_from_latitude(np.deg2rad(latitude))
+    weights = cell_area_from_latitude(np.deg2rad(latitude))
     if needs_reversing:
       weights = weights[::-1]
     if self.return_normalized:

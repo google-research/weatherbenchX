@@ -13,9 +13,11 @@
 # limitations under the License.
 """Data loaders for reading gridded Zarr files."""
 
-from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Union
+from collections.abc import Hashable
+from typing import Any, Callable, Iterable, Mapping, Optional, Union
+
+from absl import logging
 import numpy as np
-from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
 
@@ -62,11 +64,8 @@ class XarrayDataLoader(base.DataLoader):
       rename_dimensions: Optional[Union[Mapping[str, str], str]] = 'ecmwf',
       automatically_convert_lat_lon_to_latitude_longitude: bool = True,
       rename_variables: Optional[Mapping[str, str]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
-      compute: bool = True,
-      add_nan_mask: bool = False,
       preprocessing_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
-      process_chunk_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      **kwargs,
   ):
     """Init.
 
@@ -90,47 +89,56 @@ class XarrayDataLoader(base.DataLoader):
         automatically convert 'lat' and 'lon' dimensions to 'latitude' and
         'longitude'. Default: True.
       rename_variables: (Optional) Dictionary of variables to rename.
-      interpolation: (Optional) Interpolation instance.
-      compute: Whether to load data into memory. Default: True.
-      add_nan_mask: Adds a boolean coordinate named 'mask' to each variable
-        (variables will be split into DataArrays if they aren't already), with
-        False indicating NaN values. To be used for masked aggregation. Default:
-        False.
       preprocessing_fn: (Optional) A function that is applied to the dataset
         right after it is opened.
-      process_chunk_fn: (Optional) A function that is applied to each chunk
-        after loading, interpolation and compute, but before computing a mask.
+      **kwargs: Keyword arguments to pass to base.DataLoader.
     """
     if path is not None and ds is not None:
       raise ValueError('Only one of path or ds can be specified, not both.')
-    if path is not None:
-      if path.rstrip('/').endswith('.zarr'):
-        self._ds = xr.open_zarr(path)
-      else:
-        self._ds = xr.open_dataset(path)
-    elif ds is not None:
-      self._ds = ds
-    else:
+
+    if path is None and ds is None:
       raise ValueError('Either path or ds must be specified.')
-    if preprocessing_fn is not None:
-      self._ds = preprocessing_fn(self._ds)
+
+    self._ds = ds
+    self._path = path
+    self._variables = variables
+    self._sel_kwargs = sel_kwargs
+    self._rename_dimensions = rename_dimensions
+    self._automatically_convert_lat_lon_to_latitude_longitude = (
+        automatically_convert_lat_lon_to_latitude_longitude
+    )
+    self._rename_variables = rename_variables
+    self._preprocessing_fn = preprocessing_fn
+
+    self._preprocessed = False
+    super().__init__(**kwargs)
+
+  def maybe_prepare_dataset(self):
+    """Prepares the dataset (reads and preprocesses it, if not already done)."""
+    if self._preprocessed:
+      return
+
+    if self._ds is None:
+      logging.info('Opening dataset from path: %s', self._path)
+      assert self._path is not None
+      if self._path.rstrip('/').endswith('.zarr'):
+        self._ds = xr.open_zarr(self._path)
+      else:
+        self._ds = xr.open_dataset(self._path)
+
+    if self._preprocessing_fn is not None:
+      self._ds = self._preprocessing_fn(self._ds)
     self._ds = _rename_dataset(
         self._ds,
-        rename_dimensions,
-        rename_variables,
-        automatically_convert_lat_lon_to_latitude_longitude,
+        self._rename_dimensions,
+        self._rename_variables,
+        self._automatically_convert_lat_lon_to_latitude_longitude,
     )
-    if variables is not None:
-      self._ds = self._ds[list(variables)]
-    if sel_kwargs is not None:
-      self._ds = self._ds.sel(**sel_kwargs)
-    self._variables = variables
-    super().__init__(
-        interpolation=interpolation,
-        compute=compute,
-        add_nan_mask=add_nan_mask,
-        process_chunk_fn=process_chunk_fn,
-    )
+    if self._variables is not None:
+      self._ds = self._ds[list(self._variables)]
+    if self._sel_kwargs is not None:
+      self._ds = self._ds.sel(**self._sel_kwargs)
+    self._preprocessed = True
 
   def _load_chunk_from_source(
       self,
@@ -138,6 +146,15 @@ class XarrayDataLoader(base.DataLoader):
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
     raise NotImplementedError()
+
+  def load_chunk(
+      self,
+      init_times: np.ndarray,
+      lead_times: Optional[Union[np.ndarray, slice]] = None,
+      reference: Optional[Mapping[Hashable, xr.DataArray]] = None,
+  ) -> Mapping[Hashable, xr.DataArray]:
+    self.maybe_prepare_dataset()
+    return super().load_chunk(init_times, lead_times, reference)
 
 
 class PredictionsFromXarray(XarrayDataLoader):
@@ -176,6 +193,9 @@ class PredictionsFromXarray(XarrayDataLoader):
       init_times: np.ndarray,
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
+    # Dataset should have been read during maybe_prepare_dataset.
+    assert self._ds is not None
+
     # Exact lead times or lead time slice.
     if lead_times is not None:
       chunk = self._ds.sel(init_time=init_times, lead_time=lead_times)
@@ -224,6 +244,9 @@ class TargetsFromXarray(XarrayDataLoader):
       init_times: np.ndarray,
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
+    # Dataset should have been read during maybe_prepare_dataset.
+    assert self._ds is not None
+
     # Exact lead times.
     if isinstance(lead_times, Iterable):
       # Construct valid times from init and lead time combination.
@@ -266,6 +289,9 @@ class ClimatologyFromXarray(XarrayDataLoader):
       init_times: np.ndarray,
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
+    # Dataset should have been read during maybe_prepare_dataset.
+    assert self._ds is not None
+
     # Exact lead times.
     if isinstance(lead_times, Iterable):
       # Construct valid times from init and lead time combination.
@@ -298,6 +324,9 @@ class PersistenceFromXarray(XarrayDataLoader):
       init_times: np.ndarray,
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
+    # Dataset should have been read during maybe_prepare_dataset.
+    assert self._ds is not None
+
     if lead_times is None or isinstance(lead_times, slice):
       raise ValueError(
           'Exact lead times must be specified for persistence data loader.'
@@ -321,23 +350,34 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
   This is used as a probablistic baseline for the WeatherBench website.
   """
 
-  def __init__(self, start_year: int, end_year: int, **kwargs):
+  def __init__(
+      self,
+      start_year: int,
+      end_year: int,
+      ensemble_dim: str = 'number',
+      **kwargs
+  ):
     """Init.
 
     Args:
       start_year: The first year to include in the climatology.
       end_year: The last year (incl.) to include in the climatology.
+      ensemble_dim: The dimension to use for the ensemble. Default: 'number'.
       **kwargs: Other arguments to pass to XarrayDataLoader.
     """
     super().__init__(**kwargs)
     self._start_year = start_year
     self._end_year = end_year
+    self._ensemble_dim = ensemble_dim
 
   def _load_chunk_from_source(
       self,
       init_times: np.ndarray,
       lead_times: Optional[Union[np.ndarray, slice]] = None,
   ) -> Mapping[Hashable, xr.DataArray]:
+    # Dataset should have been read during maybe_prepare_dataset.
+    assert self._ds is not None
+
     if lead_times is None or isinstance(lead_times, slice):
       raise ValueError(
           'Exact lead times must be specified for persistence data loader.'
@@ -358,6 +398,13 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
           + ((doy - 1) * 24 + hod)
           * np.timedelta64(1, 'h').astype('timedelta64[ns]')
       )
-    cat_times = xr.concat(cat_times, dim='number')
+    cat_times = xr.concat(
+        cat_times,
+        dim=xr.DataArray(
+            range(len(cat_times)),
+            dims=[self._ensemble_dim],
+            coords={self._ensemble_dim: range(len(cat_times))},
+        ),
+    )
     chunk = self._ds.sel(valid_time=cat_times)
     return chunk

@@ -12,15 +12,80 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Implementation of deterministic metrics and assiciated statistics."""
-
-from typing import Hashable, Mapping, Sequence, Union
+from absl import logging
+from collections.abc import Hashable
+from typing import Iterable, Mapping, Sequence, Union
+import jax
 import numpy as np
+import jax.numpy as jnp
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 import xarray as xr
+import xarray.ufuncs as xu
 
 
 ### Statistics
+
+
+class RelativeIntensity(base.PerVariableStatistic):
+  """Relative intensity of predictions.
+
+  Relative intensity is defined as the ratio of the mean of the predictions
+  to the mean of the targets. The metric returns the absolute value of the
+  difference between this ratio and the ideal value of 1.
+
+  Helpful in capturing e.g. strobing effects observed in a
+  precipitation output. Notably, this metric is intended for predictions and
+  targets that are non-negative such as precip.
+
+  """
+
+  def __init__(self, spatial_dims: Sequence[str] = ('latitude', 'longitude')):
+    """Init.
+
+    Args:
+      spatial_dims: The dimensions to compute the relative intensity over.
+    """
+    self._spatial_dims = spatial_dims
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+      ) -> xr.DataArray:
+
+    spatial_dims = self._spatial_dims
+    # Add a small epsilon to both denominator and numerator to avoid division by
+    # zero and ensure RIE is 0 when both are 0.
+    epsilon = 1e-6
+
+    if 'mask' in targets.coords:
+      # If mask is present, we compute mean only over mask==1 region.
+      # If any value in that region is NaN, the mean will be NaN.
+      # So, we set masked-out values to 0, then sum with skipna=False,
+      # and divide by the count of unmasked values.
+      mask = targets.mask == 1
+      count = mask.sum(dim=spatial_dims, skipna=False)
+      prediction_sum = predictions.where(mask, 0).sum(
+          dim=spatial_dims, skipna=False
+      )
+      target_sum = targets.where(mask, 0).sum(dim=spatial_dims, skipna=False)
+      prediction_mean = prediction_sum / count
+      prediction_mean = prediction_mean.where(count > 0, 0.0)
+      target_mean = target_sum / count
+      target_mean = target_mean.where(count > 0, 0.0)
+      ratio = (prediction_mean + epsilon) / (target_mean + epsilon)
+      result = abs(ratio - 1)
+      # The mask is 1 if there was at least one valid value in the aggregation.
+      # Otherwise, it is 0.
+      result.coords['mask'] = (count > 0).astype(int)
+    else:
+      prediction_mean = predictions.mean(dim=spatial_dims, skipna=False)
+      target_mean = targets.mean(dim=spatial_dims, skipna=False)
+      ratio = (prediction_mean + epsilon) / (target_mean + epsilon)
+      result = abs(ratio - 1)
+
+    return result
 
 
 class Error(base.PerVariableStatistic):
@@ -194,124 +259,69 @@ class AnomalyCovariance(base.PerVariableStatisticWithClimatology):
     return prediction_anom * target_anom
 
 
+class ErrorExceedance(base.PerVariableStatistic):
+  """Computes absolute errors exceeding thresholds."""
+
+  def __init__(self, thresholds: Sequence[float] | xr.DataArray):
+    """Init.
+
+    Args:
+      thresholds: The thresholds to use for error exceedance. If a list is given
+        then it will be converted to an xr.DataArray with dim
+        `error_exceedance_thresholds`.
+    """
+    if isinstance(thresholds, Sequence):
+      thresholds = xr.DataArray(
+          thresholds,
+          dims='error_exceedance_thresholds',
+          coords={'error_exceedance_thresholds': thresholds},
+      )
+    self._thresholds = thresholds
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    abs_error = abs(predictions - targets)
+    if isinstance(self._thresholds, xr.Dataset):
+      thresholds = self._thresholds[abs_error.name]
+    else:
+      thresholds = self._thresholds
+    out = (abs_error > thresholds).astype(float)
+    # Make sure NaNs are preserved
+    out = out.where(~abs_error.isnull())
+    out = out.where(~thresholds.isnull())
+    return out
+
+
 ### Metrics
 
 
-class Bias(base.PerVariableMetric):
-  """Mean error."""
+# The following metrics are just the mean of a Statistic defined above, and
+# so we can just use the Statistic directly as the Metric. We provide
+# convenience aliases here, however:
 
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'Error': Error()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['Error']
-
-
-class MAE(base.PerVariableMetric):
-  """Mean absolute error."""
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'AbsoluteError': AbsoluteError()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['AbsoluteError']
-
-
-class MSE(base.PerVariableMetric):
-  """Mean squared error.
-
-  Note that if applied to probability forecasts, this is the Brier Score.
-  """
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {'SquaredError': SquaredError()}
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['SquaredError']
+Bias = Error  # Bias is the mean Error.
+MAE = AbsoluteError  # MAE is the Mean Absolute Error.
+MSE = SquaredError  # MSE is the Mean Squared Error.
+PredictionAverage = PredictionPassthrough
+TargetAverage = TargetPassthrough
 
 
 class RMSE(base.PerVariableMetric):
   """Root mean squared error."""
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {'SquaredError': SquaredError()}
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['SquaredError'])
-
-
-class PredictionAverage(base.PerVariableMetric):
-  """Average prediction values."""
-
-  def __init__(self, copy_nans_from_targets: bool = False):
-    """Init.
-
-    Args:
-      copy_nans_from_targets: If True, copy any nans from the targets to the
-        predictions.
-    """
-    self._copy_nans_from_targets = copy_nans_from_targets
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {
-        'PredictionPassthrough': PredictionPassthrough(
-            self._copy_nans_from_targets
-        )
-    }
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['PredictionPassthrough']
-
-
-class TargetAverage(base.PerVariableMetric):
-  """Average target values."""
-
-  def __init__(self, copy_nans_from_predictions: bool = False):
-    """Init.
-
-    Args:
-      copy_nans_from_predictions: If True, copy any nans from the predictions to
-        the predictions.
-    """
-    self._copy_nans_from_predictions = copy_nans_from_predictions
-
-  @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
-    return {
-        'TargetPassthrough': TargetPassthrough(self._copy_nans_from_predictions)
-    }
-
-  def _values_from_mean_statistics_per_variable(
-      self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
-  ) -> xr.DataArray:
-    """Computes metrics from aggregated statistics."""
-    return statistic_values['TargetPassthrough']
+    return xu.sqrt(statistic_values['SquaredError'])
 
 
 class WindVectorRMSE(base.Metric):
@@ -345,19 +355,19 @@ class WindVectorRMSE(base.Metric):
       )
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'WindVectorSquaredError': WindVectorSquaredError(
             self._u_name, self._v_name, self._vector_name
         )
     }
 
-  def _values_from_mean_statistics_with_internal_names(
+  def values_from_mean_statistics(
       self,
       statistic_values: Mapping[str, Mapping[Hashable, xr.DataArray]],
   ) -> Mapping[Hashable, xr.DataArray]:
     return xarray_tree.map_structure(
-        np.sqrt, statistic_values['WindVectorSquaredError']
+        xu.sqrt, statistic_values['WindVectorSquaredError']
     )
 
 
@@ -368,7 +378,7 @@ class ACC(base.PerVariableMetric):
     self._climatology = climatology
 
   @property
-  def statistics(self):
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'SquaredPredictionAnomaly': SquaredPredictionAnomaly(
             climatology=self._climatology
@@ -381,12 +391,12 @@ class ACC(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['AnomalyCovariance'] / (
-        np.sqrt(statistic_values['SquaredPredictionAnomaly'])
-        * np.sqrt(statistic_values['SquaredTargetAnomaly'])
+        xu.sqrt(statistic_values['SquaredPredictionAnomaly'])
+        * xu.sqrt(statistic_values['SquaredTargetAnomaly'])
     )
 
 
@@ -400,7 +410,7 @@ class PredictionActivity(base.PerVariableMetric):
     self._climatology = climatology
 
   @property
-  def statistics(self):
+  def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'SquaredPredictionAnomaly': SquaredPredictionAnomaly(
             climatology=self._climatology
@@ -409,7 +419,7 @@ class PredictionActivity(base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self,
-      statistic_values: Mapping[Hashable, xr.DataArray],
+      statistic_values: Mapping[str, xr.DataArray],
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
-    return np.sqrt(statistic_values['SquaredPredictionAnomaly'])
+    return xu.sqrt(statistic_values['SquaredPredictionAnomaly'])

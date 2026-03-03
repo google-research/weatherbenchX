@@ -113,6 +113,56 @@ def interpolate_to_coords(
   return out
 
 
+class CropToBox(Interpolation):
+  """Crops the dataset to the given bounding box.
+
+  Since interpolation is called before compute(), this can be useful to reduce
+  the amount of data that is read into memory when you are only interested in
+  a particular area.
+
+  This is essentially a wrapper around an xarray.Dataset.sel() call.
+  """
+
+  def __init__(
+      self,
+      lat_min: float,
+      lat_max: float,
+      lon_min: float,
+      lon_max: float,
+  ):
+    """Init.
+
+    Args:
+      lat_min: Minimum latitude to crop to (inclusive).
+      lat_max: Maximum latitude to crop to (inclusive).
+      lon_min: Minimum longitude to crop to (exclusive).
+      lon_max: Maximum longitude to crop to (exclusive).
+    """
+    if lat_min > lat_max:
+      raise ValueError('Invalid latitudes: {lat_min} and {lat_max}')
+    if lon_min > lon_max:
+      raise ValueError('Invalid longitudes: {lon_min} and {lon_max}')
+    self._lat_min = lat_min
+    self._lat_max = lat_max
+    self._lon_min = lon_min
+    self._lon_max = lon_max
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    # Some datasets have latitude in the descending order, or longitude that
+    # wraps around, so just in case, we will sort by those coordinates first.
+    da = da.sortby('longitude', ascending=True)
+    da = da.sortby('latitude', ascending=True)
+    da = da.sel(
+        latitude=slice(self._lat_min, self._lat_max),
+        longitude=slice(self._lon_min, self._lon_max),
+    )
+    return da
+
+
 class InterpolateToFixedCoords(Interpolation):
   """Interpolate to a fixed set of coordinates.
 
@@ -206,10 +256,6 @@ class InterpolateToReferenceCoords(Interpolation):
       reference: xr.DataArray,  # pytype: disable=signature-mismatch
   ) -> xr.DataArray:
 
-    # Catch case where reference doesn't contain any data.
-    if len(reference) == 0:
-      return reference.copy()
-
     if self._wrap_longitude:
       da = pad_longitude(da)
 
@@ -225,6 +271,14 @@ class InterpolateToReferenceCoords(Interpolation):
       dims = [d for d in da.dims if d in reference.coords]
     else:
       dims = self._dims
+
+    # Catch case where reference doesn't contain any data.
+    if reference.size == 0:
+      # Need to make sure to retain any dimensions that are not being
+      # interpolated.
+      da_dims_to_retain = set(da.dims) - set(dims)
+      return reference.copy().expand_dims({d: da[d] for d in da_dims_to_retain})
+
     dim_args = {dim: reference[dim] for dim in dims}
 
     da_like_reference = interpolate_to_coords(
@@ -379,3 +433,39 @@ class NeighborhoodThresholdProbabilities(Interpolation):
         ),
     )
     return out
+
+
+class Subsample(Interpolation):
+  """Subsample a DataArray along specified dimensions.
+
+  This is useful for reducing the resolution of a dataset without interpolation,
+  e.g. for faster evaluation at lower resolution.
+  """
+
+  def __init__(
+      self,
+      dims: Sequence[str],
+      stride: int,
+  ):
+    """Init.
+
+    Args:
+      dims: Dimensions along which to subsample.
+      stride: Stride for subsampling. Must be a positive integer.
+    """
+    if stride < 1:
+      raise ValueError(f'stride must be >= 1, got {stride}')
+    self._dims = dims
+    self._stride = stride
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    isel_kwargs = {
+        dim: slice(None, None, self._stride)
+        for dim in self._dims
+        if dim in da.dims
+    }
+    return da.isel(**isel_kwargs)

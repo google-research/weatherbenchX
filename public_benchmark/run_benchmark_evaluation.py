@@ -44,6 +44,7 @@ python run_benchmark_evaluation.py \
   --job_name=wbx-evaluation
 """
 from collections.abc import Sequence
+import copy
 import importlib
 import os
 from absl import app
@@ -220,6 +221,12 @@ def main(argv: Sequence[str]) -> None:
     # Additionally, FuXi for 2020 only goes until mid-December.
     if YEAR.value == '2022' or PREDICTION.value in ['fuxi', 'excarta']:
       init_time_stop = f'{YEAR.value}-12-16T00'
+      # First and last init are missing for aurora
+      if PREDICTION.value == 'aurora':
+        init_time_start = f'{YEAR.value}-01-01T12'
+    elif YEAR.value == '2020' and PREDICTION.value == 'baguan':
+      # Last day is missing for baguan
+      init_time_stop = f'{YEAR.value}-12-30T12'
     else:
       init_time_stop = f'{int(YEAR.value) + 1}-01-01T00'
     init_time_str = str(YEAR.value)
@@ -257,7 +264,10 @@ def main(argv: Sequence[str]) -> None:
           dtype='timedelta64[h]',
       )
     else:
-      lead_times = prediction_loader._ds.lead_time.values  # pylint: disable=protected-access
+      loader_copy = copy.copy(prediction_loader)
+      loader_copy.maybe_prepare_dataset()
+      assert loader_copy._ds is not None  # pylint: disable=protected-access
+      lead_times = loader_copy._ds.lead_time.values # pylint: disable=protected-access
   else:
     lead_time_start = LEAD_TIME_START.value
     lead_time_stop = LEAD_TIME_STOP.value
@@ -323,7 +333,6 @@ def main(argv: Sequence[str]) -> None:
 
   probabilistic_metrics = {
       'crps': probabilistic.CRPSEnsemble(),
-      'spread_skill': probabilistic.SpreadSkillRatio(),
       'unbiased_spread_skill': probabilistic.UnbiasedSpreadSkillRatio(),
       'unbiased_mean_rmse': probabilistic.UnbiasedEnsembleMeanRMSE(),
       'mean_rmse': wrappers.WrappedMetric(

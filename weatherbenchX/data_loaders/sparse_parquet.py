@@ -13,13 +13,13 @@
 # limitations under the License.
 """Data loaders for tabular data stored in Parquet format."""
 
+from collections.abc import Hashable
 import functools
 import os
-from typing import Callable, Hashable, Mapping, Optional, Sequence, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import pyarrow
-from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
 
@@ -91,8 +91,9 @@ class SparseObservationsFromParquet(base.DataLoader):
       coordinate_variables: Sequence[str] = (),
       split_variables: bool = False,
       dropna: bool = False,
-      add_nan_mask: bool = False,
-      tolerance: Optional[np.timedelta64] = None,
+      tolerance: Optional[
+          np.timedelta64 | tuple[np.timedelta64, np.timedelta64]
+      ] = None,
       rename_variables: Optional[Mapping[str, str]] = None,
       include_slice_end_time: bool = False,
       remove_duplicates: bool = False,
@@ -100,7 +101,7 @@ class SparseObservationsFromParquet(base.DataLoader):
       observation_dim: Optional[str] = None,
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
+      **kwargs,
   ):
     """Init.
 
@@ -120,15 +121,13 @@ class SparseObservationsFromParquet(base.DataLoader):
       dropna: Whether to drop missing values. If split_variables is True, values
         will be dropped for each variable separately. Otherwise, only indices
         where all variables are non-NaN will be returned.
-      add_nan_mask: Adds a boolean coordinate named 'mask' to each variable
-        (variables will be split into DataArrays if they aren't already), with
-        False indicating NaN values. To be used for masked aggregation. Default:
-        False.
-      tolerance: (Optional) Tolerance around the given valid time. Data within
-        valid_time +/- tolerance will be returned. This is only supported for
-        exact lead_times. The resulting init and lead time coordinates will be
-        those requested. The valid_time dimension will reflect the original time
-        for each observation.
+      tolerance: (Optional) Tolerance around the given valid time. If tolerance
+        is a single timedelta, data within valid_time +/- tolerance will be
+        returned. If tolerance is a 2-tuple of timedeltas, data within
+        [valid_time + tolerance[0], valid_time + tolerance[1]] will be returned.
+        This is only supported for exact lead_times. The resulting init and lead
+        time coordinates will be those requested. The valid_time dimension will
+        reflect the original time for each observation.
       rename_variables: (Optional) Renaming dictionary.
       include_slice_end_time: Whether slice end time is included. Default: False
       remove_duplicates: For exact lead times, whether duplicate stations
@@ -148,13 +147,12 @@ class SparseObservationsFromParquet(base.DataLoader):
         1h
       preprocessing_fn: (Optional) Function to apply to the dataframe after
         reading.
-      interpolation: (Optional) Interpolation to be applied to the data.
+      **kwargs: Additional keyword arguments passed to the base DataLoader.
     """
 
     super().__init__(
-        interpolation=interpolation,
         compute=False,  # Data is already loaded.
-        add_nan_mask=add_nan_mask,
+        **kwargs
     )
     self._path = path
     if partitioned_by not in ['hour', 'day', 'month']:
@@ -165,10 +163,18 @@ class SparseObservationsFromParquet(base.DataLoader):
     self._coordinate_variables = list(coordinate_variables) + ['valid_time']
     self._split_variables = split_variables
     self._dropna = dropna
-    if tolerance == np.timedelta64(0, 'h'):
-      raise ValueError(
-          'Tolerance should not be zero. This will always return an emptyarray.'
-      )
+    if tolerance is not None:
+      if isinstance(tolerance, np.timedelta64):
+        tolerance = (-tolerance, tolerance)
+      if len(tolerance) != 2:
+        raise ValueError(
+            'Tolerance must be a a single np.timedelta64 or a 2-tuple.'
+        )
+      if (tolerance[1] - tolerance[0]) <= np.timedelta64(0, 'h'):
+        raise ValueError(
+            'Tolerance range should be non-empty. This will always return an'
+            ' empty array.'
+        )
     self._tolerance = tolerance
     self._rename_variables = rename_variables
     self._include_slice_end_time = include_slice_end_time
@@ -221,8 +227,8 @@ class SparseObservationsFromParquet(base.DataLoader):
         stop_time = valid_time + lead_time_slice.stop
 
     else:
-      start_time = valid_time - self._tolerance
-      stop_time = valid_time + self._tolerance
+      start_time = valid_time + self._tolerance[0]
+      stop_time = valid_time + self._tolerance[1]
 
     # Get subset of files since filtering can take a very long time.
     # Also create additional filters to exactly get required times.
@@ -463,7 +469,6 @@ class METARFromParquet(SparseObservationsFromParquet):
       time_dim: str,
       split_variables: bool = False,
       dropna: bool = False,
-      add_nan_mask: bool = False,
       tolerance: Optional[np.timedelta64] = None,
       partitioned_by: str = 'month',
       rename_variables: Optional[Mapping[str, str]] = None,
@@ -472,7 +477,7 @@ class METARFromParquet(SparseObservationsFromParquet):
       pick_closest_duplicate_by: Optional[str] = None,
       file_tolerance: np.timedelta64 = np.timedelta64(1, 'h'),
       preprocessing_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
-      interpolation: Optional[interpolations.Interpolation] = None,
+      **kwargs,
   ):
     def metar_preprocessing_fn(
         df: pd.DataFrame,
@@ -504,7 +509,6 @@ class METARFromParquet(SparseObservationsFromParquet):
         observation_dim='stationName',
         split_variables=split_variables,
         dropna=dropna,
-        add_nan_mask=add_nan_mask,
         tolerance=tolerance,
         partitioned_by=partitioned_by,
         rename_variables=METAR_TO_ERA5_NAMES,
@@ -515,5 +519,5 @@ class METARFromParquet(SparseObservationsFromParquet):
         preprocessing_fn=functools.partial(
             metar_preprocessing_fn, preprocessing_fn=preprocessing_fn
         ),
-        interpolation=interpolation,
+        **kwargs,
     )
