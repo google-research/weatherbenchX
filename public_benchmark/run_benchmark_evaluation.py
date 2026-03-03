@@ -139,26 +139,33 @@ def main(argv: Sequence[str]) -> None:
   ##############################################################################
   is_probabilistic = False
   prediction_str_name = f'{PREDICTION.value}_{RESOLUTION.value}_{YEAR.value}'
+  deterministic_prediction_configs = getattr(
+      configs, 'deterministic_prediction_configs', {}
+  )
+  probabilistic_prediction_configs = getattr(
+      configs, 'probabilistic_prediction_configs', {}
+  )
+  target_configs = getattr(configs, 'target_configs', {})
+  climatology_configs = getattr(configs, 'climatology_configs', {})
+
   if PREDICTION.value == 'persistence':
-    prediction_config = configs.target_configs[f'era5_{RESOLUTION.value}']
+    prediction_config = target_configs[f'era5_{RESOLUTION.value}']
   elif PREDICTION.value == 'probabilistic_climatology':
-    prediction_config = configs.target_configs[f'era5_{RESOLUTION.value}']
+    prediction_config = target_configs[f'era5_{RESOLUTION.value}']
     is_probabilistic = True
   elif PREDICTION.value == 'climatology':
-    prediction_config = configs.climatology_configs[
+    prediction_config = climatology_configs[
         f'era5_{RESOLUTION.value}_{YEAR.value}'
     ]
-  elif prediction_str_name in configs.deterministic_prediction_configs:
-    prediction_config = configs.deterministic_prediction_configs[
-        prediction_str_name
-    ]
-  else:
-    prediction_config = configs.probabilistic_prediction_configs[
-        prediction_str_name
-    ]
+  elif prediction_str_name in deterministic_prediction_configs:
+    prediction_config = deterministic_prediction_configs[prediction_str_name]
+  elif prediction_str_name in probabilistic_prediction_configs:
+    prediction_config = probabilistic_prediction_configs[prediction_str_name]
     is_probabilistic = True
-  target_config = configs.target_configs[f'{TARGET.value}_{RESOLUTION.value}']
-  climatology_config = configs.climatology_configs[
+  else:
+    raise ValueError(f'Prediction {prediction_str_name} not found in configs.')
+  target_config = target_configs[f'{TARGET.value}_{RESOLUTION.value}']
+  climatology_config = climatology_configs[
       f'era5_{RESOLUTION.value}_{YEAR.value}'
   ]
   variables = np.intersect1d(
@@ -267,7 +274,7 @@ def main(argv: Sequence[str]) -> None:
       loader_copy = copy.copy(prediction_loader)
       loader_copy.maybe_prepare_dataset()
       assert loader_copy._ds is not None  # pylint: disable=protected-access
-      lead_times = loader_copy._ds.lead_time.values # pylint: disable=protected-access
+      lead_times = loader_copy._ds.lead_time.values  # pylint: disable=protected-access
   else:
     lead_time_start = LEAD_TIME_START.value
     lead_time_stop = LEAD_TIME_STOP.value
@@ -332,7 +339,8 @@ def main(argv: Sequence[str]) -> None:
     )
 
   probabilistic_metrics = {
-      'crps': probabilistic.CRPSEnsemble(),
+      'crps': probabilistic.CRPSEnsemble(use_sort=True),
+      'spread_skill': probabilistic.SpreadSkillRatio(),
       'unbiased_spread_skill': probabilistic.UnbiasedSpreadSkillRatio(),
       'unbiased_mean_rmse': probabilistic.UnbiasedEnsembleMeanRMSE(),
       'mean_rmse': wrappers.WrappedMetric(
@@ -356,7 +364,7 @@ def main(argv: Sequence[str]) -> None:
   ##############################################################################
   # Load land-sea mask from ERA5
   land_sea_mask = xr.open_zarr(
-      configs.target_configs[f'era5_{RESOLUTION.value}']['path']
+      target_configs[f'era5_{RESOLUTION.value}']['path']
   )['land_sea_mask'].compute()
   bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]
 
