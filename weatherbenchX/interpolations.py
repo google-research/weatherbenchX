@@ -14,9 +14,10 @@
 """Definition of interpolation classes."""
 
 import abc
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 import dataclasses
-from typing import Hashable, Mapping, Optional, Sequence, Union
+from typing import Optional, Union
+
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import spatial
