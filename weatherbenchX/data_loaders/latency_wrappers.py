@@ -13,7 +13,8 @@
 # limitations under the License.
 """Latency wrappers."""
 
-from typing import Any, Hashable, Mapping, Optional, Union
+from typing import Hashable, Mapping, Optional, Union
+
 from absl import logging
 import numpy as np
 from weatherbenchX import xarray_tree
@@ -94,7 +95,14 @@ class ConstantLatencyWrapper(base.DataLoader):
   def get_available_init_time(
       self, init_time: np.datetime64
   ) -> np.datetime64 | None:
-    """Return most recent available nominal init time for requested init time."""
+    """Returns the most recent available nominal init time.
+
+    This finds the most recent available nominal init time for the requested
+    `init_time`, considering the constant latency.
+
+    Args:
+      init_time: The requested initialization time.
+    """
     issue_time = self.nominal_init_times + self.latency
     diff = (issue_time - init_time).astype(int)
     # Find index of issue time that is closest to requested init_time.
@@ -140,14 +148,16 @@ class ConstantLatencyWrapper(base.DataLoader):
       adjusted_lead_times = lead_times + lead_time_offset
       logging.info(
           'LatencyWrapper: loading chunk for init time %s, using available init'
-          ' time %s, adjusted lead times %s',
+          ' time %s, adjusted lead times %s min',
           init_time,
           available_init_time,
           adjusted_lead_times.astype('timedelta64[m]'),
       )
-      raw_chunk = self.data_loader._load_chunk_from_source(  # pystyle: disable=protected-access
+      # pystyle: disable=protected-access
+      raw_chunk = self.data_loader._load_chunk_from_source(
           np.array([available_init_time]), adjusted_lead_times
       )
+      # pystyle: enable=protected-access
 
       # Adjust nominal init and lead times to the query values.
       # Doing this by adding/subtracting the offset also works for sparse data
@@ -176,10 +186,10 @@ class ConstantLatencyWrapper(base.DataLoader):
 
 
 class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
-  """Shortcut for wrapping a xarray_loaders.XarrayDataLoader data loader in a latency wrapper.
+  """Wraps an XarrayDataLoader in a latency wrapper.
 
-  This simply uses the init_time coordinate on the Zarr file to determine the
-  nominal init times.
+  This is a shortcut that uses the init_time coordinate on the Zarr file to
+  determine the nominal init times.
   """
 
   def __init__(
@@ -295,7 +305,7 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
       )
     most_recent_data_loader = self._data_loaders[idx[0]]
     logging.info(
-        'Init time: %s, data loader latency: %s',
+        'Init time: %s, data loader latency: %s min',
         init_time,
         most_recent_data_loader.latency.astype('timedelta64[m]'),
     )
