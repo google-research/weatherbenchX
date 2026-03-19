@@ -146,6 +146,69 @@ class EnsembleMean(InputTransform):
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
+class EnsembleQuantiles(InputTransform):
+  """Compute ensemble quantiles."""
+
+  def __init__(
+      self,
+      which: str,
+      quantiles: Union[float, Iterable[float]],
+      quantile_dim: str = 'quantile',
+      ensemble_dim: str = 'number',
+      skipna: bool = False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      quantiles: Quantile or sequence of quantiles to compute, which must be
+        between 0 and 1 inclusive.
+      quantile_dim: Name of the new dimension and coordinate that will store the
+        quantiles. Default: 'quantile'.
+      ensemble_dim: Name of ensemble dimension. Default: 'number'.
+      skipna: If True, skip NaNs in the ensemble quantiles. Note that setting
+        this to True will SIGNIFICANTLY slow down the computation! Default:
+        False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble quantiles if the
+        ensemble dimension is missing. Default: False.
+    """
+    super().__init__(which)
+    # Ensure quantiles is a list so that xr.DataArray.quantile creates a
+    # dimension and coordinate for it.
+    self._quantiles = (
+        quantiles if isinstance(quantiles, Iterable) else [quantiles]
+    )
+    self._quantile_dim = quantile_dim
+    self._ensemble_dim = ensemble_dim
+    self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
+
+  @property
+  def unique_name_suffix(self) -> str:
+    quantiles_str = ','.join([str(q) for q in self._quantiles])
+    return (
+        f'ensemble_quantiles_{self._ensemble_dim=}_{self._quantile_dim=}_'
+        f'{self._skipna=}_{quantiles_str}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
+    if 'quantile' in da.dims:
+      raise ValueError(
+          'Input DataArray already has a `quantile` dimension. Please rename it'
+          ' before applying the EnsembleQuantiles wrapper.'
+      )
+    result = da.quantile(
+        self._quantiles, dim=self._ensemble_dim, skipna=self._skipna
+    )
+    if self._quantile_dim != 'quantile':
+      result = result.rename({'quantile': self._quantile_dim})
+    return result
+
+
 class ContinuousToBinary(InputTransform):
   """Converts a continuous input to a binary one.
 

@@ -147,6 +147,48 @@ class EnsembleMeanTest(parameterized.TestCase):
     xr.testing.assert_equal(x.mean('realization', skipna=skipna), y)
 
 
+class EnsembleQuantilesTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      dict(skipna=True, quantiles=0.5),
+      dict(skipna=False, quantiles=0.5),
+      dict(skipna=True, quantiles=[0.1, 0.5, 0.9]),
+      dict(skipna=False, quantiles=[0.1, 0.5, 0.9]),
+  )
+  def test_quantiles_over_realization_dim(self, skipna, quantiles):
+    forecast = test_utils.mock_target_data(random=True, ensemble_size=3)
+    # Slice to a very small size, as numpy.nanquantile can be extremely slow
+    # when applied over many dimensions.
+    forecast = forecast.isel(
+        latitude=slice(0, 2), longitude=slice(0, 2), level=0
+    )
+
+    # Set one single realization to nan
+    forecast = xr.where(
+        forecast.latitude == forecast.latitude[0],
+        np.nan,
+        forecast,
+    )
+    eq = wrappers.EnsembleQuantiles(
+        which='both',
+        quantiles=quantiles,
+        quantile_dim='my_quantile',
+        ensemble_dim='realization',
+        skipna=skipna,
+    )
+
+    x = forecast.geopotential
+    y = eq.transform_fn(x)
+
+    expected_quantiles = (
+        quantiles if isinstance(quantiles, (list, tuple)) else [quantiles]
+    )
+    expected = x.quantile(
+        expected_quantiles, dim='realization', skipna=skipna
+    ).rename({'quantile': 'my_quantile'})
+    xr.testing.assert_equal(expected, y)
+
+
 class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
 
   @parameterized.parameters(
@@ -346,9 +388,7 @@ class IntersectPredictionAndTargetVariablesTest(parameterized.TestCase):
         'e': (('time',), np.arange(10)),
     })
 
-    metric = wrappers.IntersectPredictionAndTargetVariables(
-        deterministic.MAE()
-    )
+    metric = wrappers.IntersectPredictionAndTargetVariables(deterministic.MAE())
     stats = metric.statistics
     mae_stat = stats['self']
     result = mae_stat.compute(predictions, targets)
