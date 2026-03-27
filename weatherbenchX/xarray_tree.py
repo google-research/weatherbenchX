@@ -54,7 +54,7 @@ def map_structure(func: Callable[..., Any], *structures: Any) -> Any:
     ):
       data_arrays = [v.rename(k) for k, v in data.items() if v is not None]
       try:
-        return xarray.merge(data_arrays, join='exact')
+        return xarray.merge(data_arrays, join='exact', compat='override')
       except ValueError:  # Exact join not possible.
         pass
     return data
