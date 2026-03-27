@@ -121,7 +121,7 @@ COLORS = {
     "Excarta (HEAL-ViT) vs ERA5": husl[5],
     "Baguan vs ERA5": husl[6],
     "WeatherMesh4 vs ERA5": husl[7],
-    
+    "Tianji vs ERA5": orange,
 }
 
 SYMBOLS = {
@@ -167,6 +167,7 @@ SYMBOLS = {
     "Excarta (HEAL-ViT) vs ERA5": "circle",
     "Baguan vs ERA5": "circle",
     "WeatherMesh4 vs ERA5": "circle",
+    "Tianji vs ERA5": "circle",
     "FGN (oper.) vs ERA5": "triangle-up",
     "FGN (oper.) (mean) vs ERA5": "triangle-up",
     "FGN (oper.) (1st member) vs ERA5": "square",

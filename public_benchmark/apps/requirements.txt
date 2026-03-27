@@ -1,9 +1,9 @@
-plotly==5.24.1
-xarray>=2024.1.0
-zarr==2.13.3
-dash==2.14.2
-dash_bootstrap_components==1.6.0
+plotly==6.6.0
+xarray>=2026.2.0
+zarr==3.1.5
+dash==4.0.0
+dash_bootstrap_components==2.0.4
 seaborn==0.13.2
-fsspec==2024.12.0
-gcsfs==2024.12.0
-gunicorn>=19.5.0
+fsspec==2026.2.0
+gcsfs==2026.2.0
+gunicorn>=25.1.0
