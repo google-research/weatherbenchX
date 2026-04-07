@@ -121,6 +121,58 @@ class ContinuousToBinaryTest(parameterized.TestCase):
             expected,
         )
 
+  def test_data_array_threshold_with_hour(self):
+    times = np.array(
+        ['2020-01-01T00:00:00', '2020-01-01T12:00:00', '2020-01-02T00:00:00'],
+        dtype='datetime64[ns]',
+    )
+    x = xr.DataArray(
+        np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0]],
+                [[0.5, 0.5], [0.5, 0.5]],
+                [[2.0, 1.0], [1.0, 2.0]],
+            ],
+            dtype=np.float32,
+        ),
+        dims=['valid_time', 'lat', 'lon'],
+        coords={'valid_time': times, 'lat': [0, 1], 'lon': [0, 1]},
+        name='geopotential',
+    )
+
+    threshold_data = xr.DataArray(
+        np.array(
+            [[[1.5, 1.5], [1.5, 1.5]], [[0.4, 0.4], [0.4, 0.4]]],
+            dtype=np.float32,
+        ),
+        dims=['hour', 'lat', 'lon'],
+        coords={'hour': [0, 12], 'lat': [0, 1], 'lon': [0, 1]},
+    )
+
+    ctb = wrappers.ContinuousToBinary(
+        which='predictions',
+        threshold_value=threshold_data,
+        threshold_dim='hour',
+        unique_name_suffix='test',
+    )
+
+    y = ctb.transform_fn(x)
+
+    # Broadcasted expected result mapping each time to all thresholds in hour.
+    expected = xr.DataArray(
+        np.array(
+            [
+                [[[0.0, 1.0], [1.0, 1.0]], [[1.0, 1.0], [1.0, 1.0]]],
+                [[[0.0, 1.0], [0.0, 1.0]], [[0.0, 1.0], [0.0, 1.0]]],
+                [[[1.0, 1.0], [0.0, 1.0]], [[0.0, 1.0], [1.0, 1.0]]],
+            ],
+            dtype=np.float32,
+        ),
+        dims=['valid_time', 'lat', 'lon', 'hour'],
+        coords={'valid_time': times, 'lat': [0, 1], 'lon': [0, 1], 'hour': [0, 12]},
+    )
+    xr.testing.assert_equal(y, expected)
+
 
 class EnsembleMeanTest(parameterized.TestCase):
 
