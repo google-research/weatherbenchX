@@ -227,6 +227,140 @@ class MetricsTest(parameterized.TestCase):
     ])
     np.testing.assert_allclose(out, correct_result)
 
+    # Test SPF and STF with NaNs, n=1
+    prediction1 = xr.DataArray(
+        [[1, 0, np.nan, 1]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    ).to_dataset()
+    target1 = xr.DataArray(
+        [[0, np.nan, 1, 0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    ).to_dataset()
+    metrics1 = {
+        'fss': spatial.FSS(neighborhood_size_in_pixels=1),
+    }
+    stats1 = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics1, prediction1, target1
+    )
+    spf_stat = metrics1['fss'].statistics['SquaredPredictionFraction']
+    stf_stat = metrics1['fss'].statistics['SquaredTargetFraction']
+
+    # SPF: no coordinate masks present, so no cross-masking is done
+    # result is identical to original prediction^2
+    np.testing.assert_allclose(
+        stats1[spf_stat.unique_name]['precipitation'].values,
+        [[1.0, 0.0, np.nan, 1.0]],
+    )
+    # STF: no coordinate masks present, so no cross-masking is done
+    # result is identical to original target^2
+    np.testing.assert_allclose(
+        stats1[stf_stat.unique_name]['precipitation'].values,
+        [[0.0, np.nan, 1.0, 0.0]],
+    )
+
+  def test_get_fss_mask(self):
+    pred = xr.DataArray([[1, 2], [3, 4]], dims=['latitude', 'longitude'])
+    pred.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, False], [True, True]],
+    )
+
+    target = xr.DataArray([[5, 6], [7, 8]], dims=['latitude', 'longitude'])
+    target.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, True], [False, True]],
+    )
+
+    # Scenario 1: combine_mask=True and both present
+    mask1 = spatial.get_fss_mask(
+        pred, target, neighborhood_size=1, combine_mask=True
+    )
+    np.testing.assert_equal(mask1.values, [[True, False], [False, True]])
+
+    # Scenario 2: combine_mask=False
+    mask2 = spatial.get_fss_mask(
+        pred, target, neighborhood_size=1, combine_mask=False
+    )
+    np.testing.assert_equal(mask2.values, [[True, True], [False, True]])
+
+    # Scenario 2 fallback: prefer target mask but if only pred, use pred.
+    target_no_mask = target.drop_vars('mask')
+    mask3 = spatial.get_fss_mask(
+        pred, target_no_mask, neighborhood_size=1, combine_mask=False
+    )
+    np.testing.assert_equal(mask3.values, [[True, False], [True, True]])
+
+    # Scenario 3: no masks present -> returns None
+    pred_no_mask = pred.drop_vars('mask')
+    mask4 = spatial.get_fss_mask(
+        pred_no_mask, target_no_mask, neighborhood_size=1, combine_mask=False
+    )
+    self.assertIsNone(mask4)
+
+    # Scenario 4: neighborhood_size=3, all True mask
+    pred_5x5 = xr.DataArray(np.ones((5, 5)), dims=['latitude', 'longitude'])
+    pred_5x5.coords['mask'] = (
+        ('latitude', 'longitude'),
+        np.ones((5, 5), dtype=bool),
+    )
+    target_5x5 = xr.DataArray(np.ones((5, 5)), dims=['latitude', 'longitude'])
+    target_5x5.coords['mask'] = (
+        ('latitude', 'longitude'),
+        np.ones((5, 5), dtype=bool),
+    )
+
+    mask5 = spatial.get_fss_mask(
+        pred_5x5, target_5x5, neighborhood_size=3, combine_mask=False
+    )
+    expected_mask5 = np.zeros((5, 5), dtype=bool)
+    expected_mask5[1:-1, 1:-1] = True
+    np.testing.assert_equal(mask5.values, expected_mask5)
+
+  def test_fss_metrics_mask_propagation(self):
+    pred = xr.DataArray(
+        [[1.0, 2.0], [3.0, 4.0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    )
+    pred.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, False], [True, True]],
+    )
+
+    target = xr.DataArray(
+        [[5.0, 6.0], [7.0, 8.0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    )
+    target.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, True], [False, True]],
+    )
+
+    # Test with combine_mask=True
+    metric_true = spatial.SquaredPredictionFraction(
+        neighborhood_size_in_pixels=1, combine_mask=True
+    )
+    stats_true = metric_true._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_true.coords)
+    np.testing.assert_equal(
+        stats_true.coords['mask'].values,
+        [[True, False], [False, True]],
+    )
+
+    # Test with combine_mask=False
+    metric_false = spatial.SquaredPredictionFraction(
+        neighborhood_size_in_pixels=1, combine_mask=False
+    )
+    stats_false = metric_false._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_false.coords)
+    np.testing.assert_equal(
+        stats_false.coords['mask'].values,
+        [[True, True], [False, True]],
+    )
+
   def test_wrapped_metric(self):
     target = (
         test_utils.mock_prediction_data(
