@@ -99,6 +99,61 @@ def neighborhood_averaging(
     )
 
 
+def get_fss_mask(
+    predictions: xr.DataArray,
+    targets: xr.DataArray,
+    neighborhood_size: Union[int, Iterable[int]],
+    wrap_longitude: bool = False,
+    combine_mask: bool = False,
+) -> Union[xr.DataArray, None]:
+  """Get mask for FSS.
+
+  The mask is True for pixels where FSS is valid, based on neighborhood
+  averaging method used in FSS, which propagates NaNs and applies boundary
+  zeroing for non-wrap-around case.
+
+  If any of predictions or targets is NaN or masked in a neighborhood of a
+  pixel, the neighborhood averaging for that pixel will result in NaN,
+  unless it's on a boundary that gets zeroed out when wrap_longitude=False.
+  This mask is True where neighborhood averaging doesn't produce NaN.
+  This matches masking logic in SquaredPredictionFraction and
+  SquaredTargetFraction.
+
+  Args:
+    predictions: Predictions DataArray.
+    targets: Targets DataArray.
+    neighborhood_size: Neighborhood size for convolution.
+    wrap_longitude: Whether to wrap longitude in convolution.
+    combine_mask: Whether to combine prediction and target masks.
+
+  Returns:
+    Boolean mask DataArray.
+  """
+  has_pred_mask = 'mask' in predictions.coords
+  has_target_mask = 'mask' in targets.coords
+
+  if not has_pred_mask and not has_target_mask:
+    return None
+
+  if combine_mask:
+    if has_pred_mask and has_target_mask:
+      mask = predictions.mask & targets.mask
+    elif has_target_mask:
+      mask = targets.mask
+    else:
+      mask = predictions.mask
+  else:
+    if has_target_mask:
+      mask = targets.mask
+    else:
+      mask = predictions.mask
+
+  neighborhood_mask = neighborhood_averaging(
+      mask, neighborhood_size, wrap_longitude
+  )
+  return np.abs(neighborhood_mask - 1.0) < 1e-5
+
+
 def get_suffix(
     neighborhood_size: Union[int, Iterable[int]],
     wrap_longitude: bool = False,
@@ -118,6 +173,7 @@ class SquaredFractionsError(base.PerVariableStatistic):
 
   neighborhood_size_in_pixels: Union[int, Iterable[int]]
   wrap_longitude: bool = False
+  combine_mask: bool = False
 
   @property
   def unique_name(self) -> str:
@@ -129,13 +185,23 @@ class SquaredFractionsError(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
+    mask = get_fss_mask(
+        predictions,
+        targets,
+        self.neighborhood_size_in_pixels,
+        self.wrap_longitude,
+        self.combine_mask,
+    )
     predictions = neighborhood_averaging(
         predictions, self.neighborhood_size_in_pixels, self.wrap_longitude
     )
     targets = neighborhood_averaging(
         targets, self.neighborhood_size_in_pixels, self.wrap_longitude
     )
-    return (predictions - targets) ** 2
+    result = (predictions - targets) ** 2
+    if mask is not None:
+      result = result.assign_coords(mask=mask)
+    return result
 
 
 @dataclasses.dataclass
@@ -144,6 +210,7 @@ class SquaredPredictionFraction(base.PerVariableStatistic):
 
   neighborhood_size_in_pixels: Union[int, Iterable[int]]
   wrap_longitude: bool = False
+  combine_mask: bool = False
 
   @property
   def unique_name(self) -> str:
@@ -155,10 +222,20 @@ class SquaredPredictionFraction(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
+    mask = get_fss_mask(
+        predictions,
+        targets,
+        self.neighborhood_size_in_pixels,
+        self.wrap_longitude,
+        self.combine_mask,
+    )
     predictions = neighborhood_averaging(
         predictions, self.neighborhood_size_in_pixels, self.wrap_longitude
     )
-    return predictions**2 + xr.zeros_like(targets)
+    result = predictions**2
+    if mask is not None:
+      result = result.assign_coords(mask=mask)
+    return result
 
 
 @dataclasses.dataclass
@@ -167,6 +244,7 @@ class SquaredTargetFraction(base.PerVariableStatistic):
 
   neighborhood_size_in_pixels: Union[int, Iterable[int]]
   wrap_longitude: bool = False
+  combine_mask: bool = False
 
   @property
   def unique_name(self) -> str:
@@ -178,10 +256,20 @@ class SquaredTargetFraction(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
+    mask = get_fss_mask(
+        predictions,
+        targets,
+        self.neighborhood_size_in_pixels,
+        self.wrap_longitude,
+        self.combine_mask,
+    )
     targets = neighborhood_averaging(
         targets, self.neighborhood_size_in_pixels, self.wrap_longitude
     )
-    return targets**2 + xr.zeros_like(predictions)
+    result = targets**2
+    if mask is not None:
+      result = result.assign_coords(mask=mask)
+    return result
 
 
 @dataclasses.dataclass
@@ -211,6 +299,7 @@ class FSS(base.PerVariableMetric):
 
   neighborhood_size_in_pixels: Union[int, Iterable[int]]
   wrap_longitude: bool = False
+  combine_mask: bool = False
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -220,13 +309,19 @@ class FSS(base.PerVariableMetric):
     # computation code.
     return {
         'SquaredFractionsError': SquaredFractionsError(
-            self.neighborhood_size_in_pixels, self.wrap_longitude
+            self.neighborhood_size_in_pixels,
+            self.wrap_longitude,
+            self.combine_mask,
         ),
         'SquaredPredictionFraction': SquaredPredictionFraction(
-            self.neighborhood_size_in_pixels, self.wrap_longitude
+            self.neighborhood_size_in_pixels,
+            self.wrap_longitude,
+            self.combine_mask,
         ),
         'SquaredTargetFraction': SquaredTargetFraction(
-            self.neighborhood_size_in_pixels, self.wrap_longitude
+            self.neighborhood_size_in_pixels,
+            self.wrap_longitude,
+            self.combine_mask,
         ),
     }
 
