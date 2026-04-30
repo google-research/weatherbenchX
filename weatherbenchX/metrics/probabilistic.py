@@ -14,7 +14,8 @@
 """Implementation of probabilistic metrics and assiciated statistics."""
 
 from collections.abc import Hashable, Sequence
-from typing import Mapping, Tuple
+import functools
+from typing import Iterable, Mapping, Tuple
 import numpy as np
 import scipy.stats
 from weatherbenchX import xarray_tree
@@ -475,6 +476,128 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
 
     # RPS is the sum of squared errors over the bin dimension.
     return cdf_mse.sum(self._bin_dim, skipna=self._skipna_ensemble)
+
+
+class EnergyScoreSkill(base.PerVariableStatistic):
+  """The skill measure associated with EnergyScore, E||X - Y||.
+
+  Given a ground truth random variable Y and a prediction random variable X,
+  this computes the expected Euclidean distance between X and Y along the
+  specified dimensions.
+  """
+
+  def __init__(self, dim: str, ensemble_dim: str = 'sample'):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+
+  @property
+  def unique_name(self):
+    return (
+        f'EnergyScore_Skill_dim={self._dim}_ensemble_dim={self._ensemble_dim}'
+    )
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    return np.sqrt(
+        np.square(predictions - targets).sum(dim=self._dim, skipna=False)
+    ).mean(dim=self._ensemble_dim)
+
+
+class EnergyScoreSpread(base.PerVariableStatistic):
+  """The spread component of the Energy Score."""
+
+  def __init__(
+      self,
+      dim: str | Iterable[str],
+      ensemble_dim: str = 'sample',
+      fair: bool = True,
+  ):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+
+  @property
+  def unique_name(self):
+    return (
+        f'EnergyScore_Spread_dim={self._dim}_'
+        f'ensemble_dim={self._ensemble_dim}_'
+        f'fair={self._fair}'
+    )
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    predictions_prime = predictions.rename(
+        {self._ensemble_dim: self._ensemble_dim + '_prime'}
+    )
+
+    ensemble_size = predictions.sizes[self._ensemble_dim]
+    divider = (
+        ensemble_size * ensemble_size
+        if not self._fair
+        else ensemble_size * (ensemble_size - 1)
+    )
+
+    return (
+        np.sqrt(
+            np.square(predictions - predictions_prime).sum(
+                dim=self._dim, skipna=False
+            )
+        ).sum(
+            dim=[self._ensemble_dim, self._ensemble_dim + '_prime'],
+            skipna=False,
+        )
+        / divider
+    )
+
+
+class VariogramScore(base.PerVariableStatistic):
+  r"""The Variogram Score.
+
+  Proposed in [Scheuerer, Hamill 2015] “Variogram-Based Proper Scoring Rules for
+  Probabilistic Forecasts of Multivariate Quantities.” It is sensitive to
+  misrepresentations of the correlation structures across `dim`. Note that it is
+  insensitive to the skill, i.e. a biased forecast could still score well on
+  that metric if its correlation structures are correct.
+
+  This metric loses signal when computed over quantities that are uncorrelated,
+  e.g. gridpoints that are very distant. This is typically addressed by
+  assigning lower weights to dimension pairs that are expected to be less
+  correlated during computation. No such weighting is performed here, this is
+  left as the users responsibility.
+
+  Computed as:
+
+    VS = \\sum_{i,j} (|y_i - y_j|^p - \\frac{1}{M} \\sum_{m=1}^M |x_i^{(m)} - x_j^{(m)}|^p)^2
+
+  where y is the target, x^{(m)} is the m-th ensemble member, and the sum
+  over i and j runs over the specified dimension.
+  """
+
+  def __init__(self, dim: str, ensemble_dim: str, p: float = 0.5):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._p = p
+
+  @property
+  def unique_name(self):
+    return f'VariogramScore_dim={self._dim}_ensemble_dim={self._ensemble_dim}'
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    targets_prime = targets.rename({self._dim: self._dim + '_prime'})
+    predictions_prime = predictions.rename({self._dim: self._dim + '_prime'})
+
+    targets_term = np.abs(targets_prime - targets) ** self._p
+    predictions_term = (
+        np.abs(predictions_prime - predictions) ** self._p
+    ).mean(dim=self._ensemble_dim, skipna=False)
+
+    return np.square(targets_term - predictions_term).sum(
+        dim=[self._dim, self._dim + '_prime'], skipna=False
+    )
 
 
 ### Metrics
@@ -1218,3 +1341,224 @@ class RankHistogram(base.PerVariableStatistic):
 
     # Transform to floating point for the subsequent aggregation.
     return (ranks == categories).astype(np.float32)
+
+
+class EnergyScore(base.PerVariableMetric):
+  """Energy score for an ensemble prediction along one dimension.
+
+  Given ground truth random vector Y, and two iid predictions X, X', the
+  Energy Score is defined as
+    ES = E‖X - Y‖ - 0.5 * E‖X - X'‖
+  where `E` is mathematical expectation, and ‖⋅‖ is the L2 norm. ES has a
+  unique minimum when X is distributed the same as Y.
+
+  If fair=True, the value is unbiased and estimates the ES as it would be given
+  a very large ensemble size.
+
+  NaN values propagate through and result in NaN in the corresponding output
+  position.
+
+  References:
+  [Gneiting & Raftery, 2012], Strictly Proper Scoring Rules, Prediction, and
+    Estimation
+  """
+
+  def __init__(
+      self,
+      dim: str | Iterable[str],
+      ensemble_dim: str = ENSEMBLE_DIM,
+      fair: bool = True,
+  ):
+    """Init.
+
+    Args:
+      dim: Name of the dimension(s) over which to compute the Euclidean norm.
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      fair: If True, use the fair estimate of ES. If False, use the
+        conventional estimate. Default: True.
+    """
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'EnergyScoreSkill': EnergyScoreSkill(
+            dim=self._dim,
+            ensemble_dim=self._ensemble_dim,
+        ),
+        'EnergyScoreSpread': EnergyScoreSpread(
+            dim=self._dim,
+            ensemble_dim=self._ensemble_dim,
+            fair=self._fair,
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['EnergyScoreSkill']
+        - 0.5 * statistic_values['EnergyScoreSpread']
+    )
+
+
+def construct_tiles(
+    dataset: xr.Dataset, window_size: int = 3, window_dim: str = 'window'
+) -> xr.Dataset:
+  """Constructs local neighborhood tiles (windows) across the spatial grid.
+
+  At each latitude/longitude pixel, a `window_size` x `window_size` patch of
+  adjacent pixels is collected along a new `window_dim` dimension by rolling the
+  dataset. To prevent rolling from wrapping around the poles, pixels where a
+  full spatial window cannot be formed without wrapping latitude boundaries are
+  masked out with NaNs.
+
+  Args:
+    dataset: The input dataset containing `latitude` and `longitude` dimensions.
+    window_size: The length of the side of the square tile window (in pixels).
+    window_dim: The name of the new dimension along which the window pixels are
+      concatenated.
+
+  Returns:
+    An `xr.Dataset` with the additional `window_dim` dimension representing
+    the local spatial patch for each point on the grid.
+  """
+  shifts = []
+  for i in range(window_size):
+    for j in range(window_size):
+      d_lat = i - window_size // 2
+      d_lon = j - window_size // 2
+
+      rolled = dataset.roll(latitude=d_lat, longitude=d_lon, roll_coords=False)
+      shifts.append(rolled)
+
+  windowed_dataset = xr.concat(shifts, dim=window_dim)
+
+  # Fill any window that was rolled across the latitude edges with NaNs.
+  half_window_size = window_size // 2
+  window_reach_lower = half_window_size
+  window_reach_upper = window_size - 1 - half_window_size
+
+  lat_indices = xr.DataArray(
+      np.arange(dataset.sizes['latitude']), dims=['latitude']
+  )
+  lat_mask = (lat_indices >= window_reach_lower) & (
+      lat_indices < dataset.sizes['latitude'] - window_reach_upper
+  )
+
+  windowed_dataset = windowed_dataset.where(lat_mask)
+
+  return windowed_dataset
+
+
+class TiledEnergyScore(base.PerVariableMetric):
+  """Compute the Energy Score over small patches on the grid.
+
+  Being a windowed metric, it leaves NaNs at the top and bottom of the grid
+  where full windows could not be computed. This was preferred over changing
+  the grid size.
+  """
+
+  _WINDOW_DIM = 'window'
+
+  def __init__(
+      self,
+      window_size: int = 3,
+      ensemble_dim: str = ENSEMBLE_DIM,
+      fair: bool = True,
+  ):
+    self._window_size = window_size
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    skill = EnergyScoreSkill(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim
+    )
+    spread = EnergyScoreSpread(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim, fair=self._fair
+    )
+
+    transform_fn = functools.partial(
+        construct_tiles,
+        window_size=self._window_size,
+        window_dim=self._WINDOW_DIM,
+    )
+    transform_fn_wrapped = wrappers.Inline(
+        which='both', transform_fn=transform_fn, unique_name_suffix='tiled'
+    )
+
+    return {
+        'TiledEnergyScore_Skill': wrappers.WrappedStatistic(
+            skill, transform_fn_wrapped
+        ),
+        'TiledEnergyScore_Spread': wrappers.WrappedStatistic(
+            spread, transform_fn_wrapped
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['TiledEnergyScore_Skill']
+        - 0.5 * statistic_values['TiledEnergyScore_Spread']
+    )
+
+
+class TiledVariogramScore(base.PerVariableMetric):
+  """Compute the Variogram Score over small patches of the grid.
+
+  Computing it on small patches circumvents issues related to computing 
+  this metric on uncorrelated quantities.
+
+  Being a windowed metric, it leaves NaNs at the top and bottom of the grid
+  where full windows could not be computed. This was preferred over changing
+  the grid size.
+  """
+  _WINDOW_DIM = 'window'
+
+  def __init__(
+      self,
+      window_size: int = 3,
+      ensemble_dim: str = ENSEMBLE_DIM,
+      p: float = 0.5
+  ):
+    self._window_size = window_size
+    self._ensemble_dim = ensemble_dim
+    self._p = p
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    variogram_score = VariogramScore(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim, p=self._p
+    )
+
+    transform_fn = functools.partial(
+        construct_tiles,
+        window_size=self._window_size,
+        window_dim=self._WINDOW_DIM,
+    )
+    transform_fn_wrapped = wrappers.Inline(
+        which='both', transform_fn=transform_fn, unique_name_suffix='tiled'
+    )
+
+    return {
+        'TiledVS': wrappers.WrappedStatistic(
+            variogram_score, transform_fn_wrapped
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['TiledVS']

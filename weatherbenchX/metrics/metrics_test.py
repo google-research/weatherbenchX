@@ -573,6 +573,57 @@ class MetricsTest(parameterized.TestCase):
           check_dim_order=False,
       )
 
+  def test_construct_tiles_latitude_masking(self):
+    """Check if the correct rows are NaNed out when constructing tiles."""
+    ds = xr.Dataset(
+        {'x': (['latitude', 'longitude'], np.ones((5, 5)))},
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+    )
+    # Window size 1: reaches 0 lower, 0 upper. No NaNs.
+    out1 = probabilistic.construct_tiles(ds, window_size=1)
+    self.assertFalse(np.isnan(out1['x'].values).any())
+
+    # Window size 2: reaches 1 lower, 0 upper. Only index 0 is NaN.
+    out2 = probabilistic.construct_tiles(ds, window_size=2)
+    self.assertTrue(np.isnan(out2['x'].isel(latitude=0).values).all())
+    self.assertFalse(
+        np.isnan(out2['x'].isel(latitude=slice(1, None)).values).any()
+    )
+
+    # Window size 3: reaches 1 lower, 1 upper. Index 0 and -1 are NaN.
+    out3 = probabilistic.construct_tiles(ds, window_size=3)
+    self.assertTrue(np.isnan(out3['x'].isel(latitude=0).values).all())
+    self.assertTrue(np.isnan(out3['x'].isel(latitude=-1).values).all())
+    self.assertFalse(
+        np.isnan(out3['x'].isel(latitude=slice(1, -1)).values).any()
+    )
+
+  def test_energy_score(self):
+    ensemble_size = 4
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=43,
+    )
+    metrics = {
+        'es': probabilistic.EnergyScore(
+            dim='longitude', ensemble_dim='realization', fair=True
+        )
+    }
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time', 'latitude']
+    )
+    for v in ['2m_temperature', 'geopotential']:
+      self.assertIn(f'es.{v}', results)
+
   def test_direct_rps(self):
     # CDFs
     predictions = xr.DataArray(
@@ -1202,6 +1253,72 @@ class MetricsTest(parameterized.TestCase):
     values = values.copy(data=jax.numpy.array(values.data))
     result = probabilistic._select_optimal_thresholds(values, thresholds)
     xr.testing.assert_allclose(result.as_numpy(), expected_result)
+
+  def _check_tiled_nan_propagation(
+      self, metric: metrics_base.PerVariableMetric, metric_name: str
+  ) -> None:
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=0,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=1,
+    )
+
+    # Introduce a NaN into the predictions.
+    predictions = predictions.copy(deep=True)
+    nan_lat = predictions.latitude[3].values
+    nan_lon = predictions.longitude[3].values
+    predictions['2m_temperature'].loc[
+        {'realization': 0, 'latitude': nan_lat, 'longitude': nan_lon}
+    ] = np.nan
+
+    metrics = {
+        metric_name: metric
+    }
+
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time']
+    )
+    is_nan = np.isnan(results[f'{metric_name}.2m_temperature'])
+
+    expected_nan = xr.full_like(is_nan, False, dtype=bool)
+    # Latitude indices 0 and -1 are masked out due to the 3x3 window reaching
+    # out of bounds at the edges.
+    expected_nan.loc[{'latitude': expected_nan.latitude[0]}] = True
+    expected_nan.loc[{'latitude': expected_nan.latitude[-1]}] = True
+
+    # Any tiled patch that overlaps (3, 3) will become NaN. With window_size=3,
+    # these are indices [2, 3, 4].
+    lats_affected = predictions.latitude[2:5].values
+    lons_affected = predictions.longitude[2:5].values
+    expected_nan.loc[
+        {'latitude': lats_affected, 'longitude': lons_affected}
+    ] = True
+
+    xr.testing.assert_equal(is_nan, expected_nan)
+
+  def test_tiled_variogram_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledVariogramScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_vs',
+    )
+
+  def test_tiled_energy_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledEnergyScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_es',
+    )
 
 
 if __name__ == '__main__':
