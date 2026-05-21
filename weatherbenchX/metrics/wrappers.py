@@ -831,6 +831,122 @@ class StackToNewDimension(InputTransform):
     )
 
 
+def construct_tiles(
+    da: xr.DataArray,
+    window_size: int = 3,
+    window_dim: str = 'window',
+    wrap_longitude: bool = False,
+) -> xr.DataArray:
+  """Constructs local neighborhood tiles (windows) across the spatial grid.
+
+  At each latitude/longitude pixel, a `window_size` x `window_size` patch of
+  adjacent pixels is collected along a new `window_dim` dimension by rolling the
+  data. To prevent rolling from wrapping around the poles, pixels where a
+  full spatial window cannot be formed without wrapping latitude boundaries are
+  removed. If `wrap_longitude` is False, pixels near the longitude edges are
+  also removed.
+
+  Args:
+    da: The input DataArray containing `latitude` and `longitude` dimensions.
+      Note that wrappers apply this function per DataArray, not per Dataset.
+    window_size: The length of the side of the square tile window (in pixels).
+    window_dim: The name of the new dimension along which the window pixels are
+      concatenated.
+    wrap_longitude: If True, assume longitude wraps around (e.g.  global grids).
+     If False (default), also clip values near longitude edges (e.g. for 
+     regional datasets).
+
+  Returns:
+    An `xr.DataArray` with the additional `window_dim` dimension representing
+    the local spatial patch for each point on the grid.
+  """
+  shifts = []
+  for i in range(window_size):
+    for j in range(window_size):
+      d_lat = i - window_size // 2
+      d_lon = j - window_size // 2
+
+      rolled = da.roll(latitude=d_lat, longitude=d_lon, roll_coords=False)
+      shifts.append(rolled)
+
+  windowed = xr.concat(shifts, dim=window_dim)
+
+  # Remove any window that was rolled across the latitude edges.
+  half_window_size = window_size // 2
+  window_reach_lower = half_window_size
+  window_reach_upper = window_size - 1 - half_window_size
+
+  windowed = windowed.isel(
+      latitude=slice(
+          window_reach_lower, da.sizes['latitude'] - window_reach_upper
+      )
+  )
+
+  if not wrap_longitude:
+    windowed = windowed.isel(
+        longitude=slice(
+            window_reach_lower, da.sizes['longitude'] - window_reach_upper
+        )
+    )
+
+  return windowed
+
+
+class Tile(InputTransform):
+  """Constructs local neighborhood tiles (windows) across the spatial grid.
+
+  After the transformation, each spatial location contains the data from a 
+  rolling window of size window_size centered at that location.
+
+  Adds a new dimension to the DataArray named with window_dim. The size of the
+  dimension is defined by window_size, e.g. a window_size of 3 will give a new 
+  dimension of size 3x3=9.
+
+  This transform shrinks the edges of the forecast where the windows were
+  incomplete. A window size of 3 will remove one row/column on the edges of each
+  spatial dimension (latitude, longitude). If wrap_longitude is True, no
+  shrinking happens on the longitude dimension, and the values are rolled over
+  from the other edge.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      window_size: int = 3,
+      window_dim: str = 'window',
+      wrap_longitude: bool = False,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      window_size: The length of the side of the square tile window (in pixels).
+      window_dim: The name of the new dimension along which the window pixels
+        are concatenated.
+      wrap_longitude: If True, assume longitude wraps around. Default: False.
+    """
+    super().__init__(which)
+    self._window_size = window_size
+    self._window_dim = window_dim
+    self._wrap_longitude = wrap_longitude
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return (
+        f'tiled_window_size_{self._window_size}_wrap_{self._wrap_longitude}_'
+        f'dim_{self._window_dim}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return construct_tiles(
+        da,
+        window_size=self._window_size,
+        window_dim=self._window_dim,
+        wrap_longitude=self._wrap_longitude,
+    )
+
+
 class WrappedStatistic(base.Statistic):
   """Wraps a statistic with an input transform.
 

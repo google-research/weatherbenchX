@@ -751,6 +751,95 @@ class MetricsTest(parameterized.TestCase):
           check_dim_order=False,
       )
 
+  def test_construct_tiles_latitude_removal(self):
+    """Check if the correct rows are removed when constructing tiles."""
+    ds = xr.Dataset(
+        {'x': (['latitude', 'longitude'], np.ones((5, 5)))},
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+    )
+    # Window size 1: reaches 0 lower, 0 upper. No rows removed.
+    out1 = wrappers.construct_tiles(ds, window_size=1)
+    np.testing.assert_array_equal(out1['latitude'].values, [0, 1, 2, 3, 4])
+    self.assertFalse(np.isnan(out1['x'].values).any())
+
+    # Window size 2: reaches 1 lower, 0 upper. Row 0 removed.
+    out2 = wrappers.construct_tiles(ds, window_size=2)
+    np.testing.assert_array_equal(out2['latitude'].values, [1, 2, 3, 4])
+    self.assertFalse(np.isnan(out2['x'].values).any())
+
+    # Window size 3: reaches 1 lower, 1 upper. Rows 0 and 4 removed.
+    out3 = wrappers.construct_tiles(ds, window_size=3)
+    np.testing.assert_array_equal(out3['latitude'].values, [1, 2, 3])
+    self.assertFalse(np.isnan(out3['x'].values).any())
+
+  def test_construct_tiles_wrap_longitude(self):
+    """Check that wrap_longitude=False clips longitude edges."""
+    ds = xr.Dataset(
+        {'x': (['latitude', 'longitude'], np.ones((5, 5)))},
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+    )
+    # With wrap_longitude=True, all longitudes are kept.
+    out_wrap = wrappers.construct_tiles(ds, window_size=3, wrap_longitude=True)
+    np.testing.assert_array_equal(
+        out_wrap['longitude'].values, [0, 1, 2, 3, 4]
+    )
+
+    # With wrap_longitude=False, edge longitudes are also removed.
+    out_no_wrap = wrappers.construct_tiles(
+        ds, window_size=3, wrap_longitude=False
+    )
+    np.testing.assert_array_equal(
+        out_no_wrap['longitude'].values, [1, 2, 3]
+    )
+    # Latitude clipping should be the same in both cases.
+    np.testing.assert_array_equal(
+        out_no_wrap['latitude'].values, out_wrap['latitude'].values
+    )
+
+  def test_tile_wrapper(self):
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['latitude', 'longitude'],
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both', window_size=3, wrap_longitude=False
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window',
+    )
+
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'latitude': 3, 'longitude': 3})
+
+  def test_energy_score(self):
+    ensemble_size = 4
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=43,
+    )
+    metrics = {
+        'es': probabilistic.EnergyScore(
+            dim='longitude', ensemble_dim='realization', fair=True
+        )
+    }
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time', 'latitude']
+    )
+    for v in ['2m_temperature', 'geopotential']:
+      self.assertIn(f'es.{v}', results)
+
   def test_direct_rps(self):
     # CDFs
     predictions = xr.DataArray(
@@ -1380,6 +1469,71 @@ class MetricsTest(parameterized.TestCase):
     values = values.copy(data=jax.numpy.array(values.data))
     result = probabilistic._select_optimal_thresholds(values, thresholds)
     xr.testing.assert_allclose(result.as_numpy(), expected_result)
+
+  def _check_tiled_nan_propagation(
+      self, metric: metrics_base.PerVariableMetric, metric_name: str
+  ) -> None:
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=0,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=1,
+    )
+
+    # Introduce a NaN into the predictions.
+    predictions = predictions.copy(deep=True)
+    nan_lat = predictions.latitude[3].values
+    nan_lon = predictions.longitude[3].values
+    predictions['2m_temperature'].loc[
+        {'realization': 0, 'latitude': nan_lat, 'longitude': nan_lon}
+    ] = np.nan
+
+    metrics = {
+        metric_name: metric
+    }
+
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time']
+    )
+    self.assertLen(
+        results['latitude'], len(predictions['latitude']) - 2
+    )
+    is_nan = np.isnan(results[f'{metric_name}.2m_temperature'])
+
+    expected_nan = xr.full_like(is_nan, False, dtype=bool)
+
+    # Any tiled patch that overlaps (3, 3) will become NaN. With window_size=3,
+    # these are indices [2, 3, 4].
+    lats_affected = predictions.latitude[2:5].values
+    lons_affected = predictions.longitude[2:5].values
+    expected_nan.loc[
+        {'latitude': lats_affected, 'longitude': lons_affected}
+    ] = True
+
+    xr.testing.assert_equal(is_nan, expected_nan)
+
+  def test_tiled_variogram_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledVariogramScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_vs',
+    )
+
+  def test_tiled_energy_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledEnergyScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_es',
+    )
 
 
 if __name__ == '__main__':
