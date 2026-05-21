@@ -408,3 +408,18 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
     )
     chunk = self._ds.sel(valid_time=cat_times)
     return chunk
+
+
+class ConstantLoader(base.DataLoader):
+  """Loader class that returns a constant dataset."""
+
+  def __init__(self, constant_ds: xr.Dataset):
+    super().__init__()
+    self._constant_ds = constant_ds
+
+  def _load_chunk_from_source(
+      self,
+      init_times: np.ndarray,
+      lead_times: Optional[Union[np.ndarray, slice]] = None,
+  ) -> Mapping[Hashable, xr.DataArray]:
+    return self._constant_ds

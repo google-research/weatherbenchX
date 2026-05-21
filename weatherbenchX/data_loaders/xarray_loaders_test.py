@@ -136,6 +136,24 @@ class XarrayLoadersTest(absltest.TestCase):
     )
     self.assertLen(chunk.number, 5)
 
+  def test_constant_loader(self):
+    constant_ds = xr.Dataset(
+        {
+            '2m_temperature': (('quantile',), [0.2, 0.4]),
+        },
+        coords={'quantile': [1, 2]},
+    )
+    loader = xarray_loaders.ConstantLoader(constant_ds=constant_ds)
+    init_times = np.arange(
+        '2020-01-01T00',
+        '2020-01-02T00',
+        np.timedelta64(24, 'h'),
+        dtype='datetime64[ns]',
+    )
+    lead_times = np.arange(0, 3, 1, dtype='timedelta64[D]')
+    chunk = loader.load_chunk(init_times, lead_times)
+    xr.testing.assert_equal(chunk, constant_ds)
+
 
 if __name__ == '__main__':
   absltest.main()
