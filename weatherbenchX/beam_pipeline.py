@@ -15,6 +15,7 @@
 
 from collections.abc import Hashable
 import dataclasses
+import os
 import time
 import typing
 from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
@@ -128,6 +129,7 @@ class _AggregationKey:
   # the relevant dimension is being aggregated over.
   init_time_offset: int | None
   lead_time_offset: int | None
+  aggregator_name: str | None = None
 
   def drop_offsets(self) -> '_AggregationKey':
     return dataclasses.replace(
@@ -143,14 +145,18 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
   up into separate DataArrays for each statistic, variable, type (sum_weights or
   sum_weighted_statistics) and chunk offset, keyed by _AggregationKey.
   """
+  _aggregators: Mapping[str | None, aggregation.Aggregator]
 
   def __init__(
       self,
       metrics: Mapping[str, metrics_base.Metric],
-      aggregator: aggregation.Aggregator,
+      aggregator: aggregation.Aggregator | Mapping[str, aggregation.Aggregator],
   ):
     self.metrics = metrics
-    self.aggregator = aggregator
+    if isinstance(aggregator, aggregation.Aggregator):
+      self._aggregators = {None: aggregator}
+    else:
+      self._aggregators = aggregator
 
   def process(
       self,
@@ -203,39 +209,43 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
         )  # In milliseconds because beam counters use longs.
 
         for var_name, stat in stats.items():
-          start_time = time.time()
-          aggregation_state = self.aggregator.aggregate_stat_var(stat)
-          if aggregation_state is None:
-            continue
-          beam.metrics.Metrics.distribution(
-              'ComputeStatistics', f'agg_{var_name}_{short_stat_name}'
-          ).update(
-              (time.time() - start_time) * 1000
-          )  # In milliseconds because beam counters use longs.
-          if 'init_time' in aggregation_state.sum_weighted_statistics.dims:
-            init_time_offset = time_chunk_offsets.init_time
-          else:
-            init_time_offset = None
-          if 'lead_time' in aggregation_state.sum_weighted_statistics.dims:
-            lead_time_offset = time_chunk_offsets.lead_time
-          else:
-            lead_time_offset = None
-          aggregation_key = _AggregationKey(
-              type='sum_weighted_statistics',
-              statistic_name=stat_name,
-              variable_name=str(var_name),
-              init_time_offset=init_time_offset,
-              lead_time_offset=lead_time_offset,
-          )
-          yield aggregation_key, aggregation_state.sum_weighted_statistics
-          aggregation_key = _AggregationKey(
-              type='sum_weights',
-              statistic_name=stat_name,
-              variable_name=str(var_name),
-              init_time_offset=init_time_offset,
-              lead_time_offset=lead_time_offset,
-          )
-          yield aggregation_key, aggregation_state.sum_weights
+          for agg_name, aggregator in self._aggregators.items():
+            start_time = time.time()
+            aggregation_state = aggregator.aggregate_stat_var(stat)
+            if aggregation_state is None:
+              continue
+            beam.metrics.Metrics.distribution(
+                'ComputeStatistics',
+                f'agg_{agg_name}_{var_name}_{short_stat_name}'
+            ).update(
+                (time.time() - start_time) * 1000
+            )  # In milliseconds because beam counters use longs.
+            if 'init_time' in aggregation_state.sum_weighted_statistics.dims:
+              init_time_offset = time_chunk_offsets.init_time
+            else:
+              init_time_offset = None
+            if 'lead_time' in aggregation_state.sum_weighted_statistics.dims:
+              lead_time_offset = time_chunk_offsets.lead_time
+            else:
+              lead_time_offset = None
+            aggregation_key = _AggregationKey(
+                type='sum_weighted_statistics',
+                statistic_name=stat_name,
+                variable_name=str(var_name),
+                init_time_offset=init_time_offset,
+                lead_time_offset=lead_time_offset,
+                aggregator_name=agg_name,
+            )
+            yield aggregation_key, aggregation_state.sum_weighted_statistics
+            aggregation_key = _AggregationKey(
+                type='sum_weights',
+                statistic_name=stat_name,
+                variable_name=str(var_name),
+                init_time_offset=init_time_offset,
+                lead_time_offset=lead_time_offset,
+                aggregator_name=agg_name,
+            )
+            yield aggregation_key, aggregation_state.sum_weights
       except StopIteration:
         break
 
@@ -344,9 +354,13 @@ class ReconstructAggregationState(beam.PTransform):
 
   def expand(
       self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]
-  ) -> beam.PCollection[aggregation.AggregationState]:
+  ) -> beam.PCollection[tuple[str | None, aggregation.AggregationState]]:
     return (
-        pcoll | beam_utils.GroupAll() | beam.Map(reconstruct_aggregation_state)
+        pcoll
+        | 'GroupByAggregator' >> beam.GroupBy(lambda x: x[0].aggregator_name)
+        | 'Reconstruct' >> beam.MapTuple(
+            lambda agg_name, xs: (agg_name, reconstruct_aggregation_state(xs))
+        )
     )
 
 
@@ -357,28 +371,51 @@ class ComputeMetrics(beam.DoFn):
     self.metrics = metrics
 
   def process(
-      self, aggregation_state: aggregation.AggregationState
-  ) -> Iterable[xr.Dataset]:
+      self, element: tuple[str | None, aggregation.AggregationState]
+  ) -> Iterable[tuple[str | None, xr.Dataset]]:
     """Computes a metrics Dataset from the final AggregationState."""
+    agg_name, aggregation_state = element
     logging.log_first_n(
-        logging.INFO, 'ComputeMetrics inputs: %s', 10, aggregation_state
+        logging.INFO,
+        'ComputeMetrics inputs: %s, %s',
+        10,
+        agg_name,
+        aggregation_state,
     )
-    return [aggregation_state.metric_values(self.metrics)]
+    yield agg_name, aggregation_state.metric_values(self.metrics)
+
+
+def _resolve_out_path(
+    out_path: str | Mapping[str, str],
+    agg_name: str | None,
+) -> str:
+  if isinstance(out_path, str):
+    if agg_name is None:
+      return out_path
+    else:
+      base, ext = os.path.splitext(out_path)
+      return f'{base}_{agg_name}{ext}'
+  else:
+    return out_path[agg_name]
 
 
 class WriteMetrics(beam.DoFn):
   """Writes the metrics to a NetCDF file."""
 
-  def __init__(self, out_path: str):
+  def __init__(self, out_path: str | Mapping[str, str]):
     self.out_path = out_path
 
-  def process(self, metrics: xr.Dataset) -> Iterable[Never]:
-    logging.log_first_n(logging.INFO, 'WriteMetrics inputs: %s', 10, metrics)
+  def process(self, element: tuple[str | None, xr.Dataset]) -> Iterable[Never]:
+    agg_name, metrics = element
+    logging.log_first_n(
+        logging.INFO, 'WriteMetrics inputs: %s, %s', 10, agg_name, metrics
+    )
     # Remove attributes that may have been propogated from the targets or
     # predictions.
     metrics = metrics.drop_attrs(deep=True)
+    target_path = _resolve_out_path(self.out_path, agg_name)
     beam_utils.atomic_write(
-        self.out_path,
+        target_path,
         metrics.to_netcdf(),
     )
     return []
@@ -387,18 +424,20 @@ class WriteMetrics(beam.DoFn):
 class WriteAggregationState(beam.DoFn):
   """Writes the final AggregationState to a NetCDF file."""
 
-  def __init__(self, out_path: str):
+  def __init__(self, out_path: str | Mapping[str, str]):
     self.out_path = out_path
 
   def process(
-      self, aggregation_state: aggregation.AggregationState
+      self, element: tuple[str | None, aggregation.AggregationState]
   ) -> Iterable[Never]:
+    agg_name, aggregation_state = element
     aggregation_state_ds = aggregation_state.to_dataset()
     # Remove attributes that may have been propogated from the targets or
     # predictions.
     aggregation_state_ds = aggregation_state_ds.drop_attrs(deep=True)
+    target_path = _resolve_out_path(self.out_path, agg_name)
     beam_utils.atomic_write(
-        self.out_path,
+        target_path,
         aggregation_state_ds.to_netcdf(),
     )
     return []
@@ -410,9 +449,9 @@ def define_pipeline(
     predictions_loader: data_loaders_base.DataLoader,
     targets_loader: data_loaders_base.DataLoader,
     metrics: Mapping[str, metrics_base.Metric],
-    aggregator: aggregation.Aggregator,
-    out_path: str | None = None,
-    aggregation_state_out_path: str | None = None,
+    aggregator: aggregation.Aggregator | Mapping[str, aggregation.Aggregator],
+    out_path: str | Mapping[str, str] | None = None,
+    aggregation_state_out_path: str | Mapping[str, str] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
@@ -423,15 +462,28 @@ def define_pipeline(
     predictions_loader: DataLoader instance.
     targets_loader: DataLoader instance.
     metrics: A dictionary of metrics to compute.
-    aggregator: Aggregation instance.
-    out_path: The full path to write the metrics to.
+    aggregator: Aggregator instance or mapping of aggregator name to Aggregator
+      instance.
+    out_path: The full path to write the metrics to (or mapping of aggregator
+      name to path). If you specify multiple aggregators but only a single
+      out_path, the aggregator name will be appended to the filename to get
+      a path for each aggregator.
     aggregation_state_out_path: The full path to write the final aggregation
-      state to. This can be useful if you want to compute further metrics from
-      it later, and if you are preserving init_time, it can be useful to compute
-      confidence intervals from later too.
+      state to (or mapping of aggregator name to path). This can be useful if
+      you want to compute further metrics from it later, and if you are
+      preserving init_time, it can be useful to compute confidence intervals
+      from later too. Behaviour is the same as for out_path if multiple
+      aggregators are specified.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
   """
+  if isinstance(aggregator, Mapping):
+    if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
+      raise ValueError("Keys of out_path don't match aggregator names.")
+    if (isinstance(aggregation_state_out_path, Mapping) and
+        aggregation_state_out_path.keys() != aggregator.keys()):
+      raise ValueError(
+          "Keys of aggregation_state_out_path don't match aggregator names.")
 
   agg_state_pipeline = (
       root
