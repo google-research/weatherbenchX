@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import apache_beam as beam
@@ -166,6 +168,120 @@ class BeamPipelineTest(parameterized.TestCase):
             aggregation_state_results.sum_weights,
         ),
     )
+
+  def test_pipeline_multiple_aggregators(self):
+    """Test pipeline with multiple aggregators configured."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+
+    # We will test two aggregators reducing over different sets of dimensions.
+    aggregator_init_time_latitude_longitude = aggregation.Aggregator(
+        reduce_dims=['init_time', 'latitude', 'longitude']
+    )
+    aggregator_init_time = aggregation.Aggregator(reduce_dims=['init_time'])
+
+    aggregators = {
+        'init_time,latitude,longitude': aggregator_init_time_latitude_longitude,
+        'init_time': aggregator_init_time,
+    }
+
+    # Compute expected results directly
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+
+    expected_metrics_init_time_latitude_longitude = (
+        aggregator_init_time_latitude_longitude.aggregate_statistics(statistics)
+        .metric_values(all_metrics)
+        .compute()
+    )
+    expected_metrics_init_time = (
+        aggregator_init_time.aggregate_statistics(statistics)
+        .metric_values(all_metrics)
+        .compute()
+    )
+
+    # Define output paths as a single string (auto-format)
+    metrics_path = self.create_tempfile('metrics.nc').full_path
+
+    # We will also test dict out_path mapping
+    aggregation_state_paths = {
+        'init_time,latitude,longitude': self.create_tempfile(
+            'agg_state_init_time,latitude,longitude.nc'
+        ).full_path,
+        'init_time': self.create_tempfile('agg_state_init_time.nc').full_path,
+    }
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregators,
+          out_path=metrics_path,
+          aggregation_state_out_path=aggregation_state_paths,
+      )
+
+    # Verify auto-formatted metrics output paths
+    base, ext = os.path.splitext(metrics_path)
+    metrics_init_time_latitude_longitude_path = (
+        f'{base}_init_time,latitude,longitude{ext}'
+    )
+    metrics_init_time_path = f'{base}_init_time{ext}'
+
+    metrics_init_time_latitude_longitude_results = xr.open_dataset(
+        metrics_init_time_latitude_longitude_path
+    ).compute()
+    metrics_init_time_results = xr.open_dataset(
+        metrics_init_time_path
+    ).compute()
+
+    xr.testing.assert_allclose(
+        expected_metrics_init_time_latitude_longitude,
+        metrics_init_time_latitude_longitude_results,
+        atol=1e-5,
+    )
+    xr.testing.assert_allclose(
+        expected_metrics_init_time, metrics_init_time_results, atol=1e-5
+    )
+
+    # Verify explicit mapping aggregation state output paths
+    for name, path in aggregation_state_paths.items():
+      agg_state_results = aggregation.AggregationState.from_dataset(
+          xr.open_dataset(path).compute()
+      )
+      expected_agg_state = aggregators[name].aggregate_statistics(statistics)
+      xarray_tree.map_structure(
+          lambda x, y: xr.testing.assert_allclose(x, y, atol=1e-5),
+          (
+              expected_agg_state.sum_weighted_statistics,
+              expected_agg_state.sum_weights,
+          ),
+          (
+              agg_state_results.sum_weighted_statistics,
+              agg_state_results.sum_weights,
+          ),
+      )
 
   def test_unaggregated_pipeline(self):
     """Test equivalence of unaggregated pipeline results."""
