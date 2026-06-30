@@ -294,25 +294,29 @@ def select_bin_thresholds_by_time_from_chunk(
     Data array containing bin thresholds selected by time.
   """
 
-  if {'init_time', 'lead_time'}.issubset(chunk.dims):
+  if {'init_time', 'lead_time'}.issubset(chunk.coords):
     if 'valid_time' in bin_thresholds.dims:
       bin_thresholds = bin_thresholds.sel(
           valid_time=chunk.init_time + chunk.lead_time
       )
-
     elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
       bin_thresholds = bin_thresholds.sel(
           init_time=chunk.init_time, lead_time=chunk.lead_time
       )
-    elif {'dayofyear', 'lead_time'}.issubset(bin_thresholds.dims):
-      bin_thresholds = bin_thresholds.sel(
-          dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
-      )
+    elif 'dayofyear' in bin_thresholds.dims:
+      if 'lead_time' in bin_thresholds.dims:
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
+        )
+      else:
+        valid_time = chunk.init_time + chunk.lead_time
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=valid_time.dt.dayofyear
+        )
     else:
-      # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
 
-  elif 'valid_time' in chunk.dims:
+  elif 'valid_time' in chunk.coords:
     if 'valid_time' in bin_thresholds.dims:
       bin_thresholds = bin_thresholds.sel(valid_time=chunk.valid_time)
     elif 'dayofyear' in bin_thresholds.dims:
@@ -320,11 +324,9 @@ def select_bin_thresholds_by_time_from_chunk(
           dayofyear=chunk.valid_time.dt.dayofyear
       )
     else:
-      # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
 
   else:
-    # No time dimensions in chunk, so just return thresholds.
     return bin_thresholds
 
   return bin_thresholds.compute()

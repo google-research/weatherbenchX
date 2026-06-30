@@ -279,7 +279,15 @@ class InterpolateToReferenceCoords(Interpolation):
       da_dims_to_retain = set(da.dims) - set(dims)
       return reference.copy().expand_dims({d: da[d] for d in da_dims_to_retain})
 
-    dim_args = {dim: reference[dim] for dim in dims}
+    dim_args = {}
+    for dim in dims:
+      coord = reference[dim]
+      conflicting_coords = [
+          c for c in coord.coords if c in da.dims and c != dim
+      ]
+      if conflicting_coords:
+        coord = coord.drop_vars(conflicting_coords)
+      dim_args[dim] = coord
 
     da_like_reference = interpolate_to_coords(
         da,

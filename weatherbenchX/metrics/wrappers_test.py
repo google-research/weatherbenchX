@@ -396,5 +396,72 @@ class IntersectPredictionAndTargetVariablesTest(parameterized.TestCase):
     self.assertSequenceEqual(list(result.keys()), ['c', 'd'])
 
 
+class SelectBinThresholdsByTimeFromChunkTest(parameterized.TestCase):
+
+  def test_select_dayofyear_from_init_lead_time_chunk(self):
+    init_times = np.array(['2023-01-01', '2023-01-02'], dtype='datetime64[ns]')
+    lead_times = np.array([24, 48], dtype='timedelta64[h]')
+    chunk = xr.DataArray(
+        np.random.rand(2, 2),
+        dims=['init_time', 'lead_time'],
+        coords={'init_time': init_times, 'lead_time': lead_times},
+    )
+
+    doys = np.arange(1, 366)
+    thresholds = xr.DataArray(
+        np.arange(1, 366),
+        dims=['dayofyear'],
+        coords={'dayofyear': doys},
+    )
+
+    selected = wrappers.select_bin_thresholds_by_time_from_chunk(
+        thresholds, chunk
+    )
+
+    expected_doy = np.array([[2, 3], [3, 4]])
+    expected = xr.DataArray(
+        expected_doy,
+        dims=['init_time', 'lead_time'],
+        coords={
+            'init_time': init_times,
+            'lead_time': lead_times,
+            'dayofyear': (['init_time', 'lead_time'], expected_doy),
+        },
+    )
+
+    xr.testing.assert_equal(selected, expected)
+
+  def test_select_dayofyear_from_station_chunk(self):
+    times = np.array(['2023-01-02', '2023-01-03'], dtype='datetime64[ns]')
+    chunk = xr.DataArray(
+        np.random.rand(2),
+        dims=['index'],
+        coords={'time': ('index', times)},
+    )
+
+    doys = np.arange(1, 366)
+    thresholds = xr.DataArray(
+        np.arange(1, 366),
+        dims=['dayofyear'],
+        coords={'dayofyear': doys},
+    )
+
+    selected = wrappers.select_bin_thresholds_by_time_from_chunk(
+        thresholds, chunk
+    )
+
+    expected_doy = np.array([2, 3])
+    expected = xr.DataArray(
+        expected_doy,
+        dims=['index'],
+        coords={
+            'time': ('index', times),
+            'dayofyear': ('index', expected_doy),
+        },
+    )
+
+    xr.testing.assert_equal(selected, expected)
+
+
 if __name__ == '__main__':
   absltest.main()
