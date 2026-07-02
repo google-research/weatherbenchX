@@ -204,7 +204,7 @@ class EnsembleQuantiles(InputTransform):
           ' before applying the EnsembleQuantiles wrapper.'
       )
     result = da.quantile(
-        self._quantiles, dim=self._ensemble_dim, skipna=self._skipna
+        self._quantiles, dim=self._ensemble_dim, skipna=self._skipna  # pyrefly: ignore[bad-argument-type]
     )
     if self._quantile_dim != 'quantile':
       result = result.rename({'quantile': self._quantile_dim})
@@ -785,9 +785,9 @@ class Select(InputTransform):
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     da = da.copy()
     if self._sel is not None:
-      da = da.sel(self._sel, **self._sel_kwargs)
+      da = da.sel(self._sel, **self._sel_kwargs)  # pyrefly: ignore[bad-unpacking]
     if self._isel is not None:
-      da = da.isel(self._isel, **self._isel_kwargs)
+      da = da.isel(self._isel, **self._isel_kwargs)  # pyrefly: ignore[bad-unpacking]
     return da
 
 
@@ -889,7 +889,7 @@ def construct_tiles(
         )
     )
 
-  return windowed
+  return windowed  # pyrefly: ignore[bad-return]
 
 
 class Tile(InputTransform):
@@ -1030,7 +1030,7 @@ class WrappedMetric(base.Metric):
     self.unique_name_suffix = unique_name_suffix
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:  # pyrefly: ignore[bad-override]
     stats = {}
     for name, stat in self.metric.statistics.items():
       # Apply wrappers in reverse order since the last one will be called first
@@ -1096,7 +1096,7 @@ class SubselectVariables(base.Metric):
     self.variables = variables
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:  # pyrefly: ignore[bad-override]
     stats = {}
     for name, stat in self.metric.statistics.items():
       stat = SubselectVariablesForStatistic(stat, self.variables)

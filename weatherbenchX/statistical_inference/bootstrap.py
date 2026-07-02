@@ -230,7 +230,7 @@ class ClusterBootstrap(Bootstrap):
         counts, dim=experimental_unit_dim)
     self._point_estimates = metrics_base.compute_metrics_from_statistics(
         metrics, aggregated_statistics.sum_along_dims(
-            [experimental_unit_dim]).mean_statistics())
+            [experimental_unit_dim]).mean_statistics())  # pyrefly: ignore[bad-argument-type]
     self._resampled_values = metrics_base.compute_metrics_from_statistics(
         metrics, resampled_stats.mean_statistics())
 
@@ -243,11 +243,11 @@ def stationary_bootstrap_indices(
 ) -> np.ndarray:
   """Samples indices for stationary bootstrap, shape (n_data, n_replicates)."""
   end_block_prob = 1/mean_block_length
-  current_indices = np.random.randint(n_data, size=(n_replicates,), dtype=dtype)
+  current_indices = np.random.randint(n_data, size=(n_replicates,), dtype=dtype)  # pyrefly: ignore[no-matching-overload]
   all_indices = [current_indices]
   for _ in range(1, n_data):
     end_block_flags = np.random.rand(n_replicates) < end_block_prob
-    new_random_indices = np.random.randint(
+    new_random_indices = np.random.randint(  # pyrefly: ignore[no-matching-overload]
         n_data, size=(n_replicates,), dtype=dtype)
     # Blocks wrap around in a periodic fashion. This feature of the stationary
     # bootstrap method exists to avoid endpoint bias / ensure that each data

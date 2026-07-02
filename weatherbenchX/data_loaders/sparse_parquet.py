@@ -39,8 +39,8 @@ def get_parquet_files_subset(
     unit = 'h'
   else:
     raise NotImplementedError(f'{partition_by} not implemented.')
-  time_start = np.datetime64(time_start, unit)
-  time_end = np.datetime64(time_end, unit)
+  time_start = np.datetime64(time_start, unit)  # pyrefly: ignore[bad-assignment, no-matching-overload]
+  time_end = np.datetime64(time_end, unit)  # pyrefly: ignore[bad-assignment, no-matching-overload]
   td = np.timedelta64(1, unit)
   times = np.arange(time_start, time_end + td, td)
   files = []
@@ -227,20 +227,20 @@ class SparseObservationsFromParquet(base.DataLoader):
         stop_time = valid_time + lead_time_slice.stop
 
     else:
-      start_time = valid_time + self._tolerance[0]
-      stop_time = valid_time + self._tolerance[1]
+      start_time = valid_time + self._tolerance[0]  # pyrefly: ignore[unsupported-operation]
+      stop_time = valid_time + self._tolerance[1]  # pyrefly: ignore[unsupported-operation]
 
     # Get subset of files since filtering can take a very long time.
     # Also create additional filters to exactly get required times.
     if stop_time is None:
-      file_start_time = start_time - self._file_tolerance
-      file_stop_time = start_time + self._file_tolerance
+      file_start_time = start_time - self._file_tolerance  # pyrefly: ignore[unsupported-operation]
+      file_stop_time = start_time + self._file_tolerance  # pyrefly: ignore[unsupported-operation]
 
       ts = pd.Timestamp(start_time)
       filters = [(self._time_dim, '=', ts)]
 
     else:
-      file_start_time = start_time - self._file_tolerance
+      file_start_time = start_time - self._file_tolerance  # pyrefly: ignore[unsupported-operation]
       file_stop_time = stop_time + self._file_tolerance
 
       ts_start = pd.Timestamp(start_time)
@@ -256,7 +256,7 @@ class SparseObservationsFromParquet(base.DataLoader):
             (self._time_dim, '<', ts_stop),
         ]
     files = get_parquet_files_subset(
-        self._path, file_start_time, file_stop_time, self._partitioned_by
+        self._path, file_start_time, file_stop_time, self._partitioned_by  # pyrefly: ignore[bad-argument-type]
     )
 
     def _read_single_file(fn):
@@ -272,18 +272,18 @@ class SparseObservationsFromParquet(base.DataLoader):
     df = pd.concat([_read_single_file(fn) for fn in files], ignore_index=True)
 
     if self._preprocessing_fn is not None:
-      df = self._preprocessing_fn(df)
+      df = self._preprocessing_fn(df)  # pyrefly: ignore[bad-argument-type]
 
     if self._remove_duplicates:
       assert (
           lead_time_slice is None
       ), 'Removing duplicates not compatible with slice lead_time.'
-      df = self._pick_closest_from_duplicates(df, valid_time)
+      df = self._pick_closest_from_duplicates(df, valid_time)  # pyrefly: ignore[bad-argument-type]
 
     if self._rename_variables is not None:
-      df = df.rename(columns=self._rename_variables)
+      df = df.rename(columns=self._rename_variables)  # pyrefly: ignore[no-matching-overload]
 
-    df = df.rename(columns={self._time_dim: 'valid_time'})
+    df = df.rename(columns={self._time_dim: 'valid_time'})  # pyrefly: ignore[no-matching-overload]
 
     return df.loc[
         :,

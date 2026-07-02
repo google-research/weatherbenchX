@@ -156,7 +156,7 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
     if isinstance(aggregator, aggregation.Aggregator):
       self._aggregators = {None: aggregator}
     else:
-      self._aggregators = aggregator
+      self._aggregators = aggregator  # pyrefly: ignore[bad-assignment]
 
   def process(
       self,
@@ -302,7 +302,7 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
       # since combine_by_coords will return a Dataset in this case.
       if not data_arrays:
         return key, xr.DataArray()
-      return key, xr.combine_by_coords(data_arrays)
+      return key, xr.combine_by_coords(data_arrays)  # pyrefly: ignore[bad-return]
 
     return (
         pcoll
@@ -396,7 +396,7 @@ def _resolve_out_path(
       base, ext = os.path.splitext(out_path)
       return f'{base}_{agg_name}{ext}'
   else:
-    return out_path[agg_name]
+    return out_path[agg_name]  # pyrefly: ignore[bad-index]
 
 
 class WriteMetrics(beam.DoFn):
@@ -416,7 +416,7 @@ class WriteMetrics(beam.DoFn):
     target_path = _resolve_out_path(self.out_path, agg_name)
     beam_utils.atomic_write(
         target_path,
-        metrics.to_netcdf(),
+        metrics.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
     )
     return []
 
@@ -438,7 +438,7 @@ class WriteAggregationState(beam.DoFn):
     target_path = _resolve_out_path(self.out_path, agg_name)
     beam_utils.atomic_write(
         target_path,
-        aggregation_state_ds.to_netcdf(),
+        aggregation_state_ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
     )
     return []
 
@@ -707,7 +707,7 @@ def define_unaggregated_pipeline(
 
   # Use any entries in stat_chunks as defaults for zarr_chunks.
   # Consider raising an error for missing dimensions instead?
-  zarr_chunks = stat_chunks | zarr_chunks
+  zarr_chunks = stat_chunks | zarr_chunks  # pyrefly: ignore[unsupported-operation]
 
   _ = (
       root

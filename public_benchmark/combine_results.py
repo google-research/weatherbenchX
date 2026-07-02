@@ -221,7 +221,7 @@ def _rename_region(region):
 def process_results(model, year, resolution):
   """Process a single results file."""
 
-  fn = path.join(INPUT_DIR.value, f"{model}_{resolution}_{year}.nc")
+  fn = path.join(INPUT_DIR.value, f"{model}_{resolution}_{year}.nc")  # pyrefly: ignore[no-matching-overload]
   try:
     ds = open_nc(fn)
   except Exception:  # pylint: disable=broad-exception-caught
@@ -295,9 +295,9 @@ def main(_):
       "lead_time": -1,
   })
   if MODE.value == "deterministic":
-    results_fn = path.join(OUTPUT_DIR.value, "deterministic.zarr")
+    results_fn = path.join(OUTPUT_DIR.value, "deterministic.zarr")  # pyrefly: ignore[no-matching-overload]
   else:
-    results_fn = path.join(OUTPUT_DIR.value, "probabilistic.zarr")
+    results_fn = path.join(OUTPUT_DIR.value, "probabilistic.zarr")  # pyrefly: ignore[no-matching-overload]
   print(results_fn)
   results.to_zarr(results_fn)
 

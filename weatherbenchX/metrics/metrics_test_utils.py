@@ -52,7 +52,7 @@ class SampleMultivariateMetric(metrics_base.Metric):
   out_name: str
 
   @property
-  def statistics(self) -> Mapping[Hashable, metrics_base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, metrics_base.Statistic]:  # pyrefly: ignore[bad-override]
     return {
         'SampleMultivariateStatistic': SampleMultivariateStatistic(
             var1=self.var1, var2=self.var2, out_name=self.out_name

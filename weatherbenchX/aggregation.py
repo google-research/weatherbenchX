@@ -50,7 +50,7 @@ def combining_sum(data_arrays: Sequence[xr.DataArray]) -> xr.DataArray:
   Returns:
     The results as a DataArray.
   """
-  return sum(xr.align(*data_arrays, join='outer', fill_value=0))
+  return sum(xr.align(*data_arrays, join='outer', fill_value=0))  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
@@ -171,7 +171,7 @@ class AggregationState:
       self, *arrays: xr.DataArray, dim: Hashable | Sequence[Hashable]
       ) -> 'AggregationState':
     """Dot product of all stats with other arrays, over the given dimensions."""
-    return self.map(lambda x: xr.dot(x, *arrays, dim=dim))
+    return self.map(lambda x: xr.dot(x, *arrays, dim=dim))  # pyrefly: ignore[bad-argument-type]
 
   @classmethod
   def map_multi(

@@ -176,7 +176,7 @@ def main(argv: Sequence[str]) -> None:
       'global': ((-90, 90), (0, 360)),
       'northern-hemisphere': ((20, 90), (0, 360)),
   }
-  bin_by = [binning.Regions(regions)]
+  bin_by = [binning.Regions(regions)]  # pyrefly: ignore[bad-argument-type]
 
   aggregation_method = aggregation.Aggregator(
       reduce_dims=REDUCE_DIMS.value,

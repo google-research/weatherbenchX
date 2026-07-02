@@ -127,9 +127,9 @@ class XarrayDataLoader(base.DataLoader):
         self._ds = xr.open_dataset(self._path)
 
     if self._preprocessing_fn is not None:
-      self._ds = self._preprocessing_fn(self._ds)
+      self._ds = self._preprocessing_fn(self._ds)  # pyrefly: ignore[bad-argument-type]
     self._ds = _rename_dataset(
-        self._ds,
+        self._ds,  # pyrefly: ignore[bad-argument-type]
         self._rename_dimensions,
         self._rename_variables,
         self._automatically_convert_lat_lon_to_latitude_longitude,
@@ -308,10 +308,10 @@ class ClimatologyFromXarray(XarrayDataLoader):
       )
     # No lead time slice, in this case treat the init times as valid times.
     else:
-      init_times = xr.DataArray(init_times, coords={'init_time': init_times})
+      init_times = xr.DataArray(init_times, coords={'init_time': init_times})  # pyrefly: ignore[bad-assignment]
       sel_kwargs = {}
       for coord in self._climatology_time_coords:
-        sel_kwargs[coord] = getattr(init_times.dt, coord)
+        sel_kwargs[coord] = getattr(init_times.dt, coord)  # pyrefly: ignore[missing-attribute]
     chunk = self._ds.sel(sel_kwargs)
     return chunk
 
@@ -382,10 +382,10 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
       raise ValueError(
           'Exact lead times must be specified for persistence data loader.'
       )
-    init_times = xr.DataArray(
+    init_times = xr.DataArray(  # pyrefly: ignore[bad-assignment]
         init_times, dims=['init_time'], coords={'init_time': init_times}
     )
-    lead_times = xr.DataArray(
+    lead_times = xr.DataArray(  # pyrefly: ignore[bad-assignment]
         lead_times, dims=['lead_time'], coords={'lead_time': lead_times}
     )
     valid_times = init_times + lead_times

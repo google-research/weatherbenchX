@@ -930,12 +930,12 @@ class Opportunism(base.PerVariableMetric):
     # Conditionally compute coverage and jaccard-distance if they're actually
     # being used.
     if self._is_covered is not None:
-      statistics['Covered'] = Covered(
+      statistics['Covered'] = Covered(  # pyrefly: ignore[bad-assignment]
           ensemble_dim=self._ensemble_dim,
           interval_quantile_boundaries=self._coverage_quantile_boundaries,
       )
     if self._is_jaccard_distant is not None:
-      statistics['JaccardDistant'] = JaccardDistant(
+      statistics['JaccardDistant'] = JaccardDistant(  # pyrefly: ignore[bad-assignment]
           ensemble_dim=self._ensemble_dim,
           climatology=self._climatology,
           threshold=self._jaccard_distance_threshold,

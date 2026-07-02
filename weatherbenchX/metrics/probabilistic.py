@@ -159,7 +159,7 @@ def _rankdata(x: np.ndarray, axis: int) -> np.ndarray:
 
 
 def _rank_da(da: xr.DataArray, dim: str) -> np.ndarray:
-  return da.copy(data=_rankdata(da.values, axis=da.dims.index(dim)))
+  return da.copy(data=_rankdata(da.values, axis=da.dims.index(dim)))  # pyrefly: ignore[bad-return]
 
 
 class CRPSSpread(base.PerVariableStatistic):
@@ -232,7 +232,7 @@ class CRPSSpread(base.PerVariableStatistic):
       return (
           2
           * (
-              ((2 * rank - n_ensemble - 1) * da).mean(
+              ((2 * rank - n_ensemble - 1) * da).mean(  # pyrefly: ignore[no-matching-overload]
                   self._ensemble_dim, skipna=False
               )
           )
@@ -499,7 +499,7 @@ class EnergyScoreSkill(base.PerVariableStatistic):
       self, predictions: xr.DataArray, targets: xr.DataArray
   ) -> xr.DataArray:
     return np.sqrt(
-        np.square(predictions - targets).sum(dim=self._dim, skipna=False)
+        np.square(predictions - targets).sum(dim=self._dim, skipna=False)  # pyrefly: ignore[no-matching-overload]
     ).mean(dim=self._ensemble_dim)
 
 
@@ -540,7 +540,7 @@ class EnergyScoreSpread(base.PerVariableStatistic):
 
     return (
         np.sqrt(
-            np.square(predictions - predictions_prime).sum(
+            np.square(predictions - predictions_prime).sum(  # pyrefly: ignore[no-matching-overload]
                 dim=self._dim, skipna=False
             )
         ).sum(
@@ -593,7 +593,7 @@ class VariogramScore(base.PerVariableStatistic):
     targets_term = np.abs(targets_prime - targets) ** self._p
     predictions_term = (
         np.abs(predictions_prime - predictions) ** self._p
-    ).mean(dim=self._ensemble_dim, skipna=False)
+    ).mean(dim=self._ensemble_dim, skipna=False)  # pyrefly: ignore[no-matching-overload]
 
     return np.square(targets_term - predictions_term).sum(
         dim=[self._dim, self._dim + '_prime'], skipna=False
@@ -1156,11 +1156,11 @@ class RelativeEconomicValue(base.Metric):
 
     self._thresholds = probability_thresholds
     if self._thresholds is None:
-      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
+      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size  # pyrefly: ignore[no-matching-overload]
       if statistic_suffix is None:
         statistic_suffix = 'all_thresholds_for_ensemble_size'
-    if not np.all(self._thresholds >= 0.0) or not np.all(
-        self._thresholds <= 1.0
+    if not np.all(self._thresholds >= 0.0) or not np.all(  # pyrefly: ignore[unsupported-operation]
+        self._thresholds <= 1.0  # pyrefly: ignore[unsupported-operation]
     ):
       raise ValueError(
           f'Probability thresholds must be in [0, 1], got {self._thresholds=}.'
@@ -1191,7 +1191,7 @@ class RelativeEconomicValue(base.Metric):
   def statistics(self) -> Mapping[str, base.Statistic]:
     binarize = wrappers.ContinuousToBinary(
         which='predictions',
-        threshold_value=self._thresholds,
+        threshold_value=self._thresholds,  # pyrefly: ignore[bad-argument-type]
         threshold_dim='threshold',
         unique_name_suffix=self._unique_name_suffix,
     )
@@ -1249,7 +1249,7 @@ class RelativeEconomicValue(base.Metric):
           s: statistic_values[s][var_name] for s in self.statistics
       }
       values[var_name] = self._values_from_mean_statistics_per_variable(
-          stats_per_variable, var_name
+          stats_per_variable, var_name  # pyrefly: ignore[bad-argument-type]
       )
     return values
 
@@ -1385,7 +1385,7 @@ class EnergyScore(base.PerVariableMetric):
   def statistics(self) -> Mapping[str, base.Statistic]:
     return {
         'EnergyScoreSkill': EnergyScoreSkill(
-            dim=self._dim,
+            dim=self._dim,  # pyrefly: ignore[bad-argument-type]
             ensemble_dim=self._ensemble_dim,
         ),
         'EnergyScoreSpread': EnergyScoreSpread(

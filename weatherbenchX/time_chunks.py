@@ -197,6 +197,6 @@ class TimeChunks(Iterable[TimeChunk]):
     """
     for index, (init_chunk, lead_chunk) in enumerate(self):
       init_index = self._init_time_chunk_size * (index // self._num_lead_chunks)
-      lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)
+      lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)  # pyrefly: ignore[unsupported-operation]
       offsets = TimeChunkOffsets(init_time=init_index, lead_time=lead_index)
       yield offsets, (init_chunk, lead_chunk)

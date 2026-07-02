@@ -97,7 +97,7 @@ def _inflation_factor_from_ar2_autocorrelation(
   phi1 = (rho1 * (1 - rho2)) / denominator
   phi2 = (rho2 - rho1**2) / denominator
   k_squared = (1 - rho1 * phi1 - rho2 * phi2) / (1 - phi1 - phi2)**2
-  return np.sqrt(k_squared)
+  return np.sqrt(k_squared)  # pyrefly: ignore[bad-return]
 
 
 def _inflation_factor_from_ar2_coeffs(
@@ -105,7 +105,7 @@ def _inflation_factor_from_ar2_coeffs(
   rho1 = phi1 / (1 - phi2)
   rho2 = phi2 + phi1**2 / (1 - phi2)
   k_squared = (1 - rho1 * phi1 - rho2 * phi2) / (1 - phi1 - phi2)**2
-  return np.sqrt(k_squared)
+  return np.sqrt(k_squared)  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass(frozen=True)

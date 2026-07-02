@@ -132,7 +132,7 @@ REGIONS = {
 
 
 def main(argv: Sequence[str]) -> None:
-  configs = importlib.import_module(CONFIG.value)
+  configs = importlib.import_module(CONFIG.value)  # pyrefly: ignore[bad-argument-type]
 
   ##############################################################################
   # 1. Get data loaders
@@ -235,7 +235,7 @@ def main(argv: Sequence[str]) -> None:
       # Last day is missing for baguan
       init_time_stop = f'{YEAR.value}-12-30T12'
     else:
-      init_time_stop = f'{int(YEAR.value) + 1}-01-01T00'
+      init_time_stop = f'{int(YEAR.value) + 1}-01-01T00'  # pyrefly: ignore[bad-argument-type]
     init_time_str = str(YEAR.value)
   else:
     init_time_start = INIT_TIME_START.value
@@ -323,7 +323,7 @@ def main(argv: Sequence[str]) -> None:
     v_names.append('10m_v_component_of_wind')
     vector_names.append('10m_wind')
   if u_names:
-    deterministic_metrics['vector_rmse'] = deterministic.WindVectorRMSE(
+    deterministic_metrics['vector_rmse'] = deterministic.WindVectorRMSE(  # pyrefly: ignore[bad-assignment]
         u_names, v_names, vector_names
     )
 
@@ -332,7 +332,7 @@ def main(argv: Sequence[str]) -> None:
         'total_precipitation_6hr': 0.1,
         'total_precipitation_24hr': 0.25,
     }
-    deterministic_metrics['seeps'] = categorical.SEEPS(
+    deterministic_metrics['seeps'] = categorical.SEEPS(  # pyrefly: ignore[bad-assignment]
         variables=precip_variables,
         climatology=climatology,
         dry_threshold_mm=[seeps_dry_thresholds[v] for v in precip_variables],
@@ -366,7 +366,7 @@ def main(argv: Sequence[str]) -> None:
   land_sea_mask = xr.open_zarr(
       target_configs[f'era5_{RESOLUTION.value}']['path']
   )['land_sea_mask'].compute()
-  bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]
+  bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]  # pyrefly: ignore[bad-argument-type]
 
   if TEMPORAL.value:
     reduce_dims = ['latitude', 'longitude']
@@ -390,7 +390,7 @@ def main(argv: Sequence[str]) -> None:
   if TEMPORAL.value:
     filename += '_temporal'
   filename += '.nc'
-  out_path = os.path.join(OUTPUT_DIR.value, filename)
+  out_path = os.path.join(OUTPUT_DIR.value, filename)  # pyrefly: ignore[no-matching-overload]
   print(f'Save path: {out_path}')
 
   with beam.Pipeline(runner=RUNNER.value, argv=argv) as root:

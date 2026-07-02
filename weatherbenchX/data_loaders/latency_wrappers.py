@@ -104,7 +104,7 @@ class ConstantLatencyWrapper(base.DataLoader):
       init_time: The requested initialization time.
     """
     issue_time = self.nominal_init_times + self.latency
-    diff = (issue_time - init_time).astype(int)
+    diff = (issue_time - init_time).astype(int)  # pyrefly: ignore[unsupported-operation]
     # Find index of issue time that is closest to requested init_time.
     # on the left, i.e. with issue_time > nominal init_time.
     diff = np.where(diff <= 0, diff, np.nan)
@@ -214,7 +214,7 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
       return
     assert isinstance(self.data_loader, xarray_loaders.XarrayDataLoader)
     self.data_loader.maybe_prepare_dataset()
-    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access
+    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access  # pyrefly: ignore[unsupported-operation]
     self._nominal_init_times_set = True
 
   def _load_chunk_from_source(
@@ -227,7 +227,7 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
 
   def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
     self.maybe_set_nominal_init_times()
-    return super().get_available_init_time(init_time)
+    return super().get_available_init_time(init_time)  # pyrefly: ignore[bad-return]
 
 
 class MultipleConstantLatencyWrapper(base.DataLoader):

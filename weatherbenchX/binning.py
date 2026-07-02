@@ -57,7 +57,7 @@ def _create_lat_mask(
     raise ValueError(
         f'`lat_lims[0]` must be smaller than `lat_lims[1]`, got {lat_lims}`'
     )
-  return np.logical_and(lat >= lat_lims[0], lat <= lat_lims[1])
+  return np.logical_and(lat >= lat_lims[0], lat <= lat_lims[1])  # pyrefly: ignore[bad-return]
 
 
 def _create_lon_mask(
@@ -65,7 +65,7 @@ def _create_lon_mask(
 ) -> xr.DataArray:
   """Computes a boolean mask for a longitude limits region."""
   # Make sure we are in the [0, 360] interval.
-  lon = np.mod(lon, 360)
+  lon = np.mod(lon, 360)  # pyrefly: ignore[bad-assignment]
   lon_lims = np.mod(lon_lims[0], 360), np.mod(lon_lims[1], 360)
   if lon_lims[1] > lon_lims[0]:
     # Same as the latitude.
@@ -86,7 +86,7 @@ def _region_to_mask(
   """Computes a boolean mask for a lat/lon limits region."""
   lat_mask = _create_lat_mask(lat, lat_lims)
   lon_mask = _create_lon_mask(lon, lon_lims)
-  return np.logical_and(lat_mask, lon_mask)
+  return np.logical_and(lat_mask, lon_mask)  # pyrefly: ignore[bad-return]
 
 
 class LandSea(Binning):
@@ -181,7 +181,7 @@ class Regions(Binning):
       mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
       mask.coords[self.bin_dim_name] = np.array([region_name])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)
+    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
 
   def create_bin_mask(
       self,
@@ -240,7 +240,7 @@ class LatitudeBins(Binning):
       mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
       mask.coords[self.bin_dim_name] = np.array([lat_start])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)
+    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 class LongitudeBins(Binning):
@@ -285,7 +285,7 @@ class LongitudeBins(Binning):
       mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
       mask.coords[self.bin_dim_name] = np.array([np.mod(lon_start, 360)])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)
+    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 def vectorized_coord_mask(
@@ -307,7 +307,7 @@ def vectorized_coord_mask(
   if add_global_bin:
     mask = (
         xr.ones_like(coord.astype(bool))
-        .drop(coord_name)  # Drop the coordinate
+        .drop(coord_name)  # Drop the coordinate  # pyrefly: ignore[bad-argument-type]
         .expand_dims(bin_dim_name)  # Add as a dimension
     )
     mask.coords[bin_dim_name] = ['global']
@@ -511,7 +511,7 @@ class ByTimeUnitSets(Binning):
       mask.coords[self.bin_dim_name] = ['global']
       masks.append(mask)
 
-    return xr.concat(masks, self.bin_dim_name)
+    return xr.concat(masks, self.bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 class ByTimeUnitFromSeconds(Binning):
@@ -614,7 +614,7 @@ class ByCoordBins(Binning):
 
     if self.add_global_bin:
       mask = xr.full_like(statistic.coords[self.dim_name], True, dtype=bool)
-      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
+      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)  # pyrefly: ignore[missing-attribute]
       mask.coords[self.dim_name] = ['global']
       masks.append(mask)
 
@@ -622,7 +622,7 @@ class ByCoordBins(Binning):
       dtype = statistic[self.dim_name].dtype
       masks = (
           xr.ones_like(statistic)
-          .drop(self.dim_name)
+          .drop(self.dim_name)  # pyrefly: ignore[bad-argument-type]
           .expand_dims(
               {
                   self.dim_name: (
@@ -634,7 +634,7 @@ class ByCoordBins(Binning):
       )
       return masks
     else:
-      return xr.concat(masks, self.dim_name)
+      return xr.concat(masks, self.dim_name)  # pyrefly: ignore[bad-return]
 
 
 class BySets(Binning):
@@ -702,4 +702,4 @@ class BySets(Binning):
       )  # Add as a dimension
       mask.coords[self.bin_dim_name] = ['global']
       masks.append(mask)
-    return xr.concat(masks, self.bin_dim_name)
+    return xr.concat(masks, self.bin_dim_name)  # pyrefly: ignore[bad-return]

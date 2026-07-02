@@ -106,8 +106,8 @@ def interpolate_to_coords(
     interp_kwargs = None
 
   out = da.interp(
-      **dim_args,
-      method=method,
+      **dim_args,  # pyrefly: ignore[bad-argument-type]
+      method=method,  # pyrefly: ignore[bad-argument-type]
       kwargs=interp_kwargs,
   )  # pytype: disable=wrong-arg-types
   return out
@@ -250,7 +250,7 @@ class InterpolateToReferenceCoords(Interpolation):
     self._clip_reference_coords = clip_reference_coords
     self._extrapolate_out_of_bounds = extrapolate_out_of_bounds
 
-  def interpolate_data_array(
+  def interpolate_data_array(  # pyrefly: ignore[bad-override]
       self,
       da: xr.DataArray,
       reference: xr.DataArray,  # pytype: disable=signature-mismatch
@@ -283,7 +283,7 @@ class InterpolateToReferenceCoords(Interpolation):
 
     da_like_reference = interpolate_to_coords(
         da,
-        dim_args,
+        dim_args,  # pyrefly: ignore[bad-argument-type]
         self._method,
         self._extrapolate_out_of_bounds,
     )
@@ -432,7 +432,7 @@ class NeighborhoodThresholdProbabilities(Interpolation):
             self._neighborhood_sizes, dims=['smoothing_neighborhood']
         ),
     )
-    return out
+    return out  # pyrefly: ignore[bad-return]
 
 
 class Subsample(Interpolation):
@@ -468,4 +468,4 @@ class Subsample(Interpolation):
         for dim in self._dims
         if dim in da.dims
     }
-    return da.isel(**isel_kwargs)
+    return da.isel(**isel_kwargs)  # pyrefly: ignore[bad-argument-type]
