@@ -39,7 +39,7 @@ class BinningTest(parameterized.TestCase):
 
     bins = binning.Regions(regions=regions)
     # Since predictions and targets aren't used, just use the same array.
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     self.assertEqual(mask.shape, (1,) + statistic_base_shape)
 
     regions = {
@@ -48,7 +48,7 @@ class BinningTest(parameterized.TestCase):
     }
 
     bins = binning.Regions(regions=regions)
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     self.assertEqual(mask.shape, (2,) + statistic_base_shape)
 
     # With a land_sea_mask
@@ -56,7 +56,7 @@ class BinningTest(parameterized.TestCase):
         mask.latitude > 0, False
     )
     bins = binning.Regions(regions=regions, land_sea_mask=land_sea_mask)
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     self.assertEqual(mask.shape, (4,) + statistic_base_shape)
 
   def test_by_exact_coord_binning(self):
@@ -84,15 +84,15 @@ class BinningTest(parameterized.TestCase):
     ]
 
     bins = binning.ByExactCoord(coord='lead_time')
-    mask = bins.create_bin_mask(statistic)
+    mask = bins.weights(statistic)
     np.testing.assert_allclose(mask.lead_time, lead_times)
 
     bins = binning.ByExactCoord(coord='stationName', add_global_bin=True)
-    mask = bins.create_bin_mask(statistic)
+    mask = bins.weights(statistic)
     self.assertLen(mask.stationName, len(np.unique(statistic.stationName)) + 1)
 
     # Test empty input
-    mask = bins.create_bin_mask(statistic.isel(index=[]))
+    mask = bins.weights(statistic.isel(index=[]))
     self.assertEqual(mask.size, 0)
 
   def test_by_time_unit_binning_with_with_datetime64(self):
@@ -102,7 +102,7 @@ class BinningTest(parameterized.TestCase):
         time_resolution='1 hr',
     )['2m_temperature']
     bins = binning.ByTimeUnit('hour', 'time')
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     np.testing.assert_equal(mask.time_hour, np.arange(0, 12))
 
   @parameterized.parameters(
@@ -125,7 +125,7 @@ class BinningTest(parameterized.TestCase):
         lead_stop=lead_stop,
     )['2m_temperature']
     bins = binning.ByTimeUnit(unit, 'prediction_timedelta')
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     np.testing.assert_equal(
         mask[f'prediction_timedelta_{unit}'], np.arange(0, 6 + 1)
     )
@@ -146,7 +146,7 @@ class BinningTest(parameterized.TestCase):
     bins = binning.ByTimeUnitFromSeconds(
         'hour', 'prediction_timedelta_sec', bins=np.arange(6)
     )
-    mask = bins.create_bin_mask(statistic_values)
+    mask = bins.weights(statistic_values)
     np.testing.assert_equal(
         mask['prediction_timedelta_sec_hour'], np.arange(0, 6)
     )
@@ -177,7 +177,7 @@ class BinningTest(parameterized.TestCase):
     binning_obj = binning.ByTimeUnitFromSeconds(
         unit, 'prediction_timedelta_sec', bins=bins
     )
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
     np.testing.assert_array_equal(
         mask[f'prediction_timedelta_sec_{unit}'].values, expected_bins
     )
@@ -207,7 +207,7 @@ class BinningTest(parameterized.TestCase):
     bins = binning.ByCoordBins(
         'lead_time', np.arange(1, 7, dtype='timedelta64[h]')
     )
-    mask = bins.create_bin_mask(statistic)
+    mask = bins.weights(statistic)
     self.assertTrue(np.all(mask.mean('index') > 0))
 
   def test_by_sets(self):
@@ -247,7 +247,7 @@ class BinningTest(parameterized.TestCase):
         add_global_bin=True,
     )
 
-    mask = bins.create_bin_mask(statistic)
+    mask = bins.weights(statistic)
     self.assertLen(mask.station_subset, 6)
     self.assertGreaterEqual(mask.sum('index').sel(station_subset='set1'), 10)
     self.assertGreaterEqual(mask.sum('index').sel(station_subset='set2'), 10)
@@ -269,7 +269,7 @@ class BinningTest(parameterized.TestCase):
         time_start='2020-01-01T00', time_stop='2020-01-01T01'
     )['2m_temperature']
     binning_obj = binning.LatitudeBins(degrees, lat_range)
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
     self.assertEqual(mask.latitude_bins.shape[0], expected_bins)
     self.assertTrue(np.all(mask.latitude_bins.values >= lat_range[0]))
     self.assertTrue(np.all(mask.latitude_bins.values < lat_range[1]))
@@ -306,7 +306,7 @@ class BinningTest(parameterized.TestCase):
         time_start='2020-01-01T00', time_stop='2020-01-01T01'
     )['2m_temperature']
     binning_obj = binning.LongitudeBins(degrees, lon_range)
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
     self.assertEqual(mask.longitude_bins.shape[0], expected_bins)
     self.assertEqual(mask.shape, (expected_bins,) + statistic_values.shape)
     # Check wrapping
@@ -342,7 +342,7 @@ class BinningTest(parameterized.TestCase):
         dim='time',
         bin_dim_name='init_hour_sets',
     )
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
 
     self.assertEqual(mask.init_hour_sets.shape[0], 2)
     np.testing.assert_array_equal(
@@ -366,11 +366,12 @@ class BinningTest(parameterized.TestCase):
         unit='hour',
         dim='prediction_timedelta',
     )
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
+    bin_dim_name = binning_obj.added_dims[0]
 
-    self.assertEqual(mask[binning_obj.bin_dim_name].shape[0], 2)
-    short_mask = mask.sel(**{binning_obj.bin_dim_name: 'short'})
-    long_mask = mask.sel(**{binning_obj.bin_dim_name: 'long'})
+    self.assertEqual(mask[bin_dim_name].shape[0], 2)
+    short_mask = mask.sel(**{bin_dim_name: 'short'})
+    long_mask = mask.sel(**{bin_dim_name: 'long'})
     self.assertEqual(short_mask.sum('prediction_timedelta').item(), 2)
     self.assertEqual(long_mask.sum('prediction_timedelta').item(), 3)
 
@@ -386,11 +387,12 @@ class BinningTest(parameterized.TestCase):
         dim='time',
         add_global_bin=True,
     )
-    mask = binning_obj.create_bin_mask(statistic_values)
+    mask = binning_obj.weights(statistic_values)
+    bin_dim_name = binning_obj.added_dims[0]
 
-    self.assertLen(mask[binning_obj.bin_dim_name], 2)
-    self.assertIn('global', mask[binning_obj.bin_dim_name].values)
-    self.assertTrue(mask.sel(**{binning_obj.bin_dim_name: 'global'}).all())
+    self.assertLen(mask[bin_dim_name], 2)
+    self.assertIn('global', mask[bin_dim_name].values)
+    self.assertTrue(mask.sel(**{bin_dim_name: 'global'}).all())
 
 
 if __name__ == '__main__':
