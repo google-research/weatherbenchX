@@ -16,8 +16,8 @@
 import collections
 import dataclasses
 from typing import Any, Callable, Collection, Hashable, Iterable, Mapping, Sequence
+import warnings
 
-from weatherbenchX import binning
 from weatherbenchX import weighting
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base as metrics_base
@@ -272,8 +272,18 @@ class Aggregator:
   Attributes:
     reduce_dims: Dimensions to average over. Any variables that don't have these
       dimensions will be filtered out during aggregation.
-    bin_by: List of binning instances. All bins will be multiplied.
-    weigh_by: List of weighting instance. All weights will be multiplied.
+    weightings: List of weighting instances, each of which can specify one or
+      more weightings of statistics to compute during aggregation..
+      Important special cases of this are things like area weighting, masking,
+      and binning (implemented as a binary mask weighting for each bin).
+      Weightings are all applied multiplicatively before reducing over the
+      `reduce_dims`, in a single xr.dot. They can add new dimensions (e.g. for
+      different bins) and if multiple weightings do this, we end up with the
+      Cartesian product of all the added dimensions.
+    bin_by: Deprecated. List of weightings that perform binning. Please specify
+      these as `weightings` instead.
+    weigh_by: Deprecated. List of simple weightings that don't add new
+      dimensions. Please specify these as `weightings` instead.
     masked: If True, aggregation will only be performed for non-masked (True on
       the mask) values. This requires a 'mask' coordinate on the statistics
       passed to aggregate_statistics.
@@ -282,10 +292,35 @@ class Aggregator:
   """
 
   reduce_dims: Collection[str]
-  bin_by: Sequence[binning.Binning] | None = None
-  weigh_by: Sequence[weighting.Weighting] | None = None
+  weightings: Sequence[weighting.Weighting] = ()
+  bin_by: dataclasses.InitVar[Sequence[weighting.Weighting] | None] = None
+  weigh_by: dataclasses.InitVar[Sequence[weighting.Weighting] | None] = None
   masked: bool = False
   skipna: bool = False
+
+  def __post_init__(
+      self,
+      bin_by: Sequence[weighting.Weighting] | None,
+      weigh_by: Sequence[weighting.Weighting] | None,
+  ):
+    weightings = list(self.weightings)
+    if bin_by is not None:
+      warnings.warn(
+          'bin_by is deprecated and will be removed in a future version. '
+          'Please use weightings instead.',
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      weightings.extend(bin_by)
+    if weigh_by is not None:
+      warnings.warn(
+          'weigh_by is deprecated and will be removed in a future version. '
+          'Please use weightings instead.',
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      weightings.extend(weigh_by)
+    self.weightings = tuple(weightings)
 
   def aggregation_fn(
       self,
@@ -301,31 +336,30 @@ class Aggregator:
       # Can't reduce over dims that aren't present as evaluation unit dims.
       return None
 
-    weights = [
-        weighting_method.weights(stat)
-        for weighting_method in self.weigh_by or []
-    ]
+    all_added_dims = []
+    for w in self.weightings:
+      all_added_dims.extend(w.added_dims)
 
-    bin_dim_names = {binning.bin_dim_name for binning in self.bin_by or []}
-    if len(bin_dim_names) != len(self.bin_by or []):
-      raise ValueError('Bin dimension names must be unique.')
+    if len(set(all_added_dims)) != len(all_added_dims):
+      raise ValueError('Added dimension names must be unique.')
 
-    bin_masks = []
-    for binning_method in self.bin_by or []:
-      bin_mask = binning_method.create_bin_mask(stat)
-      # bin_masks_dims are all of the dims the mask operate with on the input
-      # data (e.g. the actual bin dimension does not count).
-      bin_masks_dims = set(bin_mask.dims) - {binning_method.bin_dim_name}
-      if bin_masks_dims.issubset(eval_unit_dims):
-        bin_masks.append(bin_mask)
+    applied_weights = []
+    for w_method in self.weightings:
+      weights = w_method.weights(stat)
+      # Dimensions of the weights that are expected to be present in the
+      # statistic:
+      w_dims_to_check = set(weights.dims) - set(w_method.added_dims)
+      if w_dims_to_check.issubset(eval_unit_dims):
+        applied_weights.append(weights)
       else:
-        # Can't bin based on dims that aren't present as evaluation unit dims:
+        # Can't apply weighting based on dims that aren't present as evaluation
+        # unit dims:
         return None
 
     # Some downstream code relies on attrs on statistics being preserved, which
     # xr.dot will not do by default.
     with xr.set_options(keep_attrs=True):
-      return xr.dot(stat, *weights, *bin_masks, dim=reduce_dims_set)
+      return xr.dot(stat, *applied_weights, dim=reduce_dims_set)
 
   def aggregate_stat_var(self, stat: xr.DataArray) -> AggregationState | None:
     """Aggregate one statistic DataArray for one variable."""

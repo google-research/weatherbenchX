@@ -38,8 +38,26 @@ class Weighting(abc.ABC):
       statistic: Individual DataArray with statistic values.
 
     Returns:
-      weights: Weights that should broadcast against statistic dimensions.
+      weights: Weights whose dimensions should (with the exception of any
+        added_dims) align with correspoding dimensions of the statistics.
+        (Where they don't, aggregation will skip this statistic.)
     """
+
+  @property
+  def added_dims(self) -> Sequence[str]:
+    """List of new dimensions added by this weighting.
+
+    These should be dimensions present in the returned `weights` that are not
+    present in the input `statistic`. Where weights contain added_dims, you
+    can think of them as performing a separate weighting for each slice along
+    the added_dims.
+
+    It's used for two kinds of checks:
+    * That multiple Weightings don't try to add the same dimension.
+    * That the `statistic` actually contains any non-added dimensions of the
+      weights that are expected to line up with it.
+    """
+    return []
 
 
 def _is_strictly_monotonic(vector):
@@ -209,6 +227,12 @@ class StationDensityWeighting(Weighting):
   longitude_name: str = 'longitude'
   return_normalized: bool = True
   max_weight: float | None = None
+
+  @property
+  def added_dims(self) -> Sequence[str]:
+    if np.ndim(self.alpha_0_degrees) > 0:
+      return ['weighting_alpha_0']
+    return []
 
   def weights(
       self,
