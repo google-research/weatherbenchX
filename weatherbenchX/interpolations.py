@@ -304,6 +304,12 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
   the reference dataset. Requires passing a DataArray with the grid elevation
   corresponding to the dataset to be interpolated. Variables must be named
   '2m_temperature' and '10m_wind_speed'. Other variables will be left unchanged.
+
+  Note:
+    The same interpolation is applied to the grid_elevation as to the data,
+    so in the case of linear interpolation, the elevation difference will also
+    be based on the grid elevation linearly interpolated to the reference
+    coordinates.
   """
 
   def __init__(
@@ -351,7 +357,10 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
       da.coords['grid_elevation'] = self._grid_elevation.compute()
 
     da_like_reference = super().interpolate_data_array(da, reference)
-    if da.name in ['2m_temperature', '10m_wind_speed']:
+    if (
+        da.name in ['2m_temperature', '10m_wind_speed']
+        and da_like_reference.size > 0
+    ):
       # Positive if station is higher than grid.
       sparse_higher_than_grid_m = (
           da_like_reference['elevation'] - da_like_reference['grid_elevation']
