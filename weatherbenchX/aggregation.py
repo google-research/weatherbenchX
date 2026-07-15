@@ -50,7 +50,14 @@ def combining_sum(data_arrays: Sequence[xr.DataArray]) -> xr.DataArray:
   Returns:
     The results as a DataArray.
   """
-  return sum(xr.align(*data_arrays, join='outer', fill_value=0))  # pyrefly: ignore[bad-return]
+  if not data_arrays:
+    return sum([])  # pyrefly: ignore[bad-return]
+
+  result = data_arrays[0]
+  for da in data_arrays[1:]:
+    aligned_result, aligned_da = xr.align(result, da, join='outer', fill_value=0)
+    result = aligned_result + aligned_da
+  return result
 
 
 @dataclasses.dataclass
