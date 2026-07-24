@@ -135,7 +135,23 @@ class XarrayDataLoader(base.DataLoader):
         self._automatically_convert_lat_lon_to_latitude_longitude,
     )
     if self._variables is not None:
-      self._ds = self._ds[list(self._variables)]
+      requested = list(self._variables)
+      available = [v for v in requested if v in self._ds]
+      missing = [v for v in requested if v not in self._ds]
+      if missing:
+        logging.warning(
+            'Dataset at %s is missing requested variables %s. Continuing with'
+            ' available: %s',
+            self._path,
+            missing,
+            available,
+        )
+      if not available:
+        raise KeyError(
+            f'None of the requested variables {requested} were found in dataset'
+            f' at {self._path}.'
+        )
+      self._ds = self._ds[available]
     if self._sel_kwargs is not None:
       self._ds = self._ds.sel(**self._sel_kwargs)
     self._preprocessed = True
