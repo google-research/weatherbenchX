@@ -19,9 +19,11 @@ import os
 import time
 import typing
 from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
+import uuid
 
 from absl import logging
 import apache_beam as beam
+import fsspec
 import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import beam_utils
@@ -40,6 +42,7 @@ class LoadPredictionsAndTargets(beam.DoFn):
       predictions_loader: data_loaders_base.DataLoader,
       targets_loader: data_loaders_base.DataLoader,
       setup_fn: Optional[Callable[[], None]] = None,
+      ignore_missing_variables: bool = False,
   ):
     """Init.
 
@@ -47,10 +50,14 @@ class LoadPredictionsAndTargets(beam.DoFn):
       predictions_loader: The data loader for the predictions.
       targets_loader: The data loader for the targets.
       setup_fn: (Optional) A function to call once per worker.
+      ignore_missing_variables: (Optional) If True, filter targets and
+        predictions chunks to their common variables, logging a warning for any
+        missing variables. If False (default), keep loaded variables as-is.
     """
     self.predictions_loader = predictions_loader
     self.targets_loader = targets_loader
     self.setup_fn = setup_fn
+    self.ignore_missing_variables = ignore_missing_variables
     self.is_initialized = False
     self.target_load_time = beam.metrics.Metrics.distribution(
         'LoadPredictionsAndTargets', 'target_load_time'
@@ -107,6 +114,32 @@ class LoadPredictionsAndTargets(beam.DoFn):
         (time.time() - start_time) * 1000
     )  # In milliseconds because beam counters use longs.
 
+    if self.ignore_missing_variables:
+      common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
+      if len(common_vars) < len(targets_chunk) or len(common_vars) < len(
+          predictions_chunk
+      ):
+        missing_in_preds = set(targets_chunk.keys()) - set(
+            predictions_chunk.keys()
+        )
+        missing_in_targets = set(predictions_chunk.keys()) - set(
+            targets_chunk.keys()
+        )
+        if missing_in_preds:
+          logging.warning(
+              'Targets chunk has variables not present in predictions'
+              ' chunk: %s',
+              missing_in_preds,
+          )
+        if missing_in_targets:
+          logging.warning(
+              'Predictions chunk has variables not present in targets'
+              ' chunk: %s',
+              missing_in_targets,
+          )
+        targets_chunk = {v: targets_chunk[v] for v in common_vars}
+        predictions_chunk = {v: predictions_chunk[v] for v in common_vars}
+
     logging.log_first_n(
         logging.INFO,
         'LoadPredictionsAndTargets outputs: %s',
@@ -131,9 +164,10 @@ class _AggregationKey:
   lead_time_offset: int | None
   aggregator_name: str | None = None
 
-  def drop_offsets(self) -> '_AggregationKey':
+  def drop_offsets(self, preserve_lead_time: bool = False) -> '_AggregationKey':
+    lead_time_offset = self.lead_time_offset if preserve_lead_time else None
     return dataclasses.replace(
-        self, init_time_offset=None, lead_time_offset=None
+        self, init_time_offset=None, lead_time_offset=lead_time_offset
     )
 
 
@@ -258,6 +292,10 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
   by _AggregationKey.
   """
 
+  def __init__(self, stream_lead_time: bool = False):
+    super().__init__()
+    self.stream_lead_time = stream_lead_time
+
   def expand(
       self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]
   ):
@@ -265,7 +303,10 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
     def drop_offsets_from_key(
         key: _AggregationKey, data_array: xr.DataArray
     ) -> tuple[_AggregationKey, xr.DataArray]:
-      return (key.drop_offsets(), data_array)
+      return (
+          key.drop_offsets(preserve_lead_time=self.stream_lead_time),
+          data_array,
+      )
 
     def combine_data_arrays_by_coords(
         key: _AggregationKey, data_arrays: Iterable[xr.DataArray]
@@ -307,8 +348,8 @@ class ConcatPerStatisticPerVariable(beam.PTransform):
     return (
         pcoll
         # Drop the chunk offsets from the key, so that we group by statistic
-        # name, variable name and type (sum_weighted_statistics or sum_weights)
-        # alone.
+        # name, variable name, type (sum_weighted_statistics or sum_weights),
+        # and lead time (if streaming lead times).
         | 'DropOffsetsFromKey' >> beam.MapTuple(drop_offsets_from_key)
         # We use GroupByKey instead of CombinePerKey because the data all needs
         # to be in memory at once to concatenate it, there is no saving from
@@ -352,14 +393,23 @@ def reconstruct_aggregation_state(
 class ReconstructAggregationState(beam.PTransform):
   """Reconstructs AggregationState from all (_AggregationKey, DataArray)."""
 
+  def __init__(self, stream_lead_time: bool = False):
+    super().__init__()
+    self.stream_lead_time = stream_lead_time
+
   def expand(
       self, pcoll: beam.PCollection[tuple[_AggregationKey, xr.DataArray]]
-  ) -> beam.PCollection[tuple[str | None, aggregation.AggregationState]]:
+  ) -> beam.PCollection[tuple[typing.Any, aggregation.AggregationState]]:
+    if not self.stream_lead_time:
+      group_key = lambda x: x[0].aggregator_name
+    else:
+      group_key = lambda x: (x[0].aggregator_name, x[0].lead_time_offset)
     return (
         pcoll
-        | 'GroupByAggregator' >> beam.GroupBy(lambda x: x[0].aggregator_name)
-        | 'Reconstruct' >> beam.MapTuple(
-            lambda agg_name, xs: (agg_name, reconstruct_aggregation_state(xs))
+        | 'GroupByAggregatorAndMaybeLeadTime' >> beam.GroupBy(group_key)
+        | 'Reconstruct'
+        >> beam.MapTuple(
+            lambda group_key, xs: (group_key, reconstruct_aggregation_state(xs))
         )
     )
 
@@ -367,22 +417,35 @@ class ReconstructAggregationState(beam.PTransform):
 class ComputeMetrics(beam.DoFn):
   """Computes the metrics from the aggregated statistics."""
 
-  def __init__(self, metrics: Mapping[str, metrics_base.Metric]):
+  def __init__(
+      self,
+      metrics: Mapping[str, metrics_base.Metric],
+      stream_lead_time: bool = False,
+  ):
     self.metrics = metrics
+    self.stream_lead_time = stream_lead_time
 
   def process(
-      self, element: tuple[str | None, aggregation.AggregationState]
-  ) -> Iterable[tuple[str | None, xr.Dataset]]:
+      self, element: tuple[typing.Any, aggregation.AggregationState]
+  ) -> Iterable[tuple[typing.Any, typing.Any]]:
     """Computes a metrics Dataset from the final AggregationState."""
-    agg_name, aggregation_state = element
+    key, aggregation_state = element
     logging.log_first_n(
         logging.INFO,
         'ComputeMetrics inputs: %s, %s',
         10,
-        agg_name,
+        key,
         aggregation_state,
     )
-    yield agg_name, aggregation_state.metric_values(self.metrics)
+    if not self.stream_lead_time:
+      agg_name = key
+      yield agg_name, aggregation_state.metric_values(self.metrics)
+    else:
+      agg_name, lead_time_offset = key
+      metrics_ds = aggregation_state.metric_values(self.metrics)
+      metrics_ds = _transpose_time_dims_first(metrics_ds)
+      chunk_key = xbeam.Key({'lead_time': lead_time_offset})
+      yield agg_name, (chunk_key, metrics_ds)
 
 
 def _resolve_out_path(
@@ -399,48 +462,127 @@ def _resolve_out_path(
     return out_path[agg_name]  # pyrefly: ignore[bad-index]
 
 
-class WriteMetrics(beam.DoFn):
-  """Writes the metrics to a NetCDF file."""
+def _write_dataset(
+    ds: xr.Dataset,
+    target_path: str,
+    zarr_chunks: Mapping[str, int] | None = None,
+) -> None:
+  """Atomically writes a dataset to NetCDF or to a Zarr file with chunking.
 
-  def __init__(self, out_path: str | Mapping[str, str]):
+  Args:
+    ds: The dataset to write.
+    target_path: The path to write the dataset to.
+    zarr_chunks: Optional chunking specification for Zarr output files.
+
+  Raises:
+    ValueError: If the target path is not a Zarr or NetCDF file.
+
+  Returns:
+    None
+  """
+  # Remove attributes that may have been propagated from the targets or
+  # predictions.
+  ds = ds.drop_attrs(deep=True)
+
+  if target_path.endswith('.zarr'):
+    temp_path = f'{target_path}.tmp_{uuid.uuid4().hex}'
+
+    if zarr_chunks:
+      # Use the smaller of the chunk spec and the dimension size.
+      encoding = {}
+      for var_name, da in ds.data_vars.items():
+        encoding[var_name] = {
+            'chunks': tuple(
+                min(
+                    da.sizes[dim],
+                    zarr_chunks.get(str(dim), da.sizes[dim]),
+                )
+                for dim in da.dims
+            )
+        }
+      ds.to_zarr(temp_path, mode='w', encoding=encoding)
+    else:
+      ds.to_zarr(temp_path, mode='w')
+
+    fs, _ = fsspec.core.url_to_fs(target_path)
+    if fs.exists(target_path):
+      fs.rm(target_path, recursive=True)
+    fs.mv(temp_path, target_path, recursive=True)
+  else:
+    beam_utils.atomic_write(
+        target_path,
+        ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
+    )
+
+
+class WriteMetrics(beam.DoFn):
+  """Writes the metrics to a NetCDF or Zarr file."""
+
+  def __init__(
+      self,
+      out_path: str | Mapping[str, str],
+      zarr_chunks: Mapping[str, int] | None = None,
+  ):
     self.out_path = out_path
+    self.zarr_chunks = zarr_chunks
 
   def process(self, element: tuple[str | None, xr.Dataset]) -> Iterable[Never]:
     agg_name, metrics = element
     logging.log_first_n(
         logging.INFO, 'WriteMetrics inputs: %s, %s', 10, agg_name, metrics
     )
-    # Remove attributes that may have been propogated from the targets or
-    # predictions.
-    metrics = metrics.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        metrics.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    _write_dataset(metrics, target_path, self.zarr_chunks)
     return []
 
 
 class WriteAggregationState(beam.DoFn):
-  """Writes the final AggregationState to a NetCDF file."""
+  """Writes the final AggregationState to a NetCDF or Zarr file."""
 
-  def __init__(self, out_path: str | Mapping[str, str]):
+  def __init__(
+      self,
+      out_path: str | Mapping[str, str],
+      zarr_chunks: Mapping[str, int] | None = None,
+  ):
     self.out_path = out_path
+    self.zarr_chunks = zarr_chunks
 
   def process(
       self, element: tuple[str | None, aggregation.AggregationState]
   ) -> Iterable[Never]:
     agg_name, aggregation_state = element
     aggregation_state_ds = aggregation_state.to_dataset()
-    # Remove attributes that may have been propogated from the targets or
-    # predictions.
-    aggregation_state_ds = aggregation_state_ds.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        aggregation_state_ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    _write_dataset(aggregation_state_ds, target_path, self.zarr_chunks)
     return []
+
+
+def _get_template_metrics_dataset(
+    metrics: Mapping[str, metrics_base.Metric],
+    predictions_loader: data_loaders_base.DataLoader,
+    targets_loader: data_loaders_base.DataLoader,
+    times: time_chunks.TimeChunks,
+    aggregator: aggregation.Aggregator,
+    setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
+) -> xr.Dataset:
+  """Computes metrics for first chunk to create a template dataset."""
+  logging.info('Building metrics template with data from first chunk')
+  predictions_chunk, targets_chunk = _load_first_chunk(
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
+  )
+  agg_state = _compute_aggregation_state(
+      metrics, aggregator, predictions_chunk, targets_chunk
+  )
+  first_metrics = agg_state.metric_values(metrics)
+  template = _expand_template_time_dimensions(first_metrics, times)
+  template = _transpose_time_dims_first(template)
+  logging.info('Metrics template: %s', template)
+  return template
 
 
 def define_pipeline(
@@ -453,6 +595,9 @@ def define_pipeline(
     out_path: str | Mapping[str, str] | None = None,
     aggregation_state_out_path: str | Mapping[str, str] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    zarr_chunks: Mapping[str, int] | None = None,
+    ignore_missing_variables: bool = False,
+    stream_lead_time: bool = False,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
 
@@ -466,8 +611,8 @@ def define_pipeline(
       instance.
     out_path: The full path to write the metrics to (or mapping of aggregator
       name to path). If you specify multiple aggregators but only a single
-      out_path, the aggregator name will be appended to the filename to get
-      a path for each aggregator.
+      out_path, the aggregator name will be appended to the filename to get a
+      path for each aggregator.
     aggregation_state_out_path: The full path to write the final aggregation
       state to (or mapping of aggregator name to path). This can be useful if
       you want to compute further metrics from it later, and if you are
@@ -476,6 +621,11 @@ def define_pipeline(
       aggregators are specified.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    zarr_chunks: Optional chunking specification for Zarr output files.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
+    stream_lead_time: (Optional) If True, compute metrics and stream per
+      lead_time chunk to Zarr to eliminate single-worker memory bottlenecks.
   """
   if isinstance(aggregator, Mapping):
     if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
@@ -490,7 +640,10 @@ def define_pipeline(
       | 'CreateTimeChunks' >> beam.Create(times.iter_with_chunk_offsets())
       | beam.ParDo(
           LoadPredictionsAndTargets(
-              predictions_loader, targets_loader, setup_fn=setup_fn
+              predictions_loader,
+              targets_loader,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
       )
       # Compute statistics for each chunk, perform the initial per-chunk
@@ -511,11 +664,11 @@ def define_pipeline(
       # Now we've reduced the size of the data as much as we can by summing,
       # we concatenate the resulting chunks along any remaining dimensions where
       # we know that coordinates will not overlap across chunks.
-      | ConcatPerStatisticPerVariable()
+      | ConcatPerStatisticPerVariable(stream_lead_time=stream_lead_time)
       # Finally we gather together all the concatenated chunks for all
       # statistics and variables and reconstitute the full AggregationState
       # from them, which we can use to compute the final values of metrics.
-      | ReconstructAggregationState()
+      | ReconstructAggregationState(stream_lead_time=stream_lead_time)
   )
 
   if out_path is None and aggregation_state_out_path is None:
@@ -525,15 +678,88 @@ def define_pipeline(
     )
 
   if out_path is not None:
-    _ = (
-        agg_state_pipeline
-        | beam.ParDo(ComputeMetrics(metrics))
-        | beam.ParDo(WriteMetrics(out_path))
+    metrics_pcoll = agg_state_pipeline | 'ComputeMetrics' >> beam.ParDo(
+        ComputeMetrics(metrics, stream_lead_time=stream_lead_time)
     )
 
-  if aggregation_state_out_path is not None:
+    if not stream_lead_time:
+      _ = metrics_pcoll | 'WriteMetrics' >> beam.ParDo(
+          WriteMetrics(
+              out_path,
+              zarr_chunks=zarr_chunks,
+          )
+      )
+    else:
+      if not isinstance(aggregator, aggregation.Aggregator):
+        raise ValueError(
+            'stream_lead_time=True is only supported for a single aggregator.'
+        )
+      if not isinstance(out_path, str):
+        raise ValueError(
+            'stream_lead_time=True is only supported for a single out_path.'
+        )
+      if not out_path.endswith('.zarr'):
+        raise ValueError(
+            'Output path with stream_lead_time must end with .zarr, got'
+            f' {out_path}'
+        )
+
+      target_path = _resolve_out_path(out_path, agg_name=None)
+
+      template = _get_template_metrics_dataset(
+          metrics,
+          predictions_loader,
+          targets_loader,
+          times,
+          aggregator,
+          setup_fn=setup_fn,
+          ignore_missing_variables=ignore_missing_variables,
+      )
+      dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+      if 'lead_time' not in dim_sizes:
+        raise ValueError(
+            'Cannot use stream_lead_time=True when lead_time is not a dimension'
+            ' in the output (e.g. it was reduced).'
+        )
+
+      in_chunks = {}
+      for dim, size in dim_sizes.items():
+        if dim == 'init_time':
+          in_chunks[dim] = times.init_time_chunk_size or -1
+        elif dim == 'lead_time':
+          in_chunks[dim] = times.lead_time_chunk_size or -1
+        else:
+          in_chunks[dim] = size
+      out_chunks = in_chunks.copy()
+      if zarr_chunks:
+        out_chunks.update(zarr_chunks)
+
+      _ = (
+          metrics_pcoll
+          | 'ExtractChunk' >> beam.Map(lambda x: x[1])
+          | 'Rechunk'
+          >> xbeam.Rechunk(
+              dim_sizes=dim_sizes,
+              source_chunks=in_chunks,
+              target_chunks=out_chunks,
+              itemsize=4,
+          )
+          | 'WriteMetricsToZarr'
+          >> xbeam.ChunksToZarr(
+              target_path, template=template, zarr_chunks=out_chunks
+          )
+      )
+
+  if aggregation_state_out_path is not None and not stream_lead_time:
     _ = agg_state_pipeline | beam.ParDo(
-        WriteAggregationState(aggregation_state_out_path)
+        WriteAggregationState(
+            aggregation_state_out_path,
+            zarr_chunks=zarr_chunks,
+        )
+    )
+  elif aggregation_state_out_path is not None and stream_lead_time:
+    raise ValueError(
+        'AggregationState can only be written if stream_lead_time=False.'
     )
 
 
@@ -601,12 +827,17 @@ def _get_template_dataset(
     targets_loader: data_loaders_base.DataLoader,
     times: time_chunks.TimeChunks,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> xr.Dataset:
   """Computes statistics for the first chunk to create a template dataset."""
   logging.info('Building template with data from first chunk')
 
   predictions_chunk, targets_chunk = _load_first_chunk(
-      predictions_loader, targets_loader, times, setup_fn=setup_fn
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   statistics_dict = metrics_base.compute_unique_statistics_for_all_metrics(
       metrics, predictions_chunk, targets_chunk
@@ -666,6 +897,7 @@ def define_unaggregated_pipeline(
     out_path: str,
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ):
   """Defines a Beam pipeline that calculates statistics without aggregation.
 
@@ -685,9 +917,16 @@ def define_unaggregated_pipeline(
       store. If None, the chunks will match those of TimeChunks.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
   """
   template = _get_template_dataset(
-      metrics, predictions_loader, targets_loader, times, setup_fn
+      metrics,
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
@@ -713,7 +952,10 @@ def define_unaggregated_pipeline(
       | 'LoadPredictionsAndTargets'
       >> beam.ParDo(
           LoadPredictionsAndTargets(
-              predictions_loader, targets_loader, setup_fn=setup_fn
+              predictions_loader,
+              targets_loader,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
       )
       | 'ComputeAndFormatStatistics'
@@ -732,11 +974,24 @@ def define_unaggregated_pipeline(
   )
 
 
+def _maybe_coarsen_spatial_da(
+    da: xr.DataArray, window_size: int
+) -> xr.DataArray:
+  """Coarsens spatial dimensions (latitude/longitude) if present."""
+  coarsen_dims = {
+      d: window_size for d in ('latitude', 'longitude') if d in da.dims
+  }
+  if coarsen_dims:
+    return da.coarsen(coarsen_dims, boundary='trim').sum()
+  return da
+
+
 def _load_first_chunk(
     predictions_loader: data_loaders_base.DataLoader,
     targets_loader: data_loaders_base.DataLoader,
     times: time_chunks.TimeChunks,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> tuple[Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
   """Loads the first chunk of preds and targets for template generation."""
   if setup_fn is not None:
@@ -752,7 +1007,24 @@ def _load_first_chunk(
   predictions_chunk = predictions_loader.load_chunk(
       first_init_times, first_lead_times, targets_chunk
   )
+  if ignore_missing_variables:
+    common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
+    targets_chunk = {v: targets_chunk[v] for v in common_vars}
+    predictions_chunk = {v: predictions_chunk[v] for v in common_vars}
   return predictions_chunk, targets_chunk
+
+
+def _compute_aggregation_state(
+    metrics: Mapping[str, metrics_base.Metric],
+    aggregator: aggregation.Aggregator,
+    predictions_chunk: Mapping[Hashable, xr.DataArray],
+    targets_chunk: Mapping[Hashable, xr.DataArray],
+) -> aggregation.AggregationState:
+  """Computes AggregationState for a single chunk."""
+  statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+      metrics, predictions_chunk, targets_chunk
+  )
+  return aggregator.aggregate_statistics(statistics)
 
 
 def _compute_aggregation_state_dataset(
@@ -760,12 +1032,19 @@ def _compute_aggregation_state_dataset(
     aggregator: aggregation.Aggregator,
     predictions_chunk: Mapping[Hashable, xr.DataArray],
     targets_chunk: Mapping[Hashable, xr.DataArray],
+    spatial_coarsen_window_size: int | None = None,
 ) -> xr.Dataset:
   """Computes the AggregationState dataset for a single chunk."""
-  statistics = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, predictions_chunk, targets_chunk
+  aggregation_state = _compute_aggregation_state(
+      metrics, aggregator, predictions_chunk, targets_chunk
   )
-  aggregation_state = aggregator.aggregate_statistics(statistics)
+  if (
+      spatial_coarsen_window_size is not None
+      and spatial_coarsen_window_size > 1
+  ):
+    aggregation_state = aggregation_state.map(
+        lambda da: _maybe_coarsen_spatial_da(da, spatial_coarsen_window_size)
+    )
   return aggregation_state.to_dataset()
 
 
@@ -776,9 +1055,11 @@ class ComputeAndFormatAggregationState(beam.DoFn):
       self,
       metrics: Mapping[str, metrics_base.Metric],
       aggregator: aggregation.Aggregator,
+      spatial_coarsen_window_size: int | None = None,
   ):
     self.metrics = metrics
     self.aggregator = aggregator
+    self.spatial_coarsen_window_size = spatial_coarsen_window_size
 
   def process(
       self,
@@ -798,6 +1079,7 @@ class ComputeAndFormatAggregationState(beam.DoFn):
         self.aggregator,
         predictions_chunk,
         targets_chunk,
+        spatial_coarsen_window_size=self.spatial_coarsen_window_size,
     )
 
     for var_name, da in chunk_ds.data_vars.items():
@@ -819,6 +1101,8 @@ def _get_template_aggregation_state_dataset(
     times: time_chunks.TimeChunks,
     aggregator: aggregation.Aggregator,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
+    spatial_coarsen_window_size: int | None = None,
 ) -> xr.Dataset:
   """Computes AggregationState dataset for the first chunk to create a template dataset."""
   logging.info('Building AggregationState template with data from first chunk.')
@@ -827,12 +1111,14 @@ def _get_template_aggregation_state_dataset(
       targets_loader,
       times,
       setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   first_chunk = _compute_aggregation_state_dataset(
       metrics,
       aggregator,
       predictions_chunk,
       targets_chunk,
+      spatial_coarsen_window_size=spatial_coarsen_window_size,
   )
   template = _expand_template_time_dimensions(first_chunk, times)
   template = _transpose_time_dims_first(template)
@@ -850,6 +1136,8 @@ def define_unaggregated_aggregation_state_pipeline(
     out_path: str | Mapping[str, str],
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
+    spatial_coarsen_window_size: int | None = None,
 ) -> None:
   """Defines a Beam pipeline that streams unaggregated AggregationState to Zarr.
 
@@ -867,6 +1155,10 @@ def define_unaggregated_aggregation_state_pipeline(
       store. If None, the chunks will match those of TimeChunks.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
+    spatial_coarsen_window_size: (Optional) Block size for spatial coarsening of
+      the AggregationState along latitude and longitude.
   """
   if isinstance(aggregator, Mapping):
     if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
@@ -884,7 +1176,14 @@ def define_unaggregated_aggregation_state_pipeline(
       )
 
     template = _get_template_aggregation_state_dataset(
-        metrics, predictions_loader, targets_loader, times, agg, setup_fn
+        metrics,
+        predictions_loader,
+        targets_loader,
+        times,
+        agg,
+        setup_fn,
+        spatial_coarsen_window_size=spatial_coarsen_window_size,
+        ignore_missing_variables=ignore_missing_variables,
     )
     dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
@@ -915,11 +1214,20 @@ def define_unaggregated_aggregation_state_pipeline(
         | f'LoadPredictionsAndTargets{label_suffix}'
         >> beam.ParDo(
             LoadPredictionsAndTargets(
-                predictions_loader, targets_loader, setup_fn=setup_fn
+                predictions_loader,
+                targets_loader,
+                setup_fn=setup_fn,
+                ignore_missing_variables=ignore_missing_variables,
             )
         )
         | f'ComputeAndFormatAggregationState{label_suffix}'
-        >> beam.ParDo(ComputeAndFormatAggregationState(metrics, agg))
+        >> beam.ParDo(
+            ComputeAndFormatAggregationState(
+                metrics,
+                agg,
+                spatial_coarsen_window_size=spatial_coarsen_window_size,
+            )
+        )
         | f'Rechunk{label_suffix}'
         >> xbeam.Rechunk(
             dim_sizes=dim_sizes,
