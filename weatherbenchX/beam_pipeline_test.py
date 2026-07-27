@@ -699,8 +699,6 @@ class BeamPipelineTest(parameterized.TestCase):
               lead_time_a=lead_time_a,
               lead_time_b=lead_time_b,
           )
-      )
-
   # TODO(matthjw): Add a test where statistics are not defined for all
   # variables.
 
