@@ -478,3 +478,54 @@ class Subsample(Interpolation):
         if dim in da.dims
     }
     return da.isel(**isel_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+
+class Coarsen(Interpolation):
+  """Coarsen a DataArray along specified dimensions by block averaging.
+
+  This is useful for reducing resolution by computing grid block averages
+  (e.g., 0.25deg -> 1.0deg 4x4 block mean), preserving total areal mass/energy.
+  """
+
+  def __init__(
+      self,
+      dims: Sequence[str] = ('latitude', 'longitude'),
+      window_size: int = 4,
+      target_resolution: float | None = None,
+      grid_resolution: float | None = None,
+  ):
+    """Init.
+
+    Args:
+      dims: Dimensions along which to coarsen.
+      window_size: Block size for coarsening. Must be a positive integer.
+      target_resolution: Optional target resolution in degrees (e.g. 1.0).
+      grid_resolution: Optional grid resolution in degrees (e.g. 0.25 or 0.1).
+    """
+    if target_resolution is not None and grid_resolution is not None:
+      window_size = int(round(target_resolution / grid_resolution))
+    if window_size < 1:
+      raise ValueError(f'window_size must be >= 1, got {window_size}')
+    self._dims = dims
+    self._window_size = window_size
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    coarsen_kwargs = {
+        dim: self._window_size for dim in self._dims if dim in da.dims
+    }
+    if not coarsen_kwargs:
+      return da
+    if 'latitude' in da.dims and 'latitude' in coarsen_kwargs:
+      lat = da.latitude.values
+      if len(lat) > 1 and lat[0] > lat[-1]:
+        da = da.sortby('latitude')
+        lat = da.latitude.values
+      # If grid has pole endpoints -90 and 90 (e.g. 721 or 1801 lat points),
+      # slice off pole endpoints so block averaging aligns on standard cell centers (-89.5 to 89.5).
+      if len(lat) > 1 and np.isclose(lat[0], -90.0) and np.isclose(lat[-1], 90.0):
+        da = da.isel(latitude=slice(1, -1))
+    return da.coarsen(**coarsen_kwargs, boundary='trim').mean()

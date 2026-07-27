@@ -16,12 +16,16 @@
 from collections.abc import Hashable
 import dataclasses
 import os
+
+os.environ.setdefault('JAX_COMPILATION_CACHE_DIR', '/tmp/jax_cache')
 import time
 import typing
 from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
+import uuid
 
 from absl import logging
 import apache_beam as beam
+from google3.pyglib import gfile
 import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import beam_utils
@@ -106,6 +110,29 @@ class LoadPredictionsAndTargets(beam.DoFn):
     self.prediction_load_time.update(
         (time.time() - start_time) * 1000
     )  # In milliseconds because beam counters use longs.
+
+    common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
+    if len(common_vars) < len(targets_chunk) or len(common_vars) < len(
+        predictions_chunk
+    ):
+      missing_in_preds = set(targets_chunk.keys()) - set(
+          predictions_chunk.keys()
+      )
+      missing_in_targets = set(predictions_chunk.keys()) - set(
+          targets_chunk.keys()
+      )
+      if missing_in_preds:
+        logging.warning(
+            'Targets chunk has variables not present in predictions chunk: %s',
+            missing_in_preds,
+        )
+      if missing_in_targets:
+        logging.warning(
+            'Predictions chunk has variables not present in targets chunk: %s',
+            missing_in_targets,
+        )
+      targets_chunk = {v: targets_chunk[v] for v in common_vars}
+      predictions_chunk = {v: predictions_chunk[v] for v in common_vars}
 
     logging.log_first_n(
         logging.INFO,
@@ -400,7 +427,7 @@ def _resolve_out_path(
 
 
 class WriteMetrics(beam.DoFn):
-  """Writes the metrics to a NetCDF file."""
+  """Writes the metrics to a NetCDF or Zarr file."""
 
   def __init__(self, out_path: str | Mapping[str, str]):
     self.out_path = out_path
@@ -414,15 +441,38 @@ class WriteMetrics(beam.DoFn):
     # predictions.
     metrics = metrics.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        metrics.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    if target_path.endswith('.zarr'):
+      temp_path = f'{target_path}.tmp_{uuid.uuid4().hex}'
+      if {'latitude', 'longitude'}.issubset(metrics.dims):
+        chunk_spec = {'latitude': 181, 'longitude': 360}
+        encoding = {
+            var: {
+                'chunks': tuple(
+                    min(
+                        metrics[var].sizes[dim],
+                        chunk_spec.get(dim, metrics[var].sizes[dim]),
+                    )
+                    for dim in metrics[var].dims
+                )
+            }
+            for var in metrics.data_vars
+        }
+        metrics.to_zarr(temp_path, mode='w', encoding=encoding)
+      else:
+        metrics.to_zarr(temp_path, mode='w')
+      if gfile.Exists(target_path):
+        gfile.DeleteRecursively(target_path)
+      gfile.Rename(temp_path, target_path)
+    else:
+      beam_utils.atomic_write(
+          target_path,
+          metrics.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
+      )
     return []
 
 
 class WriteAggregationState(beam.DoFn):
-  """Writes the final AggregationState to a NetCDF file."""
+  """Writes the final AggregationState to a NetCDF or Zarr file."""
 
   def __init__(self, out_path: str | Mapping[str, str]):
     self.out_path = out_path
@@ -436,10 +486,35 @@ class WriteAggregationState(beam.DoFn):
     # predictions.
     aggregation_state_ds = aggregation_state_ds.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        aggregation_state_ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    if target_path.endswith('.zarr'):
+      temp_path = f'{target_path}.tmp_{uuid.uuid4().hex}'
+      if {'latitude', 'longitude'}.issubset(aggregation_state_ds.dims):
+        chunk_spec = {'latitude': 181, 'longitude': 360}
+        encoding = {
+            var: {
+                'chunks': tuple(
+                    min(
+                        aggregation_state_ds[var].sizes[dim],
+                        chunk_spec.get(
+                            dim, aggregation_state_ds[var].sizes[dim]
+                        ),
+                    )
+                    for dim in aggregation_state_ds[var].dims
+                )
+            }
+            for var in aggregation_state_ds.data_vars
+        }
+        aggregation_state_ds.to_zarr(temp_path, mode='w', encoding=encoding)
+      else:
+        aggregation_state_ds.to_zarr(temp_path, mode='w')
+      if gfile.Exists(target_path):
+        gfile.DeleteRecursively(target_path)
+      gfile.Rename(temp_path, target_path)
+    else:
+      beam_utils.atomic_write(
+          target_path,
+          aggregation_state_ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
+      )
     return []
 
 
@@ -527,8 +602,8 @@ def define_pipeline(
   if out_path is not None:
     _ = (
         agg_state_pipeline
-        | beam.ParDo(ComputeMetrics(metrics))
-        | beam.ParDo(WriteMetrics(out_path))
+        | 'ComputeMetrics' >> beam.ParDo(ComputeMetrics(metrics))
+        | 'WriteMetrics' >> beam.ParDo(WriteMetrics(out_path))
     )
 
   if aggregation_state_out_path is not None:

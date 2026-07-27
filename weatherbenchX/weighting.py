@@ -111,6 +111,8 @@ class GridAreaWeighting(Weighting):
       return xr.DataArray(1)
 
     latitude = statistic[self.latitude_name].data
+    if len(latitude) <= 1:
+      return xr.DataArray(1)
 
     assert _is_strictly_monotonic(
         latitude
