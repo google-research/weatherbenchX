@@ -45,6 +45,20 @@ class WeightingTest(absltest.TestCase):
         regional_weights, weights.sel(latitude=slice(-30, 30))
     )
 
+    # Test for single latitude point
+    single_lat_stat = statistic_values['2m_temperature'].isel(
+        latitude=slice(0, 1)
+    )
+    single_lat_weights = latitude_weighting.weights(single_lat_stat)
+    self.assertEqual(float(single_lat_weights), 1.0)
+
+    # Test for empty latitude array
+    empty_lat_stat = statistic_values['2m_temperature'].isel(
+        latitude=slice(0, 0)
+    )
+    empty_lat_weights = latitude_weighting.weights(empty_lat_stat)
+    self.assertEqual(float(empty_lat_weights), 1.0)
+
 
 class StationDensityWeightingTest(absltest.TestCase):
 
@@ -227,7 +241,6 @@ class StationDensityWeightingTest(absltest.TestCase):
     )
     self.assertEqual(float(w), 1.0)
     self.assertNotIn('weighting_alpha_0', w.dims)
-
 
 
 if __name__ == '__main__':

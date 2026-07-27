@@ -701,6 +701,7 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
+
   # TODO(matthjw): Add a test where statistics are not defined for all
   # variables.
 
