@@ -701,8 +701,191 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
+  def test_short_circuit_pipeline(self):
+    """Test short-circuit pipeline output format and AggregationState deserialization."""
+    out_dir = self.create_tempdir('short_circuit_out.zarr').full_path
+    agg_state_out = os.path.join(out_dir, 'agg_state.zarr')
+
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+    eval_metrics = {'mse': deterministic.MSE()}
+    eval_aggregator = aggregation.Aggregator(reduce_dims=[])
+
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root=root,
+          times=times,
+          predictions_loader=prediction_loader,
+          targets_loader=target_loader,
+          metrics=eval_metrics,
+          aggregator=eval_aggregator,
+          out_path=None,
+          aggregation_state_out_path=agg_state_out,
+          short_circuit_aggregation_state=True,
+          overwrite_if_exists=True,
+      )
+
+    self.assertTrue(os.path.exists(agg_state_out))
+    ds = xr.open_zarr(agg_state_out)
+
+    # Assert variable naming and dimension bounds
+    self.assertTrue(
+        any(v.endswith('#sum_weighted_statistics') for v in ds.data_vars)
+    )
+    self.assertTrue(any(v.endswith('#sum_weights') for v in ds.data_vars))
+    self.assertIn(
+        'SquaredError#2m_temperature#sum_weighted_statistics', ds.data_vars
+    )
+    self.assertIn(
+        'SquaredError#2m_temperature#sum_weights', ds.data_vars
+    )
+    self.assertEqual(ds.sizes['init_time'], len(init_times))
+    self.assertEqual(ds.sizes['lead_time'], len(lead_times))
+
+    # Assert compatibility with AggregationState reconstruction
+    restored_agg_state = aggregation.AggregationState.from_dataset(ds)
+    self.assertIsNotNone(restored_agg_state.sum_weighted_statistics)
+    self.assertIsNotNone(restored_agg_state.sum_weights)
+    self.assertIn('SquaredError', restored_agg_state.sum_weighted_statistics)
+
+    # Assert values are actually populated (not NaN template placeholders)
+    val = ds['SquaredError#2m_temperature#sum_weighted_statistics'].values
+    self.assertFalse(np.isnan(val).all(), 'All written values are NaN!')
+    self.assertFalse(np.isnan(val).any(), 'Some written values are NaN!')
+
+    # Assert valid_time is correctly computed (not 1970-01-01 epoch zeroes)
+    self.assertIn('valid_time', ds.coords)
+    self.assertTrue((ds.valid_time.values > np.datetime64('2000-01-01')).all(), 'valid_time is epoch zeroes!')
+
+  def test_short_circuit_pipeline_slice_lead_times(self):
+    """Test short-circuit pipeline with a slice for lead_times."""
+    out_dir = self.create_tempdir('short_circuit_slice_out.zarr').full_path
+    agg_state_out = os.path.join(out_dir, 'agg_state.zarr')
+
+    init_times = self.predictions.time.values
+    lead_times_slice = slice(
+        np.timedelta64(0, 'h'), np.timedelta64(24, 'h')
+    )
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times_slice,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=None,
+    )
+    eval_metrics = {'mse': deterministic.MSE()}
+    eval_aggregator = aggregation.Aggregator(reduce_dims=[])
+
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+    # TargetsFromXarray does not support lead time slices directly (raises ValueError).
+    # PredictionsFromXarray on self.predictions_path (which has init_time/lead_time dims)
+    # is used as target loader here to test pipeline slice support.
+    target_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root=root,
+          times=times,
+          predictions_loader=prediction_loader,
+          targets_loader=target_loader,
+          metrics=eval_metrics,
+          aggregator=eval_aggregator,
+          out_path=None,
+          aggregation_state_out_path=agg_state_out,
+          short_circuit_aggregation_state=True,
+          overwrite_if_exists=True,
+      )
+
+    self.assertTrue(os.path.exists(agg_state_out))
+    ds = xr.open_zarr(agg_state_out)
+    self.assertIn(
+        'SquaredError#2m_temperature#sum_weighted_statistics', ds.data_vars
+    )
+    self.assertIn(
+        'SquaredError#2m_temperature#sum_weights', ds.data_vars
+    )
+    self.assertEqual(ds.sizes['init_time'], len(init_times))
+    self.assertEqual(
+        ds.sizes['lead_time'], len(self.predictions.prediction_timedelta.values)
+    )
+
+    # Assert compatibility with AggregationState reconstruction
+    restored_agg_state = aggregation.AggregationState.from_dataset(ds)
+    self.assertIsNotNone(restored_agg_state.sum_weighted_statistics)
+    self.assertIsNotNone(restored_agg_state.sum_weights)
+    self.assertIn('SquaredError', restored_agg_state.sum_weighted_statistics)
+
+  def test_short_circuit_pipeline_multiple_aggregators(self):
+    """Test short-circuit pipeline with multiple aggregators configured."""
+    out_dir = self.create_tempdir('short_circuit_multi_out.zarr').full_path
+    agg_state_paths = {
+        'agg1': os.path.join(out_dir, 'agg_state_1.zarr'),
+        'agg2': os.path.join(out_dir, 'agg_state_2.zarr'),
+    }
+
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+    eval_metrics = {'mse': deterministic.MSE()}
+    aggregators = {
+        'agg1': aggregation.Aggregator(reduce_dims=[]),
+        'agg2': aggregation.Aggregator(reduce_dims=['init_time']),
+    }
+
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root=root,
+          times=times,
+          predictions_loader=prediction_loader,
+          targets_loader=target_loader,
+          metrics=eval_metrics,
+          aggregator=aggregators,
+          out_path=None,
+          aggregation_state_out_path=agg_state_paths,
+          short_circuit_aggregation_state=True,
+          overwrite_if_exists=True,
+      )
+
+    for path in agg_state_paths.values():
+      self.assertTrue(os.path.exists(path))
+      ds = xr.open_zarr(path)
+      self.assertIn(
+          'SquaredError#2m_temperature#sum_weighted_statistics', ds.data_vars
+      )
+      restored_agg_state = aggregation.AggregationState.from_dataset(ds)
+      self.assertIsNotNone(restored_agg_state.sum_weighted_statistics)
+
   # TODO(matthjw): Add a test where statistics are not defined for all
   # variables.
+
 
 
 if __name__ == '__main__':

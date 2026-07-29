@@ -306,5 +306,75 @@ class SubsampleTest(absltest.TestCase):
     self.assertEqual(result['t2m'].sizes['longitude'], 10)
 
 
+class CoarsenTest(absltest.TestCase):
+
+  def test_coarsen_window_size(self):
+    lats = np.arange(0, 12, 0.25)
+    lons = np.arange(0, 20, 0.25)
+    da = xr.DataArray(
+        name='t2m',
+        data=np.ones((len(lats), len(lons))),
+        coords={'latitude': lats, 'longitude': lons},
+        dims=['latitude', 'longitude'],
+    )
+    coarsener = interpolations.Coarsen(
+        dims=['latitude', 'longitude'], window_size=4
+    )
+    result = coarsener.interpolate_data_array(da)
+    self.assertEqual(result.sizes['latitude'], len(lats) // 4)
+    self.assertEqual(result.sizes['longitude'], len(lons) // 4)
+    np.testing.assert_allclose(result.values, 1.0)
+
+  def test_coarsen_target_resolution(self):
+    lats = np.arange(0, 10, 0.1)
+    lons = np.arange(0, 20, 0.1)
+    da = xr.DataArray(
+        name='t2m',
+        data=np.ones((len(lats), len(lons))),
+        coords={'latitude': lats, 'longitude': lons},
+        dims=['latitude', 'longitude'],
+    )
+    coarsener = interpolations.Coarsen(
+        dims=['latitude', 'longitude'],
+        target_resolution=1.0,
+        grid_resolution=0.1,
+    )
+    result = coarsener.interpolate_data_array(da)
+    self.assertEqual(result.sizes['latitude'], len(lats) // 10)
+    self.assertEqual(result.sizes['longitude'], len(lons) // 10)
+    np.testing.assert_allclose(result.values, 1.0)
+
+  def test_coarsen_consistent_grid_across_resolutions(self):
+    target_res = 1.0
+    resolutions = [0.5, 0.25, 0.2, 0.125, 0.1, 0.05]
+    results_cell = {}
+
+    for res in resolutions:
+      n_lats = int(round(180 / res))
+      n_lons = int(round(360 / res))
+      lats = np.linspace(-90.0 + res / 2.0, 90.0 - res / 2.0, n_lats)
+      lons = np.linspace(res / 2.0, 360.0 - res / 2.0, n_lons)
+      da = xr.DataArray(
+          name='t2m',
+          data=np.ones((n_lats, n_lons), dtype=np.float32),
+          coords={'latitude': lats, 'longitude': lons},
+          dims=['latitude', 'longitude'],
+      )
+      coarsener = interpolations.Coarsen(
+          dims=['latitude', 'longitude'],
+          target_resolution=target_res,
+          grid_resolution=res,
+      )
+      results_cell[res] = coarsener.interpolate_data_array(da)
+
+    first_res = resolutions[0]
+    expected_lats = results_cell[first_res].latitude
+    expected_lons = results_cell[first_res].longitude
+
+    for res in resolutions[1:]:
+      xr.testing.assert_allclose(results_cell[res].latitude, expected_lats)
+      xr.testing.assert_allclose(results_cell[res].longitude, expected_lons)
+
+
 if __name__ == '__main__':
   absltest.main()
