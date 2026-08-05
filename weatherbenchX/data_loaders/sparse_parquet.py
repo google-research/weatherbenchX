@@ -52,16 +52,16 @@ def get_parquet_files_subset(
 
 def parquet_filename_for_time(path: str, time: np.datetime64, unit: str) -> str:
   """Return parquet partition filename for a given time."""
-  year = time.item().year  # pyrefly: ignore[missing-attribute]
-  month = time.item().month  # pyrefly: ignore[missing-attribute]
+  year = time.item().year
+  month = time.item().month
   if unit == 'M':
     fn = f'year={year}/month={month}/{year}-{str(month).zfill(2)}.parquet'
   elif unit == 'D':
-    day = time.item().day  # pyrefly: ignore[missing-attribute]
+    day = time.item().day
     fn = f'year={year}/month={month}/day={day}/{year}-{str(month).zfill(2)}-{str(day).zfill(2)}.parquet'
   elif unit == 'h':
-    day = time.item().day  # pyrefly: ignore[missing-attribute]
-    hour = time.item().hour  # pyrefly: ignore[missing-attribute]
+    day = time.item().day
+    hour = time.item().hour
     fn = f'year={year}/month={month}/day={day}/hour={hour}/{year}-{str(month).zfill(2)}-{str(day).zfill(2)}T{str(hour).zfill(2)}.parquet'
   else:
     raise NotImplementedError
