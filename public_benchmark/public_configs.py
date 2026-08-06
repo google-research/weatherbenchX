@@ -272,11 +272,11 @@ for model, config in deterministic_prediction_configs.items():
       assert (
           'preprocessing_fn' not in single_member_config['data_loader_kwargs']
       )
-      single_member_config['data_loader_kwargs'][
+      single_member_config['data_loader_kwargs'][  # pyrefly: ignore[unsupported-operation]
           'preprocessing_fn'
-      ] = select_first_member
+      ] = select_first_member  # pyrefly: ignore[unsupported-operation]
     else:
-      single_member_config['data_loader_kwargs'] = {
+      single_member_config['data_loader_kwargs'] = {  # pyrefly: ignore[unsupported-operation]
           'preprocessing_fn': select_first_member
       }
     single_member_configs[model.replace('_mean', '_single_member')] = (
