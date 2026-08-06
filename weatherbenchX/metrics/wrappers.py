@@ -57,6 +57,10 @@ def binarize_thresholds(
   Note that this retains NaNs in the input array. If NaNs are present, the
   output will be of type float otherwise bool.
 
+  If thresholds is an xr.DataArray or xr.Dataset with time-like dimensions
+  (e.g. `dayofyear`, `hour`), these are automatically aligned to the input
+  array via `select_bin_thresholds_by_time_from_chunk`.
+
   Args:
     x: Input DataArray.
     thresholds: List, xarray.DataArray or xarray.Dataset of threshold values.
@@ -85,6 +89,8 @@ def binarize_thresholds(
     threshold = xr.DataArray(
         thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
     )
+  # Align time-like dimensions (dayofyear, hour, etc.) if present.
+  threshold = select_bin_thresholds_by_time_from_chunk(threshold, x)
   return (x > threshold).where(~xu.isnan(x)).astype(np.float32)
 
 
@@ -281,9 +287,15 @@ def select_bin_thresholds_by_time_from_chunk(
   Options for bin_threshold time dimensions are:
   - `valid_time`
   - `init_time` and `lead_time` (only compatible for init/lead_time chunks)
-  - `dayofyear` (with `lead_time` for init/lead_time chunks)
+  - `dayofyear` (with optional `hour`; and `lead_time` for init/lead_time
+    chunks)
   - No time dimensions (in which case the bin thresholds are returned
     unchanged)
+
+  If ``bin_thresholds`` also contains an ``hour`` dimension, it is selected
+  using the hour-of-day derived from the chunk's valid time (i.e.
+  ``init_time + lead_time`` or ``valid_time``).  This supports climatological
+  thresholds that vary by both day-of-year and hour-of-day.
 
   Args:
     bin_thresholds: Data array containing bin thresholds.
@@ -295,22 +307,36 @@ def select_bin_thresholds_by_time_from_chunk(
   """
 
   if {'init_time', 'lead_time'}.issubset(chunk.dims):
+    valid_time = chunk.init_time + chunk.lead_time
     if 'valid_time' in bin_thresholds.dims:
-      bin_thresholds = bin_thresholds.sel(
-          valid_time=chunk.init_time + chunk.lead_time
-      )
+      bin_thresholds = bin_thresholds.sel(valid_time=valid_time)
 
     elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
       bin_thresholds = bin_thresholds.sel(
           init_time=chunk.init_time, lead_time=chunk.lead_time
       )
-    elif {'dayofyear', 'lead_time'}.issubset(bin_thresholds.dims):
-      bin_thresholds = bin_thresholds.sel(
-          dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
-      )
+    elif 'dayofyear' in bin_thresholds.dims:
+      if 'lead_time' in bin_thresholds.dims:
+        # Backward-compatible: use init_time dayofyear when lead_time is also
+        # a threshold dimension (both together identify the valid time).
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=chunk.init_time.dt.dayofyear,
+            lead_time=chunk.lead_time,
+        )
+      else:
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=valid_time.dt.dayofyear,
+        )
+    elif 'hour' in bin_thresholds.dims:
+      # Only hour dimension, no dayofyear.
+      bin_thresholds = bin_thresholds.sel(hour=valid_time.dt.hour)
     else:
       # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
+
+    # Handle hour dimension if still present after above selection.
+    if 'hour' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(hour=valid_time.dt.hour)
 
   elif 'valid_time' in chunk.dims:
     if 'valid_time' in bin_thresholds.dims:
@@ -322,6 +348,10 @@ def select_bin_thresholds_by_time_from_chunk(
     else:
       # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
+
+    # Handle hour dimension if still present after above selection.
+    if 'hour' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(hour=chunk.valid_time.dt.hour)
 
   else:
     # No time dimensions in chunk, so just return thresholds.
