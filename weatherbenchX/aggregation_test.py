@@ -16,6 +16,7 @@ from absl.testing import absltest
 from weatherbenchX import aggregation
 from weatherbenchX import binning
 from weatherbenchX import test_utils
+from weatherbenchX import modifier
 from weatherbenchX import weighting
 from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base as data_loaders_base
@@ -174,8 +175,8 @@ class AggregationTest(absltest.TestCase):
 
     all_metrics = {'rmse': deterministic.RMSE()}
 
-    # Create a fake 2x weighting.
-    class TestWeighting(weighting.Weighting):
+    # Create a fake 2x modifier.
+    class TestModifier(modifier.Modifier):
 
       def weights(
           self,
@@ -184,7 +185,7 @@ class AggregationTest(absltest.TestCase):
         return xr.ones_like(statistic) * 2
 
     # Use it twice, should result in 4x weights.
-    weigh_by = [TestWeighting(), TestWeighting()]
+    test_modifiers = [TestModifier(), TestModifier()]
 
     aggregation_state = self._aggregate(
         all_metrics,
@@ -200,7 +201,7 @@ class AggregationTest(absltest.TestCase):
         targets,
         {
             'reduce_dims': ['init_time', 'latitude', 'longitude'],
-            'weigh_by': weigh_by,
+            'modifiers': test_modifiers,
         },
     )
     actual_4x = aggregation_state_4x.metric_values(all_metrics)
@@ -226,7 +227,7 @@ class AggregationTest(absltest.TestCase):
 
     regions1 = {'north': ((0, 90), (0, 360)), 'south': ((-90, 0), (0, 360))}
     regions2 = {'east': ((-90, 90), (0, 180)), 'west': ((-90, 90), (180, 360))}
-    bin_by = [
+    modifiers = [
         binning.Regions(regions1, bin_dim_name='bins1'),
         binning.Regions(regions2, bin_dim_name='bins2'),
     ]
@@ -236,7 +237,7 @@ class AggregationTest(absltest.TestCase):
         targets,
         {
             'reduce_dims': ['init_time', 'latitude', 'longitude'],
-            'bin_by': bin_by,
+            'modifiers': modifiers,
         },
     )
     actual = aggregation_state.metric_values(all_metrics)
@@ -244,6 +245,43 @@ class AggregationTest(absltest.TestCase):
     self.assertEqual(
         set(actual.dims), set(['bins1', 'bins2', 'lead_time', 'level'])
     )
+
+  def test_modifiers_unified(self):
+    predictions, targets = self._get_test_data()
+    all_metrics = {'rmse': deterministic.RMSE()}
+
+    class TestModifier(modifier.Modifier):
+
+      def weights(
+          self,
+          statistic: xr.DataArray,
+      ) -> xr.DataArray:
+        return xr.ones_like(statistic) * 2
+
+    regions = {'north': ((0, 90), (0, 360)), 'south': ((-90, 0), (0, 360))}
+    bin_method = binning.Regions(regions, bin_dim_name='bins')
+
+    aggregation_state = self._aggregate(
+        all_metrics,
+        predictions,
+        targets,
+        {
+            'reduce_dims': ['init_time', 'latitude', 'longitude'],
+            'modifiers': [TestModifier(), bin_method],
+        },
+    )
+    actual = aggregation_state.metric_values(all_metrics)
+    self.assertIn('bins', actual.dims)
+
+  def test_deprecated_apis(self):
+    with self.assertWarns(DeprecationWarning):
+      agg = aggregation.Aggregator(
+          reduce_dims=['init_time', 'latitude', 'longitude'],
+          bin_by=[binning.ByTimeUnit('hour', 'init_time')],
+          weigh_by=[weighting.GridAreaWeighting()],
+      )
+    # Verify they were merged
+    self.assertLen(agg.modifiers, 2)
 
   def test_aggregation_state_round_trip_data_tree(self):
     aggregation_state = self._get_example_aggregation_state()
