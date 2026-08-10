@@ -58,5 +58,5 @@ setuptools.setup(
     },
     url="https://github.com/google-research/weatherbenchX",
     packages=setuptools.find_packages(),
-    python_requires=">=3,<3.12",  # Because pyarrow won't compile with >3.11
+    python_requires=">=3",
 )
