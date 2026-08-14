@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -22,6 +24,7 @@ import numpy as np
 import pandas as pd
 from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
+from weatherbenchX import beam_utils
 from weatherbenchX import binning
 from weatherbenchX import interpolations
 from weatherbenchX import test_utils
@@ -778,6 +781,159 @@ class BeamPipelineTest(parameterized.TestCase):
             pipeline_agg_state.sum_weights,
         ),
     )
+
+  def test_define_unaggregated_aggregation_state_pipeline_spatial_coarsening(
+      self,
+  ):
+    """Test unaggregated aggregation state pipeline with spatial coarsening."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregation_method = aggregation.Aggregator(reduce_dims=[])
+    spatial_coarsen_window_size = 2
+
+    # Compute expected aggregation state directly and apply coarsening
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_agg_state = aggregation_method.aggregate_statistics(statistics)
+    direct_ds = direct_agg_state.to_dataset()
+    direct_ds = direct_ds.coarsen(
+        latitude=spatial_coarsen_window_size,
+        longitude=spatial_coarsen_window_size,
+        boundary='trim',
+    ).sum()
+    # The pipeline outputs the aggregation state with init_time and lead_time
+    # dimensions transposed to the first two dimensions. Apply the same to the
+    # directly computed aggregation state for comparison.
+    direct_ds = direct_ds.transpose('init_time', 'lead_time', ...)
+
+    results_path = self.create_tempdir('coarsened_agg_state.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregation_method,
+          out_path=results_path,
+          spatial_coarsen_window_size=spatial_coarsen_window_size,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+
+    # Verify spatial dimensions have been coarsened by the window size
+    orig_lat_size = self.predictions.sizes['latitude']
+    orig_lon_size = self.predictions.sizes['longitude']
+    expected_lat_size = orig_lat_size // spatial_coarsen_window_size
+    expected_lon_size = orig_lon_size // spatial_coarsen_window_size
+    self.assertEqual(pipeline_ds.sizes['latitude'], expected_lat_size)
+    self.assertEqual(pipeline_ds.sizes['longitude'], expected_lon_size)
+
+    xr.testing.assert_allclose(pipeline_ds, direct_ds)
+
+  def test_atomic_write_dir_success(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'test_dir')
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      self.assertTrue(tmp_dir.startswith(os.path.dirname(target_dir)))
+      self.assertFalse(os.path.exists(target_dir))
+      with open(os.path.join(tmp_dir, 'sample.txt'), 'w') as f:
+        f.write('hello world')
+      self.assertTrue(os.path.exists(os.path.join(tmp_dir, 'sample.txt')))
+
+    self.assertTrue(os.path.exists(target_dir))
+    with open(os.path.join(target_dir, 'sample.txt'), 'r') as f:
+      self.assertEqual(f.read(), 'hello world')
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_failure_cleans_up(self):
+    """Tests that a mid-write failure cleans up temporary data and re-raises."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'fail_dir')
+    tmp_path_holder = []
+
+    def _write_and_fail():
+      with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+        tmp_path_holder.append(tmp_dir)
+        with open(os.path.join(tmp_dir, 'partial.txt'), 'w') as f:
+          f.write('partial data')
+        raise RuntimeError('Worker crashed')
+
+    self.assertRaises(RuntimeError, _write_and_fail)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+    self.assertFalse(os.path.exists(target_dir))
+
+  def test_atomic_write_dir_target_already_exists_abandons_temporary(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    with open(os.path.join(target_dir, 'original.txt'), 'w') as f:
+      f.write('original content')
+
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+        f.write('redundant worker output')
+
+    # The existing target directory should be preserved intact
+    self.assertTrue(os.path.exists(os.path.join(target_dir, 'original.txt')))
+    self.assertFalse(os.path.exists(os.path.join(target_dir, 'new.txt')))
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_non_exists_error_reraises_even_if_target_exists(
+      self,
+  ):
+    """Confirms running out of space is re-raised even if target exists."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    tmp_path_holder = []
+
+    fs, _ = beam_utils.fsspec.core.url_to_fs(target_dir)
+
+    def _run_with_disk_full():
+      with mock.patch.object(
+          fs,
+          'mv',
+          side_effect=OSError(errno.ENOSPC, 'No space left on device'),
+      ):
+        with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+          tmp_path_holder.append(tmp_dir)
+          with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+            f.write('partial data')
+
+    with self.assertRaises(OSError) as cm:
+      _run_with_disk_full()
+    self.assertEqual(cm.exception.errno, errno.ENOSPC)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+
+  def test_write_dataset_zarr(self):
+    ds = xr.Dataset(
+        {'var1': (('x', 'y'), np.arange(6, dtype=np.float32).reshape(2, 3))},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    zarr_path = os.path.join(self.create_tempdir().full_path, 'output.zarr')
+    beam_pipeline.write_dataset(ds, zarr_path, zarr_chunks={'x': 1, 'y': 2})
+
+    self.assertTrue(os.path.exists(zarr_path))
+    loaded = xr.open_zarr(zarr_path).compute()
+    self.assertNotIn('some_attr', loaded.attrs)
+    xr.testing.assert_allclose(loaded, ds.drop_attrs())
 
 
 if __name__ == '__main__':
