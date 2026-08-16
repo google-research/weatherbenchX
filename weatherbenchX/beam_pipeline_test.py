@@ -701,8 +701,83 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
-  # TODO(matthjw): Add a test where statistics are not defined for all
-  # variables.
+  def test_define_unaggregated_aggregation_state_pipeline(self):
+    """Test unaggregated aggregation state pipeline outputs valid Zarr store."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregation_method = aggregation.Aggregator(reduce_dims=[])
+
+    # Compute expected aggregation state directly
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_agg_state = aggregation_method.aggregate_statistics(statistics)
+
+    results_path = self.create_tempdir('unaggregated_agg_state.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregation_method,
+          out_path=results_path,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+    pipeline_agg_state = aggregation.AggregationState.from_dataset(pipeline_ds)
+
+    def _transpose_to_leading_time_dims(agg_state):
+      def _tr(da):
+        dim_order = [d for d in ('init_time', 'lead_time') if d in da.dims] + [
+            d for d in da.dims if d not in ('init_time', 'lead_time')
+        ]
+        return da.transpose(*dim_order)
+
+      return aggregation.AggregationState(
+          sum_weighted_statistics=xarray_tree.map_structure(
+              _tr, agg_state.sum_weighted_statistics
+          ),
+          sum_weights=xarray_tree.map_structure(_tr, agg_state.sum_weights),
+      )
+
+    # The pipeline outputs the aggregation state with init_time and lead_time
+    # dimensions transposed to the first two dimensions. Apply the same to the
+    # directly computed aggregation state for comparison.
+    direct_agg_state = _transpose_to_leading_time_dims(direct_agg_state)
+
+    xarray_tree.map_structure(
+        lambda x, y: xr.testing.assert_allclose(
+            x, y.transpose(*x.dims), atol=1e-5
+        ),
+        (
+            direct_agg_state.sum_weighted_statistics,
+            direct_agg_state.sum_weights,
+        ),
+        (
+            pipeline_agg_state.sum_weighted_statistics,
+            pipeline_agg_state.sum_weights,
+        ),
+    )
 
 
 if __name__ == '__main__':
