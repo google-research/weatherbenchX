@@ -537,6 +537,12 @@ def define_pipeline(
     )
 
 
+def _transpose_time_dims_first(ds: xr.Dataset) -> xr.Dataset:
+  """Transposes dataset to put ('init_time', 'lead_time') first."""
+  time_dims = [d for d in ('init_time', 'lead_time') if d in ds.dims]
+  return ds.transpose(*time_dims, ...)
+
+
 class ComputeAndFormatStatistics(beam.DoFn):
   """Computes statistics and formats them for xarray-beam."""
 
@@ -577,16 +583,13 @@ class ComputeAndFormatStatistics(beam.DoFn):
 
         chunk_ds = xr.Dataset({name: da})
 
-        dim_order = []
         offsets = {}
         if 'init_time' in chunk_ds.dims:
-          dim_order.append('init_time')
           offsets['init_time'] = time_chunk_offsets.init_time
         if 'lead_time' in chunk_ds.dims:
-          dim_order.append('lead_time')
           offsets['lead_time'] = time_chunk_offsets.lead_time
 
-        chunk_ds = chunk_ds.transpose(*dim_order, ...)
+        chunk_ds = _transpose_time_dims_first(chunk_ds)
         chunk_key = xbeam.Key(offsets, vars={name})
 
         yield chunk_key, chunk_ds
@@ -600,21 +603,10 @@ def _get_template_dataset(
     setup_fn: Optional[Callable[[], None]] = None,
 ) -> xr.Dataset:
   """Computes statistics for the first chunk to create a template dataset."""
-  if setup_fn is not None:
-    setup_fn()
-
   logging.info('Building template with data from first chunk')
 
-  # Evaluate statistics on the first chunk
-  first_chunk_index = 0
-  try:
-    first_init_times, first_lead_times = times[first_chunk_index]
-  except IndexError:
-    raise ValueError('Cannot generate template: TimeChunks is empty') from None
-
-  targets_chunk = targets_loader.load_chunk(first_init_times, first_lead_times)
-  predictions_chunk = predictions_loader.load_chunk(
-      first_init_times, first_lead_times, targets_chunk
+  predictions_chunk, targets_chunk = _load_first_chunk(
+      predictions_loader, targets_loader, times, setup_fn=setup_fn
   )
   statistics_dict = metrics_base.compute_unique_statistics_for_all_metrics(
       metrics, predictions_chunk, targets_chunk
@@ -624,8 +616,14 @@ def _get_template_dataset(
     for var_name, da in var_dict.items():
       first_chunk[f'{stat_name}.{var_name}'] = da
 
-  # Convert the first chunk into a template, with the proper init_time and
-  # lead_time dimensions
+  return _expand_template_time_dimensions(first_chunk, times)
+
+
+def _expand_template_time_dimensions(
+    first_chunk: xr.Dataset,
+    times: time_chunks.TimeChunks,
+) -> xr.Dataset:
+  """Convert first chunk to template, expanding time dimensions if necessary."""
   template = xbeam.make_template(first_chunk)
 
   if 'mask' in template.coords:
@@ -732,3 +730,205 @@ def define_unaggregated_pipeline(
           out_path, template=template, zarr_chunks=zarr_chunks
       )
   )
+
+
+def _load_first_chunk(
+    predictions_loader: data_loaders_base.DataLoader,
+    targets_loader: data_loaders_base.DataLoader,
+    times: time_chunks.TimeChunks,
+    setup_fn: Optional[Callable[[], None]] = None,
+) -> tuple[Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
+  """Loads the first chunk of preds and targets for template generation."""
+  if setup_fn is not None:
+    setup_fn()
+
+  first_chunk_index = 0
+  try:
+    first_init_times, first_lead_times = times[first_chunk_index]
+  except IndexError:
+    raise ValueError('Cannot generate template: TimeChunks is empty') from None
+
+  targets_chunk = targets_loader.load_chunk(first_init_times, first_lead_times)
+  predictions_chunk = predictions_loader.load_chunk(
+      first_init_times, first_lead_times, targets_chunk
+  )
+  return predictions_chunk, targets_chunk
+
+
+def _compute_aggregation_state_dataset(
+    metrics: Mapping[str, metrics_base.Metric],
+    aggregator: aggregation.Aggregator,
+    predictions_chunk: Mapping[Hashable, xr.DataArray],
+    targets_chunk: Mapping[Hashable, xr.DataArray],
+) -> xr.Dataset:
+  """Computes the AggregationState dataset for a single chunk."""
+  statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+      metrics, predictions_chunk, targets_chunk
+  )
+  aggregation_state = aggregator.aggregate_statistics(statistics)
+  return aggregation_state.to_dataset()
+
+
+class ComputeAndFormatAggregationState(beam.DoFn):
+  """Computes unaggregated AggregationState and formats for xarray-beam."""
+
+  def __init__(
+      self,
+      metrics: Mapping[str, metrics_base.Metric],
+      aggregator: aggregation.Aggregator,
+  ):
+    self.metrics = metrics
+    self.aggregator = aggregator
+
+  def process(
+      self,
+      element: tuple[
+          time_chunks.TimeChunkOffsets,
+          tuple[
+              Mapping[Hashable, xr.DataArray],
+              Mapping[Hashable, xr.DataArray],
+          ],
+      ],
+  ) -> Iterable[tuple[xbeam.Key, xr.Dataset]]:
+    """Computes AggregationState dataset and yields (chunk_key, dataset) tuples."""
+    time_chunk_offsets, (predictions_chunk, targets_chunk) = element
+
+    chunk_ds = _compute_aggregation_state_dataset(
+        self.metrics,
+        self.aggregator,
+        predictions_chunk,
+        targets_chunk,
+    )
+
+    for var_name, da in chunk_ds.data_vars.items():
+      var_ds = xr.Dataset({var_name: da})
+      offsets = {}
+      if 'init_time' in var_ds.dims:
+        offsets['init_time'] = time_chunk_offsets.init_time
+      if 'lead_time' in var_ds.dims:
+        offsets['lead_time'] = time_chunk_offsets.lead_time
+      var_ds = _transpose_time_dims_first(var_ds)
+      chunk_key = xbeam.Key(offsets, vars={str(var_name)})
+      yield chunk_key, var_ds
+
+
+def _get_template_aggregation_state_dataset(
+    metrics: Mapping[str, metrics_base.Metric],
+    predictions_loader: data_loaders_base.DataLoader,
+    targets_loader: data_loaders_base.DataLoader,
+    times: time_chunks.TimeChunks,
+    aggregator: aggregation.Aggregator,
+    setup_fn: Optional[Callable[[], None]] = None,
+) -> xr.Dataset:
+  """Computes AggregationState dataset for the first chunk to create a template dataset."""
+  logging.info('Building AggregationState template with data from first chunk.')
+  predictions_chunk, targets_chunk = _load_first_chunk(
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+  )
+  first_chunk = _compute_aggregation_state_dataset(
+      metrics,
+      aggregator,
+      predictions_chunk,
+      targets_chunk,
+  )
+  template = _expand_template_time_dimensions(first_chunk, times)
+  template = _transpose_time_dims_first(template)
+  logging.info('AggregationState template: %s', template)
+  return template
+
+
+def define_unaggregated_aggregation_state_pipeline(
+    root: beam.Pipeline,
+    times: time_chunks.TimeChunks,
+    predictions_loader: data_loaders_base.DataLoader,
+    targets_loader: data_loaders_base.DataLoader,
+    metrics: Mapping[str, metrics_base.Metric],
+    aggregator: aggregation.Aggregator | Mapping[str, aggregation.Aggregator],
+    out_path: str | Mapping[str, str],
+    zarr_chunks: Mapping[str, int] | None = None,
+    setup_fn: Optional[Callable[[], None]] = None,
+) -> None:
+  """Defines a Beam pipeline that streams unaggregated AggregationState to Zarr.
+
+  Args:
+    root: Pipeline root.
+    times: TimeChunks instance.
+    predictions_loader: DataLoader instance for predictions.
+    targets_loader: DataLoader instance for targets.
+    metrics: A dictionary of metrics to compute statistics for.
+    aggregator: Aggregator instance or mapping of aggregator name to Aggregator
+      instance.
+    out_path: The full path to write the output Zarr store to (or mapping of
+      aggregator name to path).
+    zarr_chunks: (Optional) A dictionary of chunks to use for the output Zarr
+      store. If None, the chunks will match those of TimeChunks.
+    setup_fn: (Optional) A function to call once per worker in
+      LoadPredictionsAndTargets.
+  """
+  if isinstance(aggregator, Mapping):
+    if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
+      raise ValueError("Keys of out_path don't match aggregator names.")
+    aggregators = aggregator
+  else:
+    aggregators = {None: aggregator}
+
+  for agg_name, agg in aggregators.items():
+    target_path = _resolve_out_path(out_path, agg_name)
+    if not target_path.endswith('.zarr'):
+      raise ValueError(
+          'Aggregation state output path should end with .zarr, but got'
+          f' {target_path}'
+      )
+
+    template = _get_template_aggregation_state_dataset(
+        metrics, predictions_loader, targets_loader, times, agg, setup_fn
+    )
+    dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+
+    # Default chunks are based on TimeChunks, with no chunking over spatial
+    # dimensions.
+    in_chunks = {}
+    for dim, size in dim_sizes.items():
+      if dim == 'init_time':
+        in_chunks[dim] = times.init_time_chunk_size or -1
+      elif dim == 'lead_time':
+        in_chunks[dim] = times.lead_time_chunk_size or -1
+      else:
+        # Do not chunk over other dimensions, e.g. latitude, longitude, etc,
+        # by setting the chunk size to the full dimension size.
+        in_chunks[dim] = size
+
+    # Use in_chunks as defaults, overridden by any user-specified zarr_chunks.
+    out_chunks = in_chunks.copy()
+    if zarr_chunks:
+      out_chunks.update(zarr_chunks)
+
+    label_suffix = f'_{agg_name}' if agg_name else ''
+
+    _ = (
+        root
+        | f'CreateTimeChunks{label_suffix}'
+        >> beam.Create(times.iter_with_chunk_offsets())
+        | f'LoadPredictionsAndTargets{label_suffix}'
+        >> beam.ParDo(
+            LoadPredictionsAndTargets(
+                predictions_loader, targets_loader, setup_fn=setup_fn
+            )
+        )
+        | f'ComputeAndFormatAggregationState{label_suffix}'
+        >> beam.ParDo(ComputeAndFormatAggregationState(metrics, agg))
+        | f'Rechunk{label_suffix}'
+        >> xbeam.Rechunk(
+            dim_sizes=dim_sizes,
+            source_chunks=in_chunks,
+            target_chunks=out_chunks,
+            itemsize=4,
+        )
+        | f'WriteAggregationStateToZarr{label_suffix}'
+        >> xbeam.ChunksToZarr(
+            target_path, template=template, zarr_chunks=out_chunks
+        )
+    )
