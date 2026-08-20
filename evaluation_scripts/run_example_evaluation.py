@@ -47,6 +47,7 @@ import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
 from weatherbenchX import binning
+from weatherbenchX import flag_utils
 from weatherbenchX import time_chunks
 from weatherbenchX import weighting
 from weatherbenchX.data_loaders import xarray_loaders
@@ -70,11 +71,31 @@ PREDICTION_PATH = flags.DEFINE_string(
     None,
     help='Path to forecasts to evaluate in Zarr format',
 )
+PREDICTION_DIM_RENAMES = flag_utils.DEFINE_string_key_value_pairs(
+    'prediction_dim_renames',
+    None,
+    help=(
+        'OLD_NAME=NEW_NAME pairs. Used to rename dimensions in the predictions '
+        'after loading. The default is useful for ecmwf data. '
+        'That is, "time=init_time,prediction_timedelta=lead_time".'
+    ),
+)
+flags.declare_key_flag('prediction_dim_renames')  # So flag appears in --help.
 TARGET_PATH = flags.DEFINE_string(
     'target_path',
     None,
     help='Path to ground-truth to evaluate in Zarr format',
 )
+TARGET_DIM_RENAMES = flag_utils.DEFINE_string_key_value_pairs(
+    'target_dim_renames',
+    None,
+    help=(
+        'OLD_NAME=NEW_NAME pairs. Used to rename dimensions in the targets '
+        'after loading. The default is useful for ecmwf data. '
+        'That is "time=valid_time".'
+    ),
+)
+flags.declare_key_flag('target_dim_renames')  # So flag appears in --help.
 TIME_START = flags.DEFINE_string(
     'time_start',
     '2020-01-01',
@@ -161,12 +182,14 @@ def main(argv: Sequence[str]) -> None:
       path=TARGET_PATH.value,
       variables=VARIABLES.value,
       sel_kwargs=sel_kwargs,
+      rename_dimensions=TARGET_DIM_RENAMES.value or 'ecmwf',
   )
 
   prediction_loader = xarray_loaders.PredictionsFromXarray(
       path=PREDICTION_PATH.value,
       variables=VARIABLES.value,
       sel_kwargs=sel_kwargs,
+      rename_dimensions=PREDICTION_DIM_RENAMES.value or 'ecmwf',
   )
 
   all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}

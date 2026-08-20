@@ -28,3 +28,5 @@ Guidelines](https://opensource.google/conduct/).
 ### Code Reviews
 
 All submissions, including submissions by project members, require review.
+
+* Run `pyink path/to/modified/files` to format changes before sending for review
