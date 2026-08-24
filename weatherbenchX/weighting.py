@@ -20,26 +20,10 @@ import dataclasses
 import numpy as np
 import xarray as xr
 
+from weatherbenchX import modifier
 
-class Weighting(abc.ABC):
-  """Abstract class for weighting."""
-
-  @abc.abstractmethod
-  def weights(
-      self,
-      statistic: xr.DataArray,
-  ) -> xr.DataArray:
-    """Return weights for a given statistic.
-
-    For now the implementation assumes that all information necessary to
-    calculate the weights is contained in the statistic.
-
-    Args:
-      statistic: Individual DataArray with statistic values.
-
-    Returns:
-      weights: Weights that should broadcast against statistic dimensions.
-    """
+# Backward compatibility alias
+Weighting = modifier.Modifier
 
 
 def _is_strictly_monotonic(vector):
@@ -209,6 +193,12 @@ class StationDensityWeighting(Weighting):
   longitude_name: str = 'longitude'
   return_normalized: bool = True
   max_weight: float | None = None
+
+  @property
+  def added_dims(self) -> Sequence[str]:
+    if np.ndim(self.alpha_0_degrees) > 0:
+      return ['weighting_alpha_0']
+    return []
 
   def weights(
       self,

@@ -13,44 +13,26 @@
 # limitations under the License.
 """Binning class definitions."""
 
-import abc
 from typing import Any, Hashable, Mapping, Optional, Sequence, Tuple, Union
 import numpy as np
+from weatherbenchX import modifier
 import xarray as xr
 
 
-class Binning(abc.ABC):
-  """Binning base class."""
+class Binning(modifier.Modifier):
+  """Convenience base class for weightings that add a dimension for bins."""
 
   def __init__(self, bin_dim_name: str):
-    """Init.
+    """Inits, specifying the name of a single binning dimension."""
+    self._bin_dim_name = bin_dim_name
 
-    Args:
-      bin_dim_name: Name of binning dimension.
-    """
-    self.bin_dim_name = bin_dim_name
-
-  @abc.abstractmethod
-  def create_bin_mask(
-      self,
-      statistic: xr.DataArray,
-  ) -> xr.DataArray:
-    """Creates a bin mask for a statistic.
-
-    It is assumed that all information required to compute bins is included in
-    the statistics element.
-
-    Args:
-      statistic: Individual DataArray with statistic values.
-
-    Returns:
-      bin_mask: Boolean mask with shape that boradcasts against the statistic
-        DataArray.
-    """
+  @property
+  def added_dims(self) -> Sequence[str]:
+    return [self._bin_dim_name]
 
 
 def _create_lat_mask(
-    lat: xr.DataArray, lat_lims: Tuple[int, int]
+    lat: xr.DataArray, lat_lims: Tuple[float, float]
 ) -> xr.DataArray:
   """Computes a boolean mask for a latitude limits region."""
   if lat_lims[0] >= lat_lims[1]:
@@ -61,7 +43,7 @@ def _create_lat_mask(
 
 
 def _create_lon_mask(
-    lon: xr.DataArray, lon_lims: Tuple[int, int]
+    lon: xr.DataArray, lon_lims: Tuple[float, float]
 ) -> xr.DataArray:
   """Computes a boolean mask for a longitude limits region."""
   # Make sure we are in the [0, 360] interval.
@@ -80,8 +62,8 @@ def _create_lon_mask(
 def _region_to_mask(
     lat: xr.DataArray,
     lon: xr.DataArray,
-    lat_lims: Tuple[int, int],
-    lon_lims: Tuple[int, int],
+    lat_lims: Tuple[float, float],
+    lon_lims: Tuple[float, float],
 ) -> xr.DataArray:
   """Computes a boolean mask for a lat/lon limits region."""
   lat_mask = _create_lat_mask(lat, lat_lims)
@@ -118,7 +100,7 @@ class LandSea(Binning):
     self._land_mask = land_sea_fraction >= land_sea_threshold
     self._include_global_mask = include_global_mask
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -138,9 +120,9 @@ class LandSea(Binning):
 
     masks = xr.concat(
         masks,
-        dim=self.bin_dim_name,
+        dim=self._bin_dim_name,
     )
-    masks.coords[self.bin_dim_name] = np.array(labels)
+    masks.coords[self._bin_dim_name] = np.array(labels)
     return masks
 
 
@@ -152,7 +134,7 @@ class Regions(Binning):
 
   def __init__(
       self,
-      regions: Mapping[Hashable, Tuple[Tuple[int, int], Tuple[int, int]]],
+      regions: Mapping[Hashable, Tuple[Tuple[float, float], Tuple[float, float]]],
       bin_dim_name: str = 'region',
       land_sea_mask: Optional[xr.DataArray] = None,
   ):
@@ -178,12 +160,12 @@ class Regions(Binning):
     masks = []
     for region_name, (lat_lims, lon_lims) in self._regions.items():
       mask = _region_to_mask(lat, lon, lat_lims, lon_lims)
-      mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
-      mask.coords[self.bin_dim_name] = np.array([region_name])
+      mask = mask.expand_dims(dim=self._bin_dim_name, axis=0)
+      mask.coords[self._bin_dim_name] = np.array([region_name])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
+    return xr.concat(masks, dim=self._bin_dim_name)  # pyrefly: ignore[bad-return]
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -195,9 +177,9 @@ class Regions(Binning):
           masks.longitude, self._land_sea_mask.longitude
       ), 'Land/sea mask coordinates do not match.'
       land_masks = masks * self._land_sea_mask.astype(bool)
-      region_names = [f'{r}_land' for r in masks.coords[self.bin_dim_name].data]
-      land_masks.coords[self.bin_dim_name] = np.array(region_names)
-      masks = xr.concat([masks, land_masks], dim=self.bin_dim_name)
+      region_names = [f'{r}_land' for r in masks.coords[self._bin_dim_name].data]
+      land_masks.coords[self._bin_dim_name] = np.array(region_names)
+      masks = xr.concat([masks, land_masks], dim=self._bin_dim_name)
     return masks
 
 
@@ -223,7 +205,7 @@ class LatitudeBins(Binning):
         lat_range[0], lat_range[1] + self._degrees, self._degrees
     )
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -237,10 +219,10 @@ class LatitudeBins(Binning):
       )
       # Broadcast the mask to the shape of statistic
       mask = mask.broadcast_like(statistic)
-      mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
-      mask.coords[self.bin_dim_name] = np.array([lat_start])
+      mask = mask.expand_dims(dim=self._bin_dim_name, axis=0)
+      mask.coords[self._bin_dim_name] = np.array([lat_start])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
+    return xr.concat(masks, dim=self._bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 class LongitudeBins(Binning):
@@ -268,7 +250,7 @@ class LongitudeBins(Binning):
         lon_range[0], lon_end + self._degrees, self._degrees
     )
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -282,10 +264,10 @@ class LongitudeBins(Binning):
       )
       # Broadcast the mask to the shape of statistic
       mask = mask.broadcast_like(statistic)
-      mask = mask.expand_dims(dim=self.bin_dim_name, axis=0)
-      mask.coords[self.bin_dim_name] = np.array([np.mod(lon_start, 360)])
+      mask = mask.expand_dims(dim=self._bin_dim_name, axis=0)
+      mask.coords[self._bin_dim_name] = np.array([np.mod(lon_start, 360)])
       masks.append(mask)
-    return xr.concat(masks, dim=self.bin_dim_name)  # pyrefly: ignore[bad-return]
+    return xr.concat(masks, dim=self._bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 def vectorized_coord_mask(
@@ -340,7 +322,7 @@ class ByExactCoord(Binning):
     self.coord = coord
     self.add_global_bin = add_global_bin
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -427,7 +409,7 @@ class ByTimeUnit(Binning):
     self.time_dim = time_dim
     self.add_global_bin = add_global_bin
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -486,7 +468,7 @@ class ByTimeUnitSets(Binning):
     self.dim = dim
     self.add_global_bin = add_global_bin
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -500,18 +482,18 @@ class ByTimeUnitSets(Binning):
         s = [s]
       s = np.array(s)
       mask = time_unit_values.isin(s)
-      mask = mask.expand_dims(self.bin_dim_name, axis=0)
-      mask.coords[self.bin_dim_name] = [name]
+      mask = mask.expand_dims(self._bin_dim_name, axis=0)
+      mask.coords[self._bin_dim_name] = [name]
       masks.append(mask)
 
     if self.add_global_bin:
       mask = xr.full_like(time_unit_values, True, dtype=bool).expand_dims(
-          self.bin_dim_name
+          self._bin_dim_name
       )
-      mask.coords[self.bin_dim_name] = ['global']
+      mask.coords[self._bin_dim_name] = ['global']
       masks.append(mask)
 
-    return xr.concat(masks, self.bin_dim_name)  # pyrefly: ignore[bad-return]
+    return xr.concat(masks, self._bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 class ByTimeUnitFromSeconds(Binning):
@@ -541,7 +523,7 @@ class ByTimeUnitFromSeconds(Binning):
     self.time_dim = time_dim
     self.bins = bins
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -589,7 +571,7 @@ class ByCoordBins(Binning):
     self.bin_edges = bin_edges
     self.add_global_bin = add_global_bin
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: xr.DataArray,
   ) -> xr.DataArray:
@@ -672,7 +654,7 @@ class BySets(Binning):
     self.add_set_complements = add_set_complements
     self.add_global_bin = add_global_bin
 
-  def create_bin_mask(
+  def weights(
       self,
       statistic: Union[xr.DataArray, xr.Dataset],
   ) -> xr.DataArray:
@@ -687,19 +669,19 @@ class BySets(Binning):
         s = [s]
       s = np.array(s)
       mask = statistic[self.coord_name].isin(s)
-      mask = mask.expand_dims(self.bin_dim_name, axis=0)
-      mask.coords[self.bin_dim_name] = [name]
+      mask = mask.expand_dims(self._bin_dim_name, axis=0)
+      mask.coords[self._bin_dim_name] = [name]
       masks.append(mask)
       if self.add_set_complements:
         not_in_mask = ~mask.copy()
-        not_in_mask.coords[self.bin_dim_name] = [f'not_in_{name}']
+        not_in_mask.coords[self._bin_dim_name] = [f'not_in_{name}']
         masks.append(not_in_mask)
     if self.add_global_bin:
       mask = xr.full_like(
           statistic[self.coord_name], True, dtype=bool
       ).expand_dims(
-          self.bin_dim_name
+          self._bin_dim_name
       )  # Add as a dimension
-      mask.coords[self.bin_dim_name] = ['global']
+      mask.coords[self._bin_dim_name] = ['global']
       masks.append(mask)
-    return xr.concat(masks, self.bin_dim_name)  # pyrefly: ignore[bad-return]
+    return xr.concat(masks, self._bin_dim_name)  # pyrefly: ignore[bad-return]
