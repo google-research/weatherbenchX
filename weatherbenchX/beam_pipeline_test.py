@@ -779,6 +779,133 @@ class BeamPipelineTest(parameterized.TestCase):
         ),
     )
 
+  @parameterized.parameters(
+      {
+          'reduce_dims': ['init_time', 'latitude', 'longitude'],
+          'lead_time_chunk_size': 1,
+      },
+      {'reduce_dims': ['init_time'], 'lead_time_chunk_size': 1},
+      {'reduce_dims': ['init_time'], 'lead_time_chunk_size': None},
+  )
+  def test_define_pipeline_stream_lead_time(
+      self, reduce_dims, lead_time_chunk_size
+  ):
+    """Test define_pipeline with stream_lead_time=True matches direct metrics."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=lead_time_chunk_size,
+    )
+
+    pred_loader = xarray_loaders.PredictionsFromXarray(self.predictions_path)
+    target_loader = xarray_loaders.TargetsFromXarray(self.targets_path)
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregator = aggregation.Aggregator(reduce_dims=reduce_dims)
+
+    # Compute results directly:
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        pred_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_aggregation_state = aggregator.aggregate_statistics(statistics)
+    direct_metrics = direct_aggregation_state.metric_values(
+        all_metrics
+    ).compute()
+
+    results_path = self.create_tempdir('streamed_metrics.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          pred_loader,
+          target_loader,
+          all_metrics,
+          aggregator,
+          out_path=results_path,
+          stream_lead_time=True,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+
+    for var in direct_metrics.data_vars:
+      xr.testing.assert_allclose(
+          direct_metrics[var],
+          pipeline_ds[var].transpose(*direct_metrics[var].dims),
+          atol=1e-5,
+      )
+
+  def test_define_unaggregated_aggregation_state_pipeline_spatial_coarsening(
+      self,
+  ):
+    """Test unaggregated aggregation state pipeline with spatial coarsening."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregation_method = aggregation.Aggregator(reduce_dims=[])
+    spatial_coarsen_window_size = 2
+
+    # Compute expected aggregation state directly and apply coarsening
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_agg_state = aggregation_method.aggregate_statistics(statistics)
+    direct_ds = direct_agg_state.to_dataset()
+    direct_ds = direct_ds.coarsen(
+        latitude=spatial_coarsen_window_size,
+        longitude=spatial_coarsen_window_size,
+        boundary='trim',
+    ).sum()
+    # The pipeline outputs the aggregation state with init_time and lead_time
+    # dimensions transposed to the first two dimensions. Apply the same to the
+    # directly computed aggregation state for comparison.
+    direct_ds = direct_ds.transpose('init_time', 'lead_time', ...)
+
+    results_path = self.create_tempdir('coarsened_agg_state.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregation_method,
+          out_path=results_path,
+          spatial_coarsen_window_size=spatial_coarsen_window_size,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+
+    # Verify spatial dimensions have been coarsened by the window size
+    orig_lat_size = self.predictions.sizes['latitude']
+    orig_lon_size = self.predictions.sizes['longitude']
+    expected_lat_size = orig_lat_size // spatial_coarsen_window_size
+    expected_lon_size = orig_lon_size // spatial_coarsen_window_size
+    self.assertEqual(pipeline_ds.sizes['latitude'], expected_lat_size)
+    self.assertEqual(pipeline_ds.sizes['longitude'], expected_lon_size)
+
+    xr.testing.assert_allclose(pipeline_ds, direct_ds)
 
 if __name__ == '__main__':
   absltest.main()
