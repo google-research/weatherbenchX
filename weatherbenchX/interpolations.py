@@ -354,14 +354,25 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
       reference: xr.DataArray,  # pytype: disable=signature-mismatch
   ) -> xr.DataArray:
     if da.name in ['2m_temperature', '10m_wind_speed']:
-      # Sometimes coordinates don't match exactly, so we reassign them here.
+      # Sometimes coordinates (e.g. latitude ordering North-South vs South-North)
+      # don't match exactly, so we assert they cover the same coordinates and
+      # reindex to match da.
       grid_elevation = self._grid_elevation.compute()
-      xr.testing.assert_allclose(grid_elevation.latitude, da.latitude)
-      xr.testing.assert_allclose(grid_elevation.longitude, da.longitude)
-      grid_elevation = grid_elevation.assign_coords(
-          latitude=da.latitude,
-          longitude=da.longitude,
+      xr.testing.assert_allclose(
+          grid_elevation.latitude.sortby('latitude'),
+          da.latitude.sortby('latitude'),
       )
+      xr.testing.assert_allclose(
+          grid_elevation.longitude.sortby('longitude'),
+          da.longitude.sortby('longitude'),
+      )
+      if (
+          not grid_elevation.latitude.equals(da.latitude)
+          or not grid_elevation.longitude.equals(da.longitude)
+      ):
+        grid_elevation = grid_elevation.reindex(
+            latitude=da.latitude, longitude=da.longitude
+        )
       da.coords['grid_elevation'] = grid_elevation
 
     da_like_reference = super().interpolate_data_array(da, reference)
