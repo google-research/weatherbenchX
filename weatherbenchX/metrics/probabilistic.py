@@ -1421,6 +1421,8 @@ class TiledEnergyScore(base.PerVariableMetric):
       ensemble_dim: str = ENSEMBLE_DIM,
       fair: bool = True,
       wrap_longitude: bool = True,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
   ):
     # TODO(landryd, srasp): Support passing a list of window_sizes, producing
     # metrics with an additional 'window_size' dimension.
@@ -1430,6 +1432,8 @@ class TiledEnergyScore(base.PerVariableMetric):
     self._ensemble_dim = ensemble_dim
     self._fair = fair
     self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -1445,6 +1449,8 @@ class TiledEnergyScore(base.PerVariableMetric):
         window_size=self._window_size,
         window_dim=self._WINDOW_DIM,
         wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
     )
 
     return {
@@ -1484,6 +1490,8 @@ class TiledVariogramScore(base.PerVariableMetric):
       ensemble_dim: str = ENSEMBLE_DIM,
       p: float = 0.5,
       wrap_longitude: bool = True,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
   ):
     # TODO(landryd, srasp): Support passing a list of window_sizes, producing
     # metrics with an additional 'window_size' dimension.
@@ -1493,6 +1501,8 @@ class TiledVariogramScore(base.PerVariableMetric):
     self._ensemble_dim = ensemble_dim
     self._p = p
     self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
 
   @property
   def statistics(self) -> Mapping[str, base.Statistic]:
@@ -1505,6 +1515,8 @@ class TiledVariogramScore(base.PerVariableMetric):
         window_size=self._window_size,
         window_dim=self._WINDOW_DIM,
         wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
     )
 
     return {
