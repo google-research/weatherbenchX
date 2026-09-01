@@ -814,6 +814,41 @@ class MetricsTest(parameterized.TestCase):
     out = tile.transform_fn(da)
     self.assertEqual(out.sizes, {'window': 9, 'latitude': 3, 'longitude': 3})
 
+  def test_construct_tiles_custom_dims(self):
+    """Check construct_tiles with non-default spatial dimension names."""
+    ds = xr.Dataset(
+        {'x': (['lat', 'lon'], np.ones((5, 5)))},
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+    )
+    out = wrappers.construct_tiles(
+        ds, window_size=3, lat_dim='lat', lon_dim='lon', wrap_longitude=False
+    )
+    np.testing.assert_array_equal(out['lat'].values, [1, 2, 3])
+    np.testing.assert_array_equal(out['lon'].values, [1, 2, 3])
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  def test_tile_wrapper_custom_dims(self):
+    """Check Tile wrapper with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both',
+        window_size=3,
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window_lat_lat_lon_lon',
+    )
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
   def test_energy_score(self):
     ensemble_size = 4
     targets = test_utils.mock_prediction_data(
@@ -839,6 +874,46 @@ class MetricsTest(parameterized.TestCase):
     )
     for v in ['2m_temperature', 'geopotential']:
       self.assertIn(f'es.{v}', results)
+
+  def test_energy_score_numerical_values(self):
+    """Verifies numerical correctness of EnergyScore skill and spread."""
+    # Case 1: Perfect prediction should yield exactly 0.0.
+    targets_perfect = {'x': xr.DataArray(np.array([2.0, 4.0]), dims=['dim'])}
+    predictions_perfect = {
+        'x': xr.DataArray(
+            np.array([[2.0, 4.0], [2.0, 4.0]]), dims=['sample', 'dim']
+        )
+    }
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+    skill_perfect = skill_stat.compute(predictions_perfect, targets_perfect)[
+        'x'
+    ]
+    spread_perfect = spread_stat.compute(predictions_perfect, targets_perfect)[
+        'x'
+    ]
+    self.assertAlmostEqual(float(skill_perfect.values), 0.0)
+    self.assertAlmostEqual(float(spread_perfect.values), 0.0)
+
+    # Case 2: Known analytical values:
+    # Targets: [0.0]. Predictions: [[3.0], [5.0]] with ensemble size M=2.
+    # Skill: mean(|3 - 0|, |5 - 0|) = 4.0.
+    # Spread (fair=True): 2 * |3 - 5| / (2 * 1) = 2.0.
+    # Total EnergyScore: 4.0 - 0.5 * 2.0 = 3.0.
+    targets = {'x': xr.DataArray(np.array([0.0]), dims=['dim'])}
+    predictions = {
+        'x': xr.DataArray(np.array([[3.0], [5.0]]), dims=['sample', 'dim'])
+    }
+    skill = skill_stat.compute(predictions, targets)['x']
+    spread = spread_stat.compute(predictions, targets)['x']
+    self.assertAlmostEqual(float(skill.values), 4.0)
+    self.assertAlmostEqual(float(spread.values), 2.0)
+    es = skill - 0.5 * spread
+    self.assertAlmostEqual(float(es.values), 3.0)
 
   def test_direct_rps(self):
     # CDFs
