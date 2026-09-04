@@ -65,6 +65,7 @@ class XarrayDataLoader(base.DataLoader):
       automatically_convert_lat_lon_to_latitude_longitude: bool = True,
       rename_variables: Optional[Mapping[str, str]] = None,
       preprocessing_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      ignore_missing_variables: bool = False,
       **kwargs,
   ):
     """Init.
@@ -91,6 +92,9 @@ class XarrayDataLoader(base.DataLoader):
       rename_variables: (Optional) Dictionary of variables to rename.
       preprocessing_fn: (Optional) A function that is applied to the dataset
         right after it is opened.
+      ignore_missing_variables: (Optional) If False (default), raise KeyError
+        when any requested variable is missing from the dataset. If True, log a
+        warning and continue with available variables.
       **kwargs: Keyword arguments to pass to base.DataLoader.
     """
     if path is not None and ds is not None:
@@ -109,6 +113,7 @@ class XarrayDataLoader(base.DataLoader):
     )
     self._rename_variables = rename_variables
     self._preprocessing_fn = preprocessing_fn
+    self._ignore_missing_variables = ignore_missing_variables
 
     self._preprocessed = False
     super().__init__(**kwargs)
@@ -135,7 +140,29 @@ class XarrayDataLoader(base.DataLoader):
         self._automatically_convert_lat_lon_to_latitude_longitude,
     )
     if self._variables is not None:
-      self._ds = self._ds[list(self._variables)]
+      requested = list(self._variables)
+      available = [v for v in requested if v in self._ds]
+      missing = [v for v in requested if v not in self._ds]
+      if missing:
+        if not self._ignore_missing_variables:
+          raise KeyError(
+              f'Dataset at {self._path} is missing requested variables'
+              f' {missing}. Available: {available}. Set'
+              ' ignore_missing_variables=True to skip missing variables.'
+          )
+        logging.warning(
+            'Dataset at %s is missing requested variables %s. Continuing with'
+            ' available: %s',
+            self._path,
+            missing,
+            available,
+        )
+      if not available:
+        raise KeyError(
+            f'None of the requested variables {requested} were found in dataset'
+            f' at {self._path}.'
+        )
+      self._ds = self._ds[available]
     if self._sel_kwargs is not None:
       self._ds = self._ds.sel(**self._sel_kwargs)
     self._preprocessed = True
