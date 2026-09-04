@@ -40,6 +40,7 @@ class LoadPredictionsAndTargets(beam.DoFn):
       predictions_loader: data_loaders_base.DataLoader,
       targets_loader: data_loaders_base.DataLoader,
       setup_fn: Optional[Callable[[], None]] = None,
+      ignore_missing_variables: bool = False,
   ):
     """Init.
 
@@ -47,10 +48,14 @@ class LoadPredictionsAndTargets(beam.DoFn):
       predictions_loader: The data loader for the predictions.
       targets_loader: The data loader for the targets.
       setup_fn: (Optional) A function to call once per worker.
+      ignore_missing_variables: (Optional) If True, filter targets and
+        predictions chunks to their common variables, logging a warning for any
+        missing variables. If False (default), keep loaded variables as-is.
     """
     self.predictions_loader = predictions_loader
     self.targets_loader = targets_loader
     self.setup_fn = setup_fn
+    self.ignore_missing_variables = ignore_missing_variables
     self.is_initialized = False
     self.target_load_time = beam.metrics.Metrics.distribution(
         'LoadPredictionsAndTargets', 'target_load_time'
@@ -106,6 +111,38 @@ class LoadPredictionsAndTargets(beam.DoFn):
     self.prediction_load_time.update(
         (time.time() - start_time) * 1000
     )  # In milliseconds because beam counters use longs.
+
+    if self.ignore_missing_variables:
+      common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
+      if not common_vars:
+        raise ValueError(
+            'No common variables found between targets and predictions.'
+            f' Targets: {targets_chunk.keys()}, Predictions:'
+            f' {predictions_chunk.keys()}'
+        )
+      if len(common_vars) < len(targets_chunk) or len(common_vars) < len(
+          predictions_chunk
+      ):
+        missing_in_preds = set(targets_chunk.keys()) - set(
+            predictions_chunk.keys()
+        )
+        missing_in_targets = set(predictions_chunk.keys()) - set(
+            targets_chunk.keys()
+        )
+        if missing_in_preds:
+          logging.warning(
+              'Targets chunk has variables not present in predictions'
+              ' chunk: %s',
+              missing_in_preds,
+          )
+        if missing_in_targets:
+          logging.warning(
+              'Predictions chunk has variables not present in targets'
+              ' chunk: %s',
+              missing_in_targets,
+          )
+        targets_chunk = {v: targets_chunk[v] for v in common_vars}
+        predictions_chunk = {v: predictions_chunk[v] for v in common_vars}
 
     logging.log_first_n(
         logging.INFO,
@@ -453,6 +490,7 @@ def define_pipeline(
     out_path: str | Mapping[str, str] | None = None,
     aggregation_state_out_path: str | Mapping[str, str] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
 
@@ -466,8 +504,8 @@ def define_pipeline(
       instance.
     out_path: The full path to write the metrics to (or mapping of aggregator
       name to path). If you specify multiple aggregators but only a single
-      out_path, the aggregator name will be appended to the filename to get
-      a path for each aggregator.
+      out_path, the aggregator name will be appended to the filename to get a
+      path for each aggregator.
     aggregation_state_out_path: The full path to write the final aggregation
       state to (or mapping of aggregator name to path). This can be useful if
       you want to compute further metrics from it later, and if you are
@@ -476,6 +514,8 @@ def define_pipeline(
       aggregators are specified.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
   """
   if isinstance(aggregator, Mapping):
     if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
@@ -490,7 +530,10 @@ def define_pipeline(
       | 'CreateTimeChunks' >> beam.Create(times.iter_with_chunk_offsets())
       | beam.ParDo(
           LoadPredictionsAndTargets(
-              predictions_loader, targets_loader, setup_fn=setup_fn
+              predictions_loader,
+              targets_loader,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
       )
       # Compute statistics for each chunk, perform the initial per-chunk
@@ -601,12 +644,17 @@ def _get_template_dataset(
     targets_loader: data_loaders_base.DataLoader,
     times: time_chunks.TimeChunks,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> xr.Dataset:
   """Computes statistics for the first chunk to create a template dataset."""
   logging.info('Building template with data from first chunk')
 
   predictions_chunk, targets_chunk = _load_first_chunk(
-      predictions_loader, targets_loader, times, setup_fn=setup_fn
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   statistics_dict = metrics_base.compute_unique_statistics_for_all_metrics(
       metrics, predictions_chunk, targets_chunk
@@ -666,6 +714,7 @@ def define_unaggregated_pipeline(
     out_path: str,
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ):
   """Defines a Beam pipeline that calculates statistics without aggregation.
 
@@ -685,9 +734,16 @@ def define_unaggregated_pipeline(
       store. If None, the chunks will match those of TimeChunks.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
   """
   template = _get_template_dataset(
-      metrics, predictions_loader, targets_loader, times, setup_fn
+      metrics,
+      predictions_loader,
+      targets_loader,
+      times,
+      setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
@@ -713,7 +769,10 @@ def define_unaggregated_pipeline(
       | 'LoadPredictionsAndTargets'
       >> beam.ParDo(
           LoadPredictionsAndTargets(
-              predictions_loader, targets_loader, setup_fn=setup_fn
+              predictions_loader,
+              targets_loader,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
       )
       | 'ComputeAndFormatStatistics'
@@ -737,6 +796,7 @@ def _load_first_chunk(
     targets_loader: data_loaders_base.DataLoader,
     times: time_chunks.TimeChunks,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> tuple[Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
   """Loads the first chunk of preds and targets for template generation."""
   if setup_fn is not None:
@@ -752,6 +812,10 @@ def _load_first_chunk(
   predictions_chunk = predictions_loader.load_chunk(
       first_init_times, first_lead_times, targets_chunk
   )
+  if ignore_missing_variables:
+    common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
+    targets_chunk = {v: targets_chunk[v] for v in common_vars}
+    predictions_chunk = {v: predictions_chunk[v] for v in common_vars}
   return predictions_chunk, targets_chunk
 
 
@@ -819,6 +883,7 @@ def _get_template_aggregation_state_dataset(
     times: time_chunks.TimeChunks,
     aggregator: aggregation.Aggregator,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> xr.Dataset:
   """Computes AggregationState dataset for the first chunk to create a template dataset."""
   logging.info('Building AggregationState template with data from first chunk.')
@@ -827,6 +892,7 @@ def _get_template_aggregation_state_dataset(
       targets_loader,
       times,
       setup_fn=setup_fn,
+      ignore_missing_variables=ignore_missing_variables,
   )
   first_chunk = _compute_aggregation_state_dataset(
       metrics,
@@ -850,6 +916,7 @@ def define_unaggregated_aggregation_state_pipeline(
     out_path: str | Mapping[str, str],
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    ignore_missing_variables: bool = False,
 ) -> None:
   """Defines a Beam pipeline that streams unaggregated AggregationState to Zarr.
 
@@ -867,6 +934,8 @@ def define_unaggregated_aggregation_state_pipeline(
       store. If None, the chunks will match those of TimeChunks.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    ignore_missing_variables: (Optional) If True, filter targets and predictions
+      chunks to their common variables. Default: False.
   """
   if isinstance(aggregator, Mapping):
     if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
@@ -884,7 +953,13 @@ def define_unaggregated_aggregation_state_pipeline(
       )
 
     template = _get_template_aggregation_state_dataset(
-        metrics, predictions_loader, targets_loader, times, agg, setup_fn
+        metrics,
+        predictions_loader,
+        targets_loader,
+        times,
+        agg,
+        setup_fn,
+        ignore_missing_variables=ignore_missing_variables,
     )
     dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
@@ -915,7 +990,10 @@ def define_unaggregated_aggregation_state_pipeline(
         | f'LoadPredictionsAndTargets{label_suffix}'
         >> beam.ParDo(
             LoadPredictionsAndTargets(
-                predictions_loader, targets_loader, setup_fn=setup_fn
+                predictions_loader,
+                targets_loader,
+                setup_fn=setup_fn,
+                ignore_missing_variables=ignore_missing_variables,
             )
         )
         | f'ComputeAndFormatAggregationState{label_suffix}'
