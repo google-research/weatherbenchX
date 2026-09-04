@@ -853,6 +853,8 @@ def construct_tiles(
     window_size: int = 3,
     window_dim: str = 'window',
     wrap_longitude: bool = False,
+    lat_dim: str = 'latitude',
+    lon_dim: str = 'longitude',
 ) -> xr.DataArray:
   """Constructs local neighborhood tiles (windows) across the spatial grid.
 
@@ -864,14 +866,16 @@ def construct_tiles(
   also removed.
 
   Args:
-    da: The input DataArray containing `latitude` and `longitude` dimensions.
-      Note that wrappers apply this function per DataArray, not per Dataset.
+    da: The input DataArray containing spatial dimensions. Note that wrappers
+      apply this function per DataArray, not per Dataset.
     window_size: The length of the side of the square tile window (in pixels).
     window_dim: The name of the new dimension along which the window pixels are
       concatenated.
     wrap_longitude: If True, assume longitude wraps around (e.g.  global grids).
-     If False (default), also clip values near longitude edges (e.g. for 
-     regional datasets).
+      If False (default), also clip values near longitude edges (e.g. for
+      regional datasets).
+    lat_dim: Name of the latitude dimension. Default: 'latitude'.
+    lon_dim: Name of the longitude dimension. Default: 'longitude'.
 
   Returns:
     An `xr.DataArray` with the additional `window_dim` dimension representing
@@ -883,7 +887,7 @@ def construct_tiles(
       d_lat = i - window_size // 2
       d_lon = j - window_size // 2
 
-      rolled = da.roll(latitude=d_lat, longitude=d_lon, roll_coords=False)
+      rolled = da.roll({lat_dim: d_lat, lon_dim: d_lon}, roll_coords=False)
       shifts.append(rolled)
 
   windowed = xr.concat(shifts, dim=window_dim)
@@ -894,16 +898,20 @@ def construct_tiles(
   window_reach_upper = window_size - 1 - half_window_size
 
   windowed = windowed.isel(
-      latitude=slice(
-          window_reach_lower, da.sizes['latitude'] - window_reach_upper
-      )
+      {
+          lat_dim: slice(
+              window_reach_lower, da.sizes[lat_dim] - window_reach_upper
+          )
+      }
   )
 
   if not wrap_longitude:
     windowed = windowed.isel(
-        longitude=slice(
-            window_reach_lower, da.sizes['longitude'] - window_reach_upper
-        )
+        {
+            lon_dim: slice(
+                window_reach_lower, da.sizes[lon_dim] - window_reach_upper
+            )
+        }
     )
 
   return windowed  # pyrefly: ignore[bad-return]
@@ -912,11 +920,11 @@ def construct_tiles(
 class Tile(InputTransform):
   """Constructs local neighborhood tiles (windows) across the spatial grid.
 
-  After the transformation, each spatial location contains the data from a 
+  After the transformation, each spatial location contains the data from a
   rolling window of size window_size centered at that location.
 
   Adds a new dimension to the DataArray named with window_dim. The size of the
-  dimension is defined by window_size, e.g. a window_size of 3 will give a new 
+  dimension is defined by window_size, e.g. a window_size of 3 will give a new
   dimension of size 3x3=9.
 
   This transform shrinks the edges of the forecast where the windows were
@@ -932,6 +940,8 @@ class Tile(InputTransform):
       window_size: int = 3,
       window_dim: str = 'window',
       wrap_longitude: bool = False,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
   ):
     """Init.
 
@@ -942,18 +952,25 @@ class Tile(InputTransform):
       window_dim: The name of the new dimension along which the window pixels
         are concatenated.
       wrap_longitude: If True, assume longitude wraps around. Default: False.
+      lat_dim: Name of the latitude dimension. Default: 'latitude'.
+      lon_dim: Name of the longitude dimension. Default: 'longitude'.
     """
     super().__init__(which)
     self._window_size = window_size
     self._window_dim = window_dim
     self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
 
   @property
   def unique_name_suffix(self) -> str:
-    return (
+    suffix = (
         f'tiled_window_size_{self._window_size}_wrap_{self._wrap_longitude}_'
         f'dim_{self._window_dim}'
     )
+    if self._lat_dim != 'latitude' or self._lon_dim != 'longitude':
+      suffix += f'_lat_{self._lat_dim}_lon_{self._lon_dim}'
+    return suffix
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return construct_tiles(
@@ -961,6 +978,8 @@ class Tile(InputTransform):
         window_size=self._window_size,
         window_dim=self._window_dim,
         wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
     )
 
 
