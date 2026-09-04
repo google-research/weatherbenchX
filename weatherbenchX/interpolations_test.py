@@ -22,9 +22,6 @@ import xarray as xr
 class InterpolationsTest(absltest.TestCase):
 
   def test_interpolate_to_reference_coords(self):
-    # For now just a simple test.
-    # TODO(srasp): Test edge cases
-    # TODO(srasp): Test with sparse data
     reference = test_utils.mock_prediction_data(
         time_start='2020-01-01T00',
         time_stop='2020-01-02T00',
@@ -56,9 +53,6 @@ class InterpolationsTest(absltest.TestCase):
     xr.testing.assert_equal(interpolated_predictions, reference)
 
   def test_interpolate_to_fixed_coords(self):
-    # For now just a simple test.
-    # TODO(srasp): Test edge cases
-
     predictions = test_utils.mock_prediction_data(
         time_start='2020-01-01T00',
         time_stop='2020-01-02T00',
@@ -222,88 +216,259 @@ class CropToBoxTest(absltest.TestCase):
 
 class SubsampleTest(absltest.TestCase):
 
-  def test_subsample_basic(self):
-    lats = np.arange(0, 100, 1.0)
-    lons = np.arange(0, 200, 1.0)
-    da = xr.DataArray(
-        name='t2m',
-        data=np.random.rand(len(lats), len(lons)),
+  def _make_da(self, ny: int = 10, nx: int = 20) -> xr.DataArray:
+    lats, lons = np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+    return xr.DataArray(
+        data=np.random.rand(ny, nx),
         coords={'latitude': lats, 'longitude': lons},
         dims=['latitude', 'longitude'],
+        name='t2m',
     )
-    subsampler = interpolations.Subsample(
+
+  def test_subsample_basic(self):
+    da = self._make_da(ny=100, nx=200)
+    result = interpolations.Subsample(
         dims=['latitude', 'longitude'], stride=10
-    )
-    result = subsampler.interpolate_data_array(da)
+    ).interpolate_data_array(da)
     self.assertEqual(result.sizes['latitude'], 10)
     self.assertEqual(result.sizes['longitude'], 20)
-    np.testing.assert_equal(result.latitude.values, lats[::10])
-    np.testing.assert_equal(result.longitude.values, lons[::10])
+    xr.testing.assert_equal(
+        result,
+        da.isel(
+            latitude=slice(None, None, 10), longitude=slice(None, None, 10)
+        ),
+    )
 
   def test_subsample_stride_1_is_noop(self):
-    lats = np.arange(0, 10, 1.0)
-    lons = np.arange(0, 20, 1.0)
-    da = xr.DataArray(
-        name='t2m',
-        data=np.random.rand(len(lats), len(lons)),
-        coords={'latitude': lats, 'longitude': lons},
-        dims=['latitude', 'longitude'],
-    )
-    subsampler = interpolations.Subsample(
+    da = self._make_da()
+    result = interpolations.Subsample(
         dims=['latitude', 'longitude'], stride=1
-    )
-    result = subsampler.interpolate_data_array(da)
+    ).interpolate_data_array(da)
     xr.testing.assert_equal(result, da)
 
   def test_subsample_missing_dim_is_skipped(self):
-    lats = np.arange(0, 10, 1.0)
     da = xr.DataArray(
         name='t2m',
-        data=np.random.rand(len(lats)),
-        coords={'latitude': lats},
+        data=np.random.rand(10),
+        coords={'latitude': np.arange(10, dtype=float)},
         dims=['latitude'],
     )
-    subsampler = interpolations.Subsample(
+    result = interpolations.Subsample(
         dims=['latitude', 'longitude'], stride=2
-    )
-    result = subsampler.interpolate_data_array(da)
+    ).interpolate_data_array(da)
     self.assertEqual(result.sizes['latitude'], 5)
     self.assertNotIn('longitude', result.dims)
 
   def test_subsample_single_dim(self):
-    lats = np.arange(0, 12, 1.0)
-    lons = np.arange(0, 20, 1.0)
-    da = xr.DataArray(
-        name='t2m',
-        data=np.random.rand(len(lats), len(lons)),
-        coords={'latitude': lats, 'longitude': lons},
-        dims=['latitude', 'longitude'],
-    )
-    subsampler = interpolations.Subsample(dims=['latitude'], stride=3)
-    result = subsampler.interpolate_data_array(da)
+    da = self._make_da(ny=12, nx=20)
+    result = interpolations.Subsample(
+        dims=['latitude'], stride=3
+    ).interpolate_data_array(da)
     self.assertEqual(result.sizes['latitude'], 4)
     self.assertEqual(result.sizes['longitude'], 20)
+    xr.testing.assert_equal(result, da.isel(latitude=slice(None, None, 3)))
 
   def test_subsample_invalid_stride(self):
     with self.assertRaisesRegex(ValueError, 'stride must be >= 1'):
       interpolations.Subsample(dims=['latitude'], stride=0)
 
   def test_subsample_via_interpolate(self):
-    lats = np.arange(0, 10, 1.0)
-    lons = np.arange(0, 20, 1.0)
-    ds = {
-        't2m': xr.DataArray(
-            data=np.random.rand(len(lats), len(lons)),
-            coords={'latitude': lats, 'longitude': lons},
-            dims=['latitude', 'longitude'],
-        ),
-    }
-    subsampler = interpolations.Subsample(
+    da = self._make_da()
+    result = interpolations.Subsample(
         dims=['latitude', 'longitude'], stride=2
-    )
-    result = subsampler.interpolate(ds)
+    ).interpolate({'t2m': da})
     self.assertEqual(result['t2m'].sizes['latitude'], 5)
     self.assertEqual(result['t2m'].sizes['longitude'], 10)
+
+
+class GridToSparseInterpolationTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    ny, nx = 20, 30
+    y_idx, x_idx = np.mgrid[0:ny, 0:nx]
+    self.grid_lat = 35.0 + 0.5 * y_idx + 0.1 * x_idx
+    self.grid_lon = -105.0 + 0.1 * y_idx + 0.5 * x_idx
+
+  def _make_grid_da(self, data, dims=('y', 'x'), coords=None):
+    if coords is None:
+      coords = {
+          'latitude': (('y', 'x'), self.grid_lat),
+          'longitude': (('y', 'x'), self.grid_lon),
+      }
+    return xr.DataArray(
+        data=np.asarray(data, dtype=np.float32),
+        dims=dims,
+        coords=coords,
+        name='t2m',
+    )
+
+  def _make_ref(self, lats, lons, names=None, dim='point'):
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    n = len(lats)
+    if names is None:
+      names = [f'p{i}' for i in range(n)]
+    return xr.DataArray(
+        data=np.zeros(n, dtype=np.float32),
+        dims=[dim],
+        coords={
+            dim: names,
+            'latitude': (dim, lats),
+            'longitude': (dim, lons),
+        },
+    )
+
+  def test_curvilinear_exact_linear_field(self):
+    ny, nx = self.grid_lat.shape
+    y_idx, x_idx = np.mgrid[0:ny, 0:nx]
+    field_vals = 2.0 * y_idx + 3.0 * x_idx + 5.0
+    da = self._make_grid_da(field_vals)
+
+    frac_y = np.array([5.25, 12.75])
+    frac_x = np.array([10.5, 18.25])
+    target_lats = 35.0 + 0.5 * frac_y + 0.1 * frac_x
+    target_lons = -105.0 + 0.1 * frac_y + 0.5 * frac_x
+    expected_vals = 2.0 * frac_y + 3.0 * frac_x + 5.0
+
+    reference = self._make_ref(target_lats, target_lons)
+    interpolator = interpolations.GridToSparseInterpolation(method='linear')
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertEqual(interpolated.dims, ('point',))
+    np.testing.assert_allclose(interpolated.values, expected_vals, atol=1e-2)
+
+  def test_curvilinear_nearest(self):
+    ny, nx = self.grid_lat.shape
+    y_idx, x_idx = np.mgrid[0:ny, 0:nx]
+    field_vals = y_idx * 100 + x_idx
+    da = self._make_grid_da(field_vals)
+
+    target_lat = [self.grid_lat[5, 10]]
+    target_lon = [self.grid_lon[5, 10]]
+    reference = self._make_ref(target_lat, target_lon, names=['stn_exact'])
+
+    interpolator = interpolations.GridToSparseInterpolation(method='nearest')
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertEqual(interpolated.values[0], field_vals[5, 10])
+
+  def test_curvilinear_out_of_bounds_nan(self):
+    da = self._make_grid_da(np.ones(self.grid_lat.shape))
+    reference = self._make_ref(
+        [self.grid_lat[5, 5], 0.0],
+        [self.grid_lon[5, 5], 0.0],
+        names=['inside', 'outside'],
+    )
+
+    interpolator = interpolations.GridToSparseInterpolation(
+        method='linear', extrapolate_out_of_bounds=False
+    )
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertFalse(np.isnan(interpolated.values[0]))
+    self.assertTrue(np.isnan(interpolated.values[1]))
+
+  def test_multidim_batch_dims(self):
+    ny, nx = self.grid_lat.shape
+    coords = {
+        'lead_time': [1, 2, 3],
+        'time': [10, 20],
+        'latitude': (('y', 'x'), self.grid_lat),
+        'longitude': (('y', 'x'), self.grid_lon),
+    }
+    da = self._make_grid_da(
+        np.ones((3, 2, ny, nx)),
+        dims=['lead_time', 'time', 'y', 'x'],
+        coords=coords,
+    )
+
+    reference = self._make_ref(
+        [
+            self.grid_lat[2, 2],
+            self.grid_lat[3, 3],
+            self.grid_lat[4, 4],
+            self.grid_lat[5, 5],
+        ],
+        [
+            self.grid_lon[2, 2],
+            self.grid_lon[3, 3],
+            self.grid_lon[4, 4],
+            self.grid_lon[5, 5],
+        ],
+    )
+
+    interpolator = interpolations.GridToSparseInterpolation(method='linear')
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertEqual(interpolated.dims, ('lead_time', 'time', 'point'))
+    self.assertEqual(interpolated.shape, (3, 2, 4))
+    np.testing.assert_allclose(interpolated.values, 1.0)
+
+  def test_1d_regular_grid_compatibility(self):
+    lats = np.arange(30, 50, 1.0)
+    lons = np.arange(-110, -90, 1.0)
+    da = xr.DataArray(
+        data=np.ones((len(lats), len(lons)), dtype=np.float32),
+        dims=['latitude', 'longitude'],
+        coords={'latitude': lats, 'longitude': lons},
+        name='t2m',
+    )
+    reference = self._make_ref([35.5, 42.5], [-105.5, -95.5])
+
+    interpolator = interpolations.GridToSparseInterpolation(method='linear')
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertEqual(interpolated.dims, ('point',))
+    np.testing.assert_allclose(interpolated.values, [1.0, 1.0])
+
+  def test_observation_table_alignment(self):
+    lats = np.arange(30, 50, 1.0)
+    lons = np.arange(-110, -90, 1.0)
+    data = np.arange(2 * 3 * len(lats) * len(lons), dtype=np.float32).reshape(
+        (2, 3, len(lats), len(lons))
+    )
+    da = xr.DataArray(
+        data=data,
+        dims=['init_time', 'lead_time', 'latitude', 'longitude'],
+        coords={
+            'init_time': [0, 1],
+            'lead_time': [10, 20, 30],
+            'latitude': lats,
+            'longitude': lons,
+        },
+        name='t2m',
+    )
+    reference = xr.DataArray(
+        data=np.zeros(3),
+        dims=['index'],
+        coords={
+            'init_time': ('index', [0, 1, 0]),
+            'lead_time': ('index', [10, 20, 30]),
+            'latitude': ('index', [35.0, 40.0, 45.0]),
+            'longitude': ('index', [-105.0, -100.0, -95.0]),
+            'pointName': ('index', ['P1', 'P2', 'P3']),
+        },
+    )
+    interpolator = interpolations.GridToSparseInterpolation(method='linear')
+    interpolated = interpolator.interpolate_data_array(da, reference)
+
+    self.assertEqual(interpolated.dims, ('index',))
+    self.assertEqual(interpolated.shape, (3,))
+    self.assertIn('lead_time', interpolated.coords)
+    self.assertIn('pointName', interpolated.coords)
+    expected = [
+        float(
+            da.sel(init_time=0, lead_time=10, latitude=35.0, longitude=-105.0)
+        ),
+        float(
+            da.sel(init_time=1, lead_time=20, latitude=40.0, longitude=-100.0)
+        ),
+        float(
+            da.sel(init_time=0, lead_time=30, latitude=45.0, longitude=-95.0)
+        ),
+    ]
+    np.testing.assert_allclose(interpolated.values, expected)
 
 
 if __name__ == '__main__':
