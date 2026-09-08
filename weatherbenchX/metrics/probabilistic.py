@@ -1542,3 +1542,104 @@ class TiledVariogramScore(base.PerVariableMetric):
   ) -> xr.DataArray:
     """Computes metrics from aggregated statistics."""
     return statistic_values['TiledVariogramScore']
+
+
+class QuantileScore(base.PerVariableStatistic):
+  """Quantile score (pinball loss) for quantile forecasts."""
+
+  def __init__(
+      self,
+      quantiles: float | Sequence[float],
+      quantile_dim: str = 'quantile',
+      factor_of_two: bool = True,
+  ):
+    """Init.
+
+    Args:
+      quantiles: Quantile level or sequence of quantiles strictly in (0, 1).
+      quantile_dim: Name of the quantile dimension. Default: 'quantile'.
+      factor_of_two: If True, multiply the score by 2 to align tau=0.5 with
+        Absolute Error. Default: True.
+    """
+    q_list = np.atleast_1d(quantiles).astype(float).tolist()
+    if not q_list or any(np.isnan(q) or q <= 0.0 or q >= 1.0 for q in q_list):
+      raise ValueError(
+          f'quantiles must be non-empty and strictly in (0, 1), got {quantiles}'
+      )
+    self._quantiles = q_list
+    self._quantile_dim = quantile_dim
+    self._factor_of_two = factor_of_two
+
+  @property
+  def unique_name(self) -> str:
+    q_str = ','.join(f'{q:.4g}' for q in self._quantiles)
+    return (
+        f'QuantileScore_{self._quantile_dim}_f2={self._factor_of_two}_{q_str}'
+    )
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    if self._quantile_dim in targets.dims:
+      raise ValueError(
+          f"targets must not contain quantile dimension '{self._quantile_dim}'."
+      )
+    if self._quantile_dim in predictions.dims:
+      if self._quantile_dim not in predictions.coords:
+        predictions = predictions.assign_coords(
+            {self._quantile_dim: self._quantiles}
+        )
+      predictions = predictions.sel({self._quantile_dim: self._quantiles})
+      tau = predictions.coords[self._quantile_dim].astype(predictions.dtype)
+    else:
+      if len(self._quantiles) != 1:
+        raise ValueError(
+            f"predictions missing '{self._quantile_dim}' dim for multiple"
+            f' quantiles {self._quantiles}.'
+        )
+      tau = np.array(self._quantiles[0], dtype=predictions.dtype)
+
+    dtype = np.result_type(predictions.dtype, targets.dtype)
+    diff = targets - predictions
+    score = diff * (tau - (diff < 0).astype(dtype))
+    if self._factor_of_two:
+      score = score * np.array(2.0, dtype=dtype)
+    if 'mask' in targets.coords:
+      score = score.assign_coords(mask=targets.coords['mask'])
+    return score
+
+
+class EnsembleQuantileScore(wrappers.WrappedStatistic):
+  """Computes the Quantile Score from ensemble forecasts."""
+
+  def __init__(
+      self,
+      quantiles: float | Sequence[float],
+      quantile_dim: str = 'quantile',
+      ensemble_dim: str = ENSEMBLE_DIM,
+      skipna_ensemble: bool = False,
+      factor_of_two: bool = True,
+  ):
+    """Init.
+
+    Args:
+      quantiles: Quantile or sequence of quantiles strictly in (0, 1).
+      quantile_dim: Name of the quantile dimension. Default: 'quantile'.
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      skipna_ensemble: If True, skip NaNs in ensemble quantiles. Default: False.
+      factor_of_two: If True, multiply the score by 2. Default: True.
+    """
+    super().__init__(
+        statistic=QuantileScore(
+            quantiles=quantiles,
+            quantile_dim=quantile_dim,
+            factor_of_two=factor_of_two,
+        ),
+        transform=wrappers.EnsembleQuantiles(
+            which='predictions',
+            quantiles=quantiles,
+            quantile_dim=quantile_dim,
+            ensemble_dim=ensemble_dim,
+            skipna=skipna_ensemble,
+        ),
+    )
