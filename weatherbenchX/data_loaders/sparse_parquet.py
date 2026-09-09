@@ -45,7 +45,7 @@ def get_parquet_files_subset(
   times = np.arange(time_start, time_end + td, td)
   files = []
   for time in times:
-    fn = parquet_filename_for_time(path, time, unit)
+    fn = parquet_filename_for_time(path, time, unit)  # pyrefly: ignore[bad-argument-type]
     files.append(fn)
   return files
 

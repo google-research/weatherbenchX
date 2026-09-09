@@ -512,7 +512,7 @@ class StationaryBootstrap(Bootstrap):
       #   name for them to any dimensions used in the statistics.
       resampled_values[var_name] = utils.apply_to_slices(
           functools.partial(self._bootstrap_results_for_metric_scalar,
-                            metric, var_name),
+                            metric, var_name),  # pyrefly: ignore[bad-argument-type]
           per_unit_tangents[var_name],
           sum_weighted_stats_for_this_var,
           sum_weights_for_this_var,
