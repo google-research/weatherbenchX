@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import dataclasses
 from typing import Hashable, Mapping, Optional, Sequence, Union
 import numpy as np
+import scipy.spatial
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import spatial
 from weatherbenchX.metrics import wrappers
@@ -139,9 +140,9 @@ class CropToBox(Interpolation):
       lon_max: Maximum longitude to crop to (exclusive).
     """
     if lat_min > lat_max:
-      raise ValueError('Invalid latitudes: {lat_min} and {lat_max}')
+      raise ValueError(f'Invalid latitudes: {lat_min} and {lat_max}')
     if lon_min > lon_max:
-      raise ValueError('Invalid longitudes: {lon_min} and {lon_max}')
+      raise ValueError(f'Invalid longitudes: {lon_min} and {lon_max}')
     self._lat_min = lat_min
     self._lat_max = lat_max
     self._lon_min = lon_min
@@ -395,6 +396,321 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
         )
         da_like_reference *= adjustment_factor
     return da_like_reference
+
+
+def _latlon_to_cartesian(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+  """Converts latitude and longitude in degrees to 3D unit sphere Cartesian coordinates."""
+  phi = np.deg2rad(lats)
+  theta = np.deg2rad(lons)
+  x = np.cos(phi) * np.cos(theta)
+  y = np.cos(phi) * np.sin(theta)
+  z = np.sin(phi)
+  return np.stack([x, y, z], axis=-1)
+
+
+def _compute_nearest_weights(
+    grid_xyz: np.ndarray,
+    target_xyz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  """Computes nearest neighbor indices and unit weights."""
+  _, nx, _ = grid_xyz.shape
+  ns = target_xyz.shape[0]
+  kdtree = scipy.spatial.cKDTree(grid_xyz.reshape(-1, 3))
+  _, flat_idx = kdtree.query(target_xyz, k=1)
+  yc = flat_idx // nx
+  xc = flat_idx % nx
+  corner_y = yc[np.newaxis, :]
+  corner_x = xc[np.newaxis, :]
+  weights = np.ones((1, ns), dtype=np.float32)
+  valid_mask = np.ones(ns, dtype=bool)
+  return corner_y, corner_x, weights, valid_mask
+
+
+def _compute_linear_weights(
+    grid_lats: np.ndarray,
+    grid_lons: np.ndarray,
+    target_lats: np.ndarray,
+    target_lons: np.ndarray,
+    extrapolate_out_of_bounds: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  """Computes Delaunay simplex corner indices and barycentric weights."""
+  ny, nx = grid_lats.shape
+  lon_center = float(np.nanmedian(grid_lons))
+  grid_lons_c = (grid_lons - lon_center + 180.0) % 360.0 - 180.0
+  target_lons_c = (target_lons - lon_center + 180.0) % 360.0 - 180.0
+
+  grid_pts = np.column_stack([grid_lats.ravel(), grid_lons_c.ravel()])
+  target_pts = np.column_stack([target_lats.ravel(), target_lons_c.ravel()])
+
+  tri = scipy.spatial.Delaunay(grid_pts)
+  simplex_indices = tri.find_simplex(target_pts)
+  valid_mask = simplex_indices >= 0
+
+  safe_simplex = np.where(valid_mask, simplex_indices, 0)
+  vertex_indices = tri.simplices[safe_simplex].copy()
+
+  va = grid_pts[vertex_indices[:, 0]]
+  vb = grid_pts[vertex_indices[:, 1]]
+  vc = grid_pts[vertex_indices[:, 2]]
+
+  v0 = vb - va
+  v1 = vc - va
+  v2 = target_pts - va
+
+  det = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
+  det_safe = np.where(np.abs(det) < 1e-12, 1e-12, det)
+  wb = (v2[:, 0] * v1[:, 1] - v2[:, 1] * v1[:, 0]) / det_safe
+  wc = (v0[:, 0] * v2[:, 1] - v0[:, 1] * v2[:, 0]) / det_safe
+  wa = 1.0 - wb - wc
+
+  if extrapolate_out_of_bounds and not np.all(valid_mask):
+    kdtree = scipy.spatial.cKDTree(grid_pts)
+    _, nn_idx = kdtree.query(target_pts[~valid_mask], k=1)
+    vertex_indices[~valid_mask, 0] = nn_idx
+    vertex_indices[~valid_mask, 1] = nn_idx
+    vertex_indices[~valid_mask, 2] = nn_idx
+    wa[~valid_mask] = 1.0
+    wb[~valid_mask] = 0.0
+    wc[~valid_mask] = 0.0
+    valid_mask = np.ones_like(valid_mask)
+  else:
+    wa = np.where(valid_mask, wa, 0.0)
+    wb = np.where(valid_mask, wb, 0.0)
+    wc = np.where(valid_mask, wc, 0.0)
+
+  corner_y = (vertex_indices // nx).T
+  corner_x = (vertex_indices % nx).T
+  weights = np.stack([wa, wb, wc], axis=0).astype(np.float32)
+
+  return corner_y, corner_x, weights, valid_mask
+
+
+def _lookup_coord(
+    da: xr.DataArray, name: str, fallbacks: Sequence[str]
+) -> xr.DataArray:
+  """Finds a coordinate in da.coords, checking fallbacks if name is missing."""
+  if name in da.coords:
+    return da.coords[name]
+  for fb in fallbacks:
+    if fb in da.coords:
+      return da.coords[fb]
+  raise KeyError(
+      f'Coordinate {name!r} not found in da.coords (available coords: '
+      f'{list(da.coords.keys())})'
+  )
+
+
+def _get_grid_lat_lon(
+    da: xr.DataArray,
+    lat_coord_name: str,
+    lon_coord_name: str,
+    spatial_dims: Optional[Sequence[str]],
+) -> tuple[np.ndarray, np.ndarray, Sequence[str]]:
+  """Extracts 2D grid latitude, longitude arrays and spatial dimension names."""
+  lat_da = _lookup_coord(da, lat_coord_name, ('latitude', 'lat'))
+  lon_da = _lookup_coord(da, lon_coord_name, ('longitude', 'lon'))
+  if lat_da.ndim == 1:
+    grid_lats, grid_lons = np.meshgrid(
+        lat_da.values, lon_da.values, indexing='ij'
+    )
+    src_spatial_dims = spatial_dims or (
+        str(lat_da.dims[0]),
+        str(lon_da.dims[0]),
+    )
+  elif lat_da.ndim == 2:
+    grid_lats = np.asarray(lat_da.values)
+    grid_lons = np.asarray(lon_da.values)
+    src_spatial_dims = spatial_dims or tuple(str(d) for d in lat_da.dims)
+  else:
+    raise ValueError(
+        f'Expected 1D or 2D coordinate for {lat_coord_name}, got {lat_da.ndim}D'
+    )
+  return grid_lats, grid_lons, src_spatial_dims
+
+
+def _build_output_data_array(
+    da: xr.DataArray,
+    interpolated_vals: np.ndarray,
+    src_spatial_dims: Sequence[str],
+    ref_dim: str,
+    reference: xr.DataArray,
+) -> xr.DataArray:
+  """Constructs the output DataArray with preserved non-spatial coordinates."""
+  non_spatial_dims = [
+      str(d) for d in da.dims if d not in src_spatial_dims and d != ref_dim
+  ]
+  out_dims = (*non_spatial_dims, ref_dim)
+  out_coords = {}
+  for c in da.coords:
+    if (
+        not any(d in da.coords[c].dims for d in src_spatial_dims)
+        and c != ref_dim
+    ):
+      if c not in reference.coords:
+        out_coords[c] = da.coords[c]
+  for c in reference.coords:
+    if ref_dim in reference.coords[c].dims:
+      out_coords[c] = reference.coords[c]
+
+  return xr.DataArray(
+      data=interpolated_vals,
+      dims=out_dims,
+      coords=out_coords,
+      name=da.name,
+      attrs=da.attrs,
+  )
+
+
+class GridToSparseInterpolation(Interpolation):
+  """Interpolates gridded data to sparse point reference coordinates.
+
+  Supports both 1D regular grids (latitude, longitude) and 2D curvilinear
+  or projected grids (e.g. Lambert Conformal (y, x)) using Delaunay
+  triangulation and barycentric interpolation or nearest neighbor interpolation.
+
+  Grid geometry and interpolation weights are computed once and cached on the
+  interpolator instance, enabling fast O(1) evaluation for subsequent time slices
+  and variables.
+  """
+
+  def __init__(
+      self,
+      method: str = 'linear',
+      spatial_dims: Optional[Sequence[str]] = None,
+      lat_coord_name: str = 'latitude',
+      lon_coord_name: str = 'longitude',
+      extrapolate_out_of_bounds: bool = False,
+  ):
+    """Init.
+
+    Args:
+      method: Interpolation method: 'linear' (Delaunay barycentric) or 'nearest'.
+      spatial_dims: (Optional) The spatial dimensions of the source grid, e.g.
+        ('y', 'x') or ('latitude', 'longitude'). If None, inferred from the
+        latitude coordinate dimensions.
+      lat_coord_name: Name of the latitude coordinate. Default: 'latitude'.
+      lon_coord_name: Name of the longitude coordinate. Default: 'longitude'.
+      extrapolate_out_of_bounds: If True, extrapolate out of bounds points to
+        the nearest boundary point. If False, set out of bounds points to NaN.
+        Default: False.
+    """
+    if method not in ('linear', 'nearest'):
+      raise ValueError(f"method must be 'linear' or 'nearest', got {method}")
+    self._method = method
+    self._spatial_dims = (
+        tuple(spatial_dims) if spatial_dims is not None else None
+    )
+    self._lat_coord_name = lat_coord_name
+    self._lon_coord_name = lon_coord_name
+    self._extrapolate_out_of_bounds = extrapolate_out_of_bounds
+    self._cached_weights = None
+    self._cached_key = None
+
+  def _compute_weights(
+      self,
+      grid_lats: np.ndarray,
+      grid_lons: np.ndarray,
+      target_lats: np.ndarray,
+      target_lons: np.ndarray,
+  ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if self._method == 'nearest':
+      grid_xyz = _latlon_to_cartesian(grid_lats, grid_lons)
+      target_xyz = _latlon_to_cartesian(target_lats, target_lons)
+      return _compute_nearest_weights(grid_xyz, target_xyz)
+    return _compute_linear_weights(
+        grid_lats,
+        grid_lons,
+        target_lats,
+        target_lons,
+        extrapolate_out_of_bounds=self._extrapolate_out_of_bounds,
+    )
+
+  def interpolate_data_array(  # pyrefly: ignore[bad-override]
+      self,
+      da: xr.DataArray,
+      reference: xr.DataArray,  # pytype: disable=signature-mismatch
+  ) -> xr.DataArray:
+    if reference is None:
+      raise ValueError(
+          'Reference DataArray with target coordinates is required.'
+      )
+
+    target_lat_da = _lookup_coord(
+        reference, self._lat_coord_name, ('latitude', 'lat')
+    )
+    target_lon_da = _lookup_coord(
+        reference, self._lon_coord_name, ('longitude', 'lon')
+    )
+    ref_dim = str(target_lat_da.dims[0])
+    grid_lats, grid_lons, src_spatial_dims = _get_grid_lat_lon(
+        da, self._lat_coord_name, self._lon_coord_name, self._spatial_dims
+    )
+
+    if reference.size == 0 or reference.sizes.get(ref_dim, 0) == 0:
+      non_spatial_dims = [
+          str(d) for d in da.dims if d not in src_spatial_dims and d != ref_dim
+      ]
+      shape = tuple(da.sizes[d] for d in non_spatial_dims) + (0,)
+      interpolated_vals = np.empty(shape, dtype=da.dtype)
+      return _build_output_data_array(
+          da, interpolated_vals, src_spatial_dims, ref_dim, reference
+      )
+
+    target_lats = np.asarray(target_lat_da.values)
+    target_lons = np.asarray(target_lon_da.values)
+
+    cache_key = (
+        grid_lats.shape,
+        target_lats.shape,
+        float(grid_lats[0, 0]) if grid_lats.size > 0 else 0.0,
+        float(target_lats[0]) if target_lats.size > 0 else 0.0,
+        self._method,
+        self._extrapolate_out_of_bounds,
+    )
+    if self._cached_key != cache_key or self._cached_weights is None:
+      self._cached_weights = self._compute_weights(
+          grid_lats, grid_lons, target_lats, target_lons
+      )
+      self._cached_key = cache_key
+
+    corner_y, corner_x, weights, valid_mask = self._cached_weights
+
+    non_spatial_dims = [str(d) for d in da.dims if d not in src_spatial_dims]
+    matching_coords = {
+        d: xr.DataArray(reference.coords[d].values, dims=[ref_dim])
+        for d in non_spatial_dims
+        if d in reference.coords
+        and ref_dim in reference.coords[d].dims
+        and da.sizes.get(d, 1) > 1
+    }
+    if matching_coords:
+      da = da.sel(matching_coords)
+
+    if ref_dim in da.dims:
+      remaining_dims = [
+          str(d) for d in da.dims if d not in src_spatial_dims and d != ref_dim
+      ]
+      da_ordered = da.transpose(*remaining_dims, ref_dim, *src_spatial_dims)
+      vals = da_ordered.values
+      idx = np.arange(target_lats.shape[0])[None, :]
+      corners_val = vals[..., idx, corner_y, corner_x]
+    else:
+      remaining_dims = [str(d) for d in da.dims if d not in src_spatial_dims]
+      da_ordered = da.transpose(*remaining_dims, *src_spatial_dims)
+      vals = da_ordered.values
+      corners_val = vals[..., corner_y, corner_x]
+
+    interpolated_vals = np.sum(corners_val * weights, axis=-2)
+
+    if not self._extrapolate_out_of_bounds and not np.all(valid_mask):
+      interpolated_vals = interpolated_vals.astype(
+          np.result_type(interpolated_vals.dtype, np.float32)
+      )
+      interpolated_vals[..., ~valid_mask] = np.nan
+
+    return _build_output_data_array(
+        da, interpolated_vals, src_spatial_dims, ref_dim, reference
+    )
 
 
 class NeighborhoodThresholdProbabilities(Interpolation):
