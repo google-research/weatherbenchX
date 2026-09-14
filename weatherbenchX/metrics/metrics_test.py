@@ -923,6 +923,159 @@ class MetricsTest(parameterized.TestCase):
     for v in ['2m_temperature', 'geopotential']:
       self.assertIn(f'es.{v}', results)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([2.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[2.0, 4.0], [2.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=0.0,
+          expected_spread=0.0,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Targets: [0.0]. Predictions: [[3.0], [5.0]] with ensemble size M=2.
+          # Skill: mean(|3 - 0|, |5 - 0|) = 4.0.
+          # Spread (fair=True): 2 * |3 - 5| / (2 * 1) = 2.0.
+          # Total EnergyScore: 4.0 - 0.5 * 2.0 = 3.0.
+          targets={'x': xr.DataArray(np.array([0.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[3.0], [5.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=4.0,
+          expected_spread=2.0,
+          expected_score=3.0,
+      ),
+  )
+  def test_energy_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      expected_skill: float,
+      expected_spread: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of EnergyScore skill and spread."""
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+    skill = skill_stat.compute(predictions, targets)['x']
+    spread = spread_stat.compute(predictions, targets)['x']
+    es = skill - 0.5 * spread
+    self.assertAlmostEqual(float(skill.values), expected_skill)
+    self.assertAlmostEqual(float(spread.values), expected_spread)
+    self.assertAlmostEqual(float(es.values), expected_score)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([1.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[1.0, 4.0], [1.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=0.5,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Known analytical values with p=1.0:
+          # Targets: [0.0, 1.0]. |y_0 - y_1| = 1.0.
+          # Predictions: M=2, x^(1)=[0.0, 4.0], x^(2)=[0.0, 9.0].
+          # Prediction mean diff: (4.0 + 9.0) / 2 = 6.5.
+          # Targets term: [[0, 1], [1, 0]].
+          # Predictions term: [[0, 6.5], [6.5, 0]].
+          # Difference: [[0, -5.5], [-5.5, 0]].
+          # Sum of squared diffs: (-5.5)^2 + (-5.5)^2 = 30.25 + 30.25 = 60.5.
+          targets={'x': xr.DataArray(np.array([0.0, 1.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[0.0, 4.0], [0.0, 9.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=1.0,
+          expected_score=60.5,
+      ),
+  )
+  def test_variogram_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      p: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of VariogramScore."""
+    vs = probabilistic.VariogramScore(dim='dim', ensemble_dim='sample', p=p)
+    res = vs.compute(predictions, targets)['x']
+    self.assertAlmostEqual(float(res.values), expected_score)
+
+  def test_energy_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[3.0], [5.0]])
+    targets = jnp.array([0.0])
+
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+
+    @jax.jit
+    def compute_skill(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return skill_stat._compute_per_variable(p_da, t_da).data
+
+    @jax.jit
+    def compute_spread(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return spread_stat._compute_per_variable(p_da, t_da).data
+
+    res_skill = compute_skill(predictions, targets)
+    res_spread = compute_spread(predictions, targets)
+    self.assertAlmostEqual(float(res_skill), 4.0)
+    self.assertAlmostEqual(float(res_spread), 2.0)
+
+  def test_variogram_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[0.0, 4.0], [0.0, 9.0]])
+    targets = jnp.array([0.0, 1.0])
+
+    vs_stat = probabilistic.VariogramScore(
+        dim='dim', ensemble_dim='sample', p=1.0
+    )
+
+    @jax.jit
+    def compute_vs(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return vs_stat._compute_per_variable(p_da, t_da).data
+
+    res_vs = compute_vs(predictions, targets)
+    self.assertAlmostEqual(float(res_vs), 60.5)
+
   def test_direct_rps(self):
     # CDFs
     predictions = xr.DataArray(

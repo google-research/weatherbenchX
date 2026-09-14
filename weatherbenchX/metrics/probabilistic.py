@@ -498,8 +498,12 @@ class EnergyScoreSkill(base.PerVariableStatistic):
   def _compute_per_variable(
       self, predictions: xr.DataArray, targets: xr.DataArray
   ) -> xr.DataArray:
-    return np.sqrt(
-        np.square(predictions - targets).sum(dim=self._dim, skipna=False)  # pyrefly: ignore[no-matching-overload]
+    # Use native operators (** 2, ** 0.5) instead of np.square / np.sqrt
+    # so that xarray DataArrays wrapping JAX tracers trace cleanly into
+    # jax.lax primitives under jax.jit without triggering NumPy array
+    # conversion errors.
+    return (
+        ((predictions - targets) ** 2).sum(dim=self._dim, skipna=False) ** 0.5
     ).mean(dim=self._ensemble_dim)
 
 
@@ -538,17 +542,22 @@ class EnergyScoreSpread(base.PerVariableStatistic):
         else ensemble_size * (ensemble_size - 1)
     )
 
+    # Use native operators (** 2, ** 0.5) instead of np.square / np.sqrt
+    # so that xarray DataArrays wrapping JAX tracers trace cleanly into
+    # jax.lax primitives under jax.jit without triggering NumPy array
+    # conversion errors.
     return (
-        np.sqrt(
-            np.square(predictions - predictions_prime).sum(  # pyrefly: ignore[no-matching-overload]
-                dim=self._dim, skipna=False
+        (
+            ((predictions - predictions_prime) ** 2).sum(
+                dim=self._dim,  # pyrefly: ignore[bad-argument-type]
+                skipna=False,
             )
+            ** 0.5
         ).sum(
             dim=[self._ensemble_dim, self._ensemble_dim + '_prime'],
             skipna=False,
         )
-        / divider
-    )
+    ) / divider
 
 
 class VariogramScore(base.PerVariableStatistic):
@@ -590,12 +599,14 @@ class VariogramScore(base.PerVariableStatistic):
     targets_prime = targets.rename({self._dim: self._dim + '_prime'})
     predictions_prime = predictions.rename({self._dim: self._dim + '_prime'})
 
-    targets_term = np.abs(targets_prime - targets) ** self._p
-    predictions_term = (
-        np.abs(predictions_prime - predictions) ** self._p
-    ).mean(dim=self._ensemble_dim, skipna=False)  # pyrefly: ignore[no-matching-overload]
+    # Use abs() and ** 2 instead of np.abs / np.square for JAX JIT
+    # compatibility.
+    targets_term = abs(targets_prime - targets) ** self._p
+    predictions_term = (abs(predictions_prime - predictions) ** self._p).mean(
+        dim=self._ensemble_dim, skipna=False
+    )
 
-    return np.square(targets_term - predictions_term).sum(
+    return ((targets_term - predictions_term) ** 2).sum(
         dim=[self._dim, self._dim + '_prime'], skipna=False
     )
 
