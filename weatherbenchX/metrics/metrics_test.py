@@ -814,6 +814,89 @@ class MetricsTest(parameterized.TestCase):
     out = tile.transform_fn(da)
     self.assertEqual(out.sizes, {'window': 9, 'latitude': 3, 'longitude': 3})
 
+  def test_construct_tiles_custom_dims(self):
+    """Check construct_tiles with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+    )
+    out = wrappers.construct_tiles(
+        da, window_size=3, lat_dim='lat', lon_dim='lon', wrap_longitude=False
+    )
+    np.testing.assert_array_equal(out['lat'].values, [1, 2, 3])
+    np.testing.assert_array_equal(out['lon'].values, [1, 2, 3])
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  def test_tile_wrapper_custom_dims(self):
+    """Check Tile wrapper with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both',
+        window_size=3,
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window_lat_lat_lon_lon',
+    )
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='tiled_energy_score',
+          metric_cls=probabilistic.TiledEnergyScore,
+      ),
+      dict(
+          testcase_name='tiled_variogram_score',
+          metric_cls=probabilistic.TiledVariogramScore,
+      ),
+  )
+  def test_tiled_metrics_custom_dims(self, metric_cls):
+    """Check tiled metrics with non-default spatial dimension names."""
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=43,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+
+    metric = metric_cls(
+        window_size=3,
+        ensemble_dim='realization',
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    results = compute_all_metrics(
+        {'score': metric}, predictions, targets, reduce_dims=['time']
+    )
+    self.assertIn('score.2m_temperature', results)
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lat'],
+        len(predictions['lat']) - 2,
+    )
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lon'],
+        len(predictions['lon']) - 2,
+    )
+    self.assertFalse(np.isnan(results['score.2m_temperature'].values).any())
+
   def test_energy_score(self):
     ensemble_size = 4
     targets = test_utils.mock_prediction_data(
