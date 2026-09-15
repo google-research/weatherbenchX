@@ -306,5 +306,57 @@ class SubsampleTest(absltest.TestCase):
     self.assertEqual(result['t2m'].sizes['longitude'], 10)
 
 
+class GridToSparseWithAltitudeAdjustmentTest(absltest.TestCase):
+
+  def test_altitude_adjustment_inverted_latitude(self):
+    # Grid elevation oriented North -> South (90 to -90) with asymmetric
+    # topography (mountain at lat=45, flat plain elsewhere).
+    grid_lats = np.array([90.0, 45.0, 0.0, -45.0, -90.0])
+    grid_lons = np.array([0.0, 90.0, 180.0, 270.0])
+    elev_data = np.zeros((len(grid_lats), len(grid_lons)))
+    elev_data[grid_lats == 45.0, :] = 1000.0
+    grid_elev = xr.DataArray(
+        elev_data,
+        coords={'latitude': grid_lats, 'longitude': grid_lons},
+        dims=['latitude', 'longitude'],
+    )
+
+    # Forecast DataArray oriented South -> North (-90 to 90)
+    da_lats = np.array([-90.0, -45.0, 0.0, 45.0, 90.0])
+    da = xr.DataArray(
+        np.full((len(da_lats), len(grid_lons)), 280.0),
+        coords={'latitude': da_lats, 'longitude': grid_lons},
+        dims=['latitude', 'longitude'],
+        name='2m_temperature',
+    )
+
+    # Sparse reference station in Northern Hemisphere at lat=45, lon=0.
+    # Station elevation is 1100m (100m above local 1000m grid terrain).
+    # If the elevation grid is correctly reindexed, local terrain is 1000m,
+    # diff is +100m -> adjustment is -0.65 K -> 279.35 K.
+    # If elevation is silently flipped or assigned without re-ordering, local
+    # terrain would be 0m -> diff is +1100m -> -7.15 K -> test fails.
+    reference = xr.DataArray(
+        [280.0],
+        coords={
+            'index': [0],
+            'latitude': ('index', [45.0]),
+            'longitude': ('index', [0.0]),
+            'elevation': ('index', [1100.0]),
+        },
+        dims=['index'],
+        name='2m_temperature',
+    )
+
+    interpolator = interpolations.GridToSparseWithAltitudeAdjustment(
+        method='linear',
+        grid_elevation=grid_elev,
+    )
+    result = interpolator.interpolate_data_array(da, reference)
+    self.assertEqual(result.shape, (1,))
+    expected_temp = 280.0 - 0.65
+    np.testing.assert_allclose(result.values, [expected_temp], rtol=1e-4)
+
+
 if __name__ == '__main__':
   absltest.main()
