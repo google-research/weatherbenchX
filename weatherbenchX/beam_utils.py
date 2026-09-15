@@ -13,8 +13,9 @@
 # limitations under the License.
 r"""Beam-specific utils for beam pipelines."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 import contextlib
+import errno
 import os
 import uuid
 
@@ -99,3 +100,86 @@ def atomic_write(
     raise
   else:
     filesystem.mv(tmp_file_path, file_path, overwrite=True)
+
+
+def _is_already_exists_err(e: BaseException) -> bool:
+  """Returns True if the exception indicates the destination already exists."""
+  if not isinstance(e, Exception):
+    # For example, KeyboardInterrupt or SystemExit.
+    return False
+  if isinstance(e, FileExistsError):
+    return True
+  if isinstance(e, OSError) and e.errno in (errno.EEXIST, errno.ENOTEMPTY):
+    return True
+  err_str = str(e).lower()
+  return 'already exists' in err_str or 'already_exists' in err_str
+
+
+@contextlib.contextmanager
+def atomic_write_dir(
+    dir_path: str,
+    auto_mkdir: bool = True,
+) -> Iterator[str]:
+  """Yield a temporary directory to caller and atomically move it to dir_path.
+
+  Avoids write races in distributed pipelines when redundant backup workers
+  attempt to write to the same output directory via the following mechanism:
+  1. Yields the temporary directory path/URL to the caller (e.g. ds.to_zarr),
+  cleaning up the temporary directory if the caller fails to write anything to
+  it.
+  2. If the caller succeeds to write to the temporary directory, tries to
+  atomically move it to the final target directory. If this fails, re-raises
+  the exception, except if the target directory already exists, in which case
+  it assumes another worker has already completed the job and cleans up the
+  temporary directory.
+
+  Args:
+    dir_path: The final target directory path.
+    auto_mkdir: Whether to create parent directories if they don't exist.
+
+  Yields:
+    A temporary directory path/URL to write into.
+  """
+  filesystem, target_fs_path = fsspec.core.url_to_fs(dir_path)
+
+  # Maintain protocol prefix on the yielded temporary URL.
+  parent_url, name = os.path.split(dir_path.rstrip('/'))
+  tmp_name = f'tmp.{uuid.uuid4().hex}.{name}'
+  tmp_url = os.path.join(parent_url, tmp_name)
+  _, tmp_fs_path = fsspec.core.url_to_fs(tmp_url)
+
+  parent_fs_dir, _ = os.path.split(target_fs_path.rstrip('/'))
+  if auto_mkdir and parent_fs_dir:
+    filesystem.makedirs(parent_fs_dir, exist_ok=True)
+  if auto_mkdir:
+    filesystem.makedirs(tmp_fs_path, exist_ok=True)
+
+  try:
+    yield tmp_url
+  # If any exception occurred in the caller (e.g. ds.to_zarr) in the
+  # attempt to write to the temporary directory, attempt to clean up the
+  # temporary directory.
+  except BaseException:
+    # Don't crash the cleanup if the temporary directory doesn't exist because
+    # the caller failed to write anything to it, so that we re-raise the
+    # original exception.
+    with contextlib.suppress(OSError):
+      filesystem.rm(tmp_fs_path, recursive=True)
+    raise
+  # If no exception occurred in the caller, we attempt to move the temporary
+  # directory to the final target directory.
+  else:
+    try:
+      filesystem.mv(tmp_fs_path, target_fs_path, recursive=True)
+    except BaseException as e:
+      # Always clean up our temporary directory regardless of why mv failed.
+      with contextlib.suppress(OSError):
+        filesystem.rm(tmp_fs_path, recursive=True)
+      # Only swallow the error if it is explicitly an "already exists" error
+      # AND the target directory exists. Otherwise (e.g. running out of disk
+      # space mid-move, permissions error, or KeyboardInterrupt), re-raise.
+      target_already_exists = _is_already_exists_err(e) and filesystem.exists(
+          target_fs_path
+      )
+      if not target_already_exists:
+        raise
