@@ -840,6 +840,19 @@ def define_unaggregated_pipeline(
   )
 
 
+# TODO(tomandersson): Replace this functionality with an Aggregator.
+def _maybe_coarsen_spatial_da(
+    da: xr.DataArray, window_size: int
+) -> xr.DataArray:
+  """Coarsens spatial dimensions (latitude/longitude) if present."""
+  coarsen_dims = {
+      d: window_size for d in ('latitude', 'longitude') if d in da.dims
+  }
+  if coarsen_dims:
+    return da.coarsen(coarsen_dims, boundary='trim').sum()
+  return da
+
+
 def _load_first_chunk(
     predictions_loader: data_loaders_base.DataLoader,
     targets_loader: data_loaders_base.DataLoader,
@@ -873,12 +886,20 @@ def _compute_aggregation_state_dataset(
     aggregator: aggregation.Aggregator,
     predictions_chunk: Mapping[Hashable, xr.DataArray],
     targets_chunk: Mapping[Hashable, xr.DataArray],
+    spatial_coarsen_window_size: int | None = None,
 ) -> xr.Dataset:
   """Computes the AggregationState dataset for a single chunk."""
   statistics = metrics_base.compute_unique_statistics_for_all_metrics(
       metrics, predictions_chunk, targets_chunk
   )
   aggregation_state = aggregator.aggregate_statistics(statistics)
+  if (
+      spatial_coarsen_window_size is not None
+      and spatial_coarsen_window_size > 1
+  ):
+    aggregation_state = aggregation_state.map(
+        lambda da: _maybe_coarsen_spatial_da(da, spatial_coarsen_window_size)
+    )
   return aggregation_state.to_dataset()
 
 
@@ -889,9 +910,11 @@ class ComputeAndFormatAggregationState(beam.DoFn):
       self,
       metrics: Mapping[str, metrics_base.Metric],
       aggregator: aggregation.Aggregator,
+      spatial_coarsen_window_size: int | None = None,
   ):
     self.metrics = metrics
     self.aggregator = aggregator
+    self.spatial_coarsen_window_size = spatial_coarsen_window_size
 
   def process(
       self,
@@ -911,6 +934,7 @@ class ComputeAndFormatAggregationState(beam.DoFn):
         self.aggregator,
         predictions_chunk,
         targets_chunk,
+        spatial_coarsen_window_size=self.spatial_coarsen_window_size,
     )
 
     for var_name, da in chunk_ds.data_vars.items():
@@ -933,6 +957,7 @@ def _get_template_aggregation_state_dataset(
     aggregator: aggregation.Aggregator,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    spatial_coarsen_window_size: int | None = None,
 ) -> xr.Dataset:
   """Computes AggregationState dataset for the first chunk to create a template dataset."""
   logging.info('Building AggregationState template with data from first chunk.')
@@ -948,6 +973,7 @@ def _get_template_aggregation_state_dataset(
       aggregator,
       predictions_chunk,
       targets_chunk,
+      spatial_coarsen_window_size=spatial_coarsen_window_size,
   )
   template = _expand_template_time_dimensions(first_chunk, times)
   template = _transpose_time_dims_first(template)
@@ -955,6 +981,8 @@ def _get_template_aggregation_state_dataset(
   return template
 
 
+# TODO(tomandersson): Add support for xbeam zarr streaming to the main
+# define_pipeline function and remove this one.
 def define_unaggregated_aggregation_state_pipeline(
     root: beam.Pipeline,
     times: time_chunks.TimeChunks,
@@ -966,6 +994,7 @@ def define_unaggregated_aggregation_state_pipeline(
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    spatial_coarsen_window_size: int | None = None,
 ) -> None:
   """Defines a Beam pipeline that streams unaggregated AggregationState to Zarr.
 
@@ -985,6 +1014,8 @@ def define_unaggregated_aggregation_state_pipeline(
       LoadPredictionsAndTargets.
     ignore_missing_variables: (Optional) If True, filter targets and predictions
       chunks to their common variables. Default: False.
+    spatial_coarsen_window_size: (Optional) Block size for spatial coarsening of
+      the AggregationState along latitude and longitude.
   """
   if isinstance(aggregator, Mapping):
     if isinstance(out_path, Mapping) and out_path.keys() != aggregator.keys():
@@ -1008,6 +1039,7 @@ def define_unaggregated_aggregation_state_pipeline(
         times,
         agg,
         setup_fn,
+        spatial_coarsen_window_size=spatial_coarsen_window_size,
         ignore_missing_variables=ignore_missing_variables,
     )
     dim_sizes = typing.cast(Mapping[str, int], template.sizes)
@@ -1046,7 +1078,13 @@ def define_unaggregated_aggregation_state_pipeline(
             )
         )
         | f'ComputeAndFormatAggregationState{label_suffix}'
-        >> beam.ParDo(ComputeAndFormatAggregationState(metrics, agg))
+        >> beam.ParDo(
+            ComputeAndFormatAggregationState(
+                metrics,
+                agg,
+                spatial_coarsen_window_size=spatial_coarsen_window_size,
+            )
+        )
         | f'Rechunk{label_suffix}'
         >> xbeam.Rechunk(
             dim_sizes=dim_sizes,
