@@ -704,8 +704,8 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
-  def test_define_unaggregated_aggregation_state_pipeline(self):
-    """Test unaggregated aggregation state pipeline outputs valid Zarr store."""
+  def test_define_pipeline_unaggregated_aggregation_state_zarr(self):
+    """Test define_pipeline outputs valid unaggregated AggregationState Zarr store."""
     init_times = self.predictions.time.values
     lead_times = self.predictions.prediction_timedelta.values
 
@@ -736,14 +736,14 @@ class BeamPipelineTest(parameterized.TestCase):
 
     results_path = self.create_tempdir('unaggregated_agg_state.zarr').full_path
     with test_pipeline.TestPipeline() as root:
-      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+      beam_pipeline.define_pipeline(
           root,
           times,
           prediction_loader,
           target_loader,
           all_metrics,
           aggregation_method,
-          out_path=results_path,
+          aggregation_state_out_path=results_path,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
@@ -804,7 +804,17 @@ class BeamPipelineTest(parameterized.TestCase):
         lead_time_chunk_size=lead_time_chunk_size,
     )
 
-    pred_loader = xarray_loaders.PredictionsFromXarray(self.predictions_path)
+    # We'll check that this additional coordinate of lead time is dropped.
+    # This happens because the template is constructed from a single lead time
+    # chunk, so it doesn't contain these coords, and attempting to write them
+    # to zarr would result in a ValueError if it isn't dropped.
+    preds_with_aux_coord = self.predictions.assign_coords(
+        lead_time_secs=(
+            'prediction_timedelta',
+            self.predictions.prediction_timedelta.dt.total_seconds().values,
+        )
+    )
+    pred_loader = xarray_loaders.PredictionsFromXarray(ds=preds_with_aux_coord)
     target_loader = xarray_loaders.TargetsFromXarray(self.targets_path)
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
     aggregator = aggregation.Aggregator(reduce_dims=reduce_dims)
@@ -834,6 +844,8 @@ class BeamPipelineTest(parameterized.TestCase):
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertNotIn('lead_time_secs', pipeline_ds.coords)
+    direct_metrics = direct_metrics.drop_vars('lead_time_secs')
 
     for var in direct_metrics.data_vars:
       xr.testing.assert_allclose(
@@ -904,10 +916,10 @@ class BeamPipelineTest(parameterized.TestCase):
             atol=1e-5,
         )
 
-  def test_define_unaggregated_aggregation_state_pipeline_spatial_coarsening(
+  def test_define_pipeline_aggregation_state_spatial_coarsening(
       self,
   ):
-    """Test unaggregated aggregation state pipeline with spatial coarsening."""
+    """Test define_pipeline with spatial coarsening on Aggregator."""
     init_times = self.predictions.time.values
     lead_times = self.predictions.prediction_timedelta.values
 
@@ -926,10 +938,13 @@ class BeamPipelineTest(parameterized.TestCase):
     )
 
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
-    aggregation_method = aggregation.Aggregator(reduce_dims=[])
     spatial_coarsen_window_size = 2
+    aggregation_method = aggregation.Aggregator(
+        reduce_dims=[], spatial_coarsen_window_size=spatial_coarsen_window_size
+    )
 
-    # Compute expected aggregation state directly and apply coarsening
+    # Compute expected aggregation state directly (which applies spatial
+    # coarsening)
     statistics = metrics_base.compute_unique_statistics_for_all_metrics(
         all_metrics,
         prediction_loader.load_chunk(init_times, lead_times),
@@ -937,11 +952,6 @@ class BeamPipelineTest(parameterized.TestCase):
     )
     direct_agg_state = aggregation_method.aggregate_statistics(statistics)
     direct_ds = direct_agg_state.to_dataset()
-    direct_ds = direct_ds.coarsen(
-        latitude=spatial_coarsen_window_size,
-        longitude=spatial_coarsen_window_size,
-        boundary='trim',
-    ).sum()
     # The pipeline outputs the aggregation state with init_time and lead_time
     # dimensions transposed to the first two dimensions. Apply the same to the
     # directly computed aggregation state for comparison.
@@ -949,15 +959,14 @@ class BeamPipelineTest(parameterized.TestCase):
 
     results_path = self.create_tempdir('coarsened_agg_state.zarr').full_path
     with test_pipeline.TestPipeline() as root:
-      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+      beam_pipeline.define_pipeline(
           root,
           times,
           prediction_loader,
           target_loader,
           all_metrics,
           aggregation_method,
-          out_path=results_path,
-          spatial_coarsen_window_size=spatial_coarsen_window_size,
+          aggregation_state_out_path=results_path,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
