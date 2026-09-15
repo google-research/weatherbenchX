@@ -436,47 +436,92 @@ def _resolve_out_path(
     return out_path[agg_name]  # pyrefly: ignore[bad-index]
 
 
-class WriteMetrics(beam.DoFn):
-  """Writes the metrics to a NetCDF file."""
+def write_dataset(
+    ds: xr.Dataset,
+    target_path: str,
+    zarr_chunks: Mapping[str, int] | None = None,
+    drop_attrs: bool = True,
+) -> None:
+  """Atomically writes a dataset to NetCDF or to a Zarr file with chunking.
 
-  def __init__(self, out_path: str | Mapping[str, str]):
+  Args:
+    ds: The dataset to write.
+    target_path: The path to write the dataset to.
+    zarr_chunks: Optional chunking specification for Zarr output files.
+    drop_attrs: Whether to remove attributes that may have been propagated from
+      the targets or predictions.
+
+  Raises:
+    ValueError: If the target path is not a Zarr or NetCDF file.
+  """
+  if drop_attrs:
+    # Remove attributes that may have been propagated from the targets or
+    # predictions.
+    ds = ds.drop_attrs(deep=True)
+
+  if target_path.endswith('.zarr'):
+    encoding = None
+    if zarr_chunks:
+      # Use the smaller of the chunk spec and the dimension size.
+      encoding = {}
+      for var_name, da in ds.data_vars.items():
+        encoding[var_name] = {
+            'chunks': tuple(
+                min(
+                    da.sizes[dim],
+                    zarr_chunks.get(str(dim), da.sizes[dim]),
+                )
+                for dim in da.dims
+            )
+        }
+    with beam_utils.atomic_write_dir(target_path) as tmp_output_path:
+      ds.to_zarr(tmp_output_path, mode='w', encoding=encoding)
+  else:
+    beam_utils.atomic_write(
+        target_path,
+        ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
+    )
+
+
+class WriteMetrics(beam.DoFn):
+  """Writes the metrics to a NetCDF or Zarr file."""
+
+  def __init__(
+      self,
+      out_path: str | Mapping[str, str],
+      zarr_chunks: Mapping[str, int] | None = None,
+  ):
     self.out_path = out_path
+    self.zarr_chunks = zarr_chunks
 
   def process(self, element: tuple[str | None, xr.Dataset]) -> Iterable[Never]:
     agg_name, metrics = element
     logging.log_first_n(
         logging.INFO, 'WriteMetrics inputs: %s, %s', 10, agg_name, metrics
     )
-    # Remove attributes that may have been propogated from the targets or
-    # predictions.
-    metrics = metrics.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        metrics.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    write_dataset(metrics, target_path, self.zarr_chunks)
     return []
 
 
 class WriteAggregationState(beam.DoFn):
-  """Writes the final AggregationState to a NetCDF file."""
+  """Writes the final AggregationState to a NetCDF or Zarr file."""
 
-  def __init__(self, out_path: str | Mapping[str, str]):
+  def __init__(
+      self,
+      out_path: str | Mapping[str, str],
+      zarr_chunks: Mapping[str, int] | None = None,
+  ):
     self.out_path = out_path
+    self.zarr_chunks = zarr_chunks
 
   def process(
       self, element: tuple[str | None, aggregation.AggregationState]
   ) -> Iterable[Never]:
     agg_name, aggregation_state = element
     aggregation_state_ds = aggregation_state.to_dataset()
-    # Remove attributes that may have been propogated from the targets or
-    # predictions.
-    aggregation_state_ds = aggregation_state_ds.drop_attrs(deep=True)
     target_path = _resolve_out_path(self.out_path, agg_name)
-    beam_utils.atomic_write(
-        target_path,
-        aggregation_state_ds.to_netcdf(),  # pyrefly: ignore[bad-argument-type]
-    )
+    write_dataset(aggregation_state_ds, target_path, self.zarr_chunks)
     return []
 
 
@@ -490,6 +535,7 @@ def define_pipeline(
     out_path: str | Mapping[str, str] | None = None,
     aggregation_state_out_path: str | Mapping[str, str] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
+    zarr_chunks: Mapping[str, int] | None = None,
     ignore_missing_variables: bool = False,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
@@ -514,6 +560,7 @@ def define_pipeline(
       aggregators are specified.
     setup_fn: (Optional) A function to call once per worker in
       LoadPredictionsAndTargets.
+    zarr_chunks: Optional chunking specification for Zarr output files.
     ignore_missing_variables: (Optional) If True, filter targets and predictions
       chunks to their common variables. Default: False.
   """
@@ -571,12 +618,14 @@ def define_pipeline(
     _ = (
         agg_state_pipeline
         | beam.ParDo(ComputeMetrics(metrics))
-        | beam.ParDo(WriteMetrics(out_path))
+        | beam.ParDo(WriteMetrics(out_path, zarr_chunks=zarr_chunks))
     )
 
   if aggregation_state_out_path is not None:
     _ = agg_state_pipeline | beam.ParDo(
-        WriteAggregationState(aggregation_state_out_path)
+        WriteAggregationState(
+            aggregation_state_out_path, zarr_chunks=zarr_chunks
+        )
     )
 
 

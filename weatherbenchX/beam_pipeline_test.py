@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -22,6 +24,7 @@ import numpy as np
 import pandas as pd
 from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
+from weatherbenchX import beam_utils
 from weatherbenchX import binning
 from weatherbenchX import interpolations
 from weatherbenchX import test_utils
@@ -778,6 +781,91 @@ class BeamPipelineTest(parameterized.TestCase):
             pipeline_agg_state.sum_weights,
         ),
     )
+
+  def test_atomic_write_dir_success(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'test_dir')
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      self.assertTrue(tmp_dir.startswith(os.path.dirname(target_dir)))
+      self.assertFalse(os.path.exists(target_dir))
+      with open(os.path.join(tmp_dir, 'sample.txt'), 'w') as f:
+        f.write('hello world')
+      self.assertTrue(os.path.exists(os.path.join(tmp_dir, 'sample.txt')))
+
+    self.assertTrue(os.path.exists(target_dir))
+    with open(os.path.join(target_dir, 'sample.txt'), 'r') as f:
+      self.assertEqual(f.read(), 'hello world')
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_failure_cleans_up(self):
+    """Tests that a mid-write failure cleans up temporary data and re-raises."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'fail_dir')
+    tmp_path_holder = []
+
+    def _write_and_fail():
+      with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+        tmp_path_holder.append(tmp_dir)
+        with open(os.path.join(tmp_dir, 'partial.txt'), 'w') as f:
+          f.write('partial data')
+        raise RuntimeError('Worker crashed')
+
+    self.assertRaises(RuntimeError, _write_and_fail)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+    self.assertFalse(os.path.exists(target_dir))
+
+  def test_atomic_write_dir_target_already_exists_abandons_temporary(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    with open(os.path.join(target_dir, 'original.txt'), 'w') as f:
+      f.write('original content')
+
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+        f.write('redundant worker output')
+
+    # The existing target directory should be preserved intact
+    self.assertTrue(os.path.exists(os.path.join(target_dir, 'original.txt')))
+    self.assertFalse(os.path.exists(os.path.join(target_dir, 'new.txt')))
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_non_exists_error_reraises_even_if_target_exists(
+      self,
+  ):
+    """Confirms running out of space is re-raised even if target exists."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    tmp_path_holder = []
+
+    fs, _ = beam_utils.fsspec.core.url_to_fs(target_dir)
+
+    def _run_with_disk_full():
+      with mock.patch.object(
+          fs,
+          'mv',
+          side_effect=OSError(errno.ENOSPC, 'No space left on device'),
+      ):
+        with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+          tmp_path_holder.append(tmp_dir)
+          with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+            f.write('partial data')
+
+    with self.assertRaises(OSError) as cm:
+      _run_with_disk_full()
+    self.assertEqual(cm.exception.errno, errno.ENOSPC)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+
+  def test_write_dataset_zarr(self):
+    ds = xr.Dataset(
+        {'var1': (('x', 'y'), np.arange(6, dtype=np.float32).reshape(2, 3))},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    zarr_path = os.path.join(self.create_tempdir().full_path, 'output.zarr')
+    beam_pipeline.write_dataset(ds, zarr_path, zarr_chunks={'x': 1, 'y': 2})
+
+    self.assertTrue(os.path.exists(zarr_path))
+    loaded = xr.open_zarr(zarr_path).compute()
+    self.assertNotIn('some_attr', loaded.attrs)
+    xr.testing.assert_allclose(loaded, ds.drop_attrs())
 
 
 if __name__ == '__main__':
