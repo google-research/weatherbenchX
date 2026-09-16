@@ -148,6 +148,43 @@ class EnsembleMean(InputTransform):
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
+class EnsembleMedian(InputTransform):
+  """Compute ensemble median."""
+
+  def __init__(
+      self,
+      which: str,
+      ensemble_dim='number',
+      skipna=False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      ensemble_dim: Name of ensemble dimension. Default: 'number'.
+      skipna: If True, skip NaNs in the ensemble median. Default: False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble median if the
+        ensemble dimension is missing. Default: False.
+    """
+    super().__init__(which)
+    self._ensemble_dim = ensemble_dim
+    self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
+
+  @property
+  def unique_name_suffix(self) -> str:
+    """Unique name suffix for the ensemble median statistic."""
+    return f'ensemble_median_{self._ensemble_dim=}_{self._skipna=}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    """Apply the ensemble median transformation to the input DataArray."""
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
+    return da.median(self._ensemble_dim, skipna=self._skipna)
+
+
 class EnsembleQuantiles(InputTransform):
   """Compute ensemble quantiles."""
 

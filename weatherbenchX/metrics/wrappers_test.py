@@ -147,6 +147,31 @@ class EnsembleMeanTest(parameterized.TestCase):
     xr.testing.assert_equal(x.mean('realization', skipna=skipna), y)
 
 
+class EnsembleMedianTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      dict(skipna=True),
+      dict(skipna=False),
+  )
+  def test_median_over_realization_dim(self, skipna):
+    forecast = test_utils.mock_target_data(random=True, ensemble_size=3)
+
+    # Set one single realization to nan
+    forecast = xr.where(
+        forecast.level == forecast.realization[0],
+        np.nan,
+        forecast,
+    )
+    em = wrappers.EnsembleMedian(
+        which='both', ensemble_dim='realization', skipna=skipna
+    )
+
+    x = forecast.geopotential
+    y = em.transform_fn(x)
+
+    xr.testing.assert_equal(x.median('realization', skipna=skipna), y)
+
+
 class EnsembleQuantilesTest(parameterized.TestCase):
 
   @parameterized.parameters(
