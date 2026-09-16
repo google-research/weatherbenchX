@@ -286,6 +286,8 @@ class Aggregator:
       passed to aggregate_statistics.
     skipna: If True, NaNs will be omitted in the aggregation. This option is not
       recommended, as it won't catch unexpected NaNs.
+    spatial_coarsen_window_size: Optional block size for spatial coarsening of
+      sum_weighted_statistics and sum_weights along latitude and longitude.
   """
 
   reduce_dims: Collection[str]
@@ -293,6 +295,7 @@ class Aggregator:
   weigh_by: Sequence[weighting.Weighting] | None = None
   masked: bool = False
   skipna: bool = False
+  spatial_coarsen_window_size: int | None = None
 
   def aggregation_fn(
       self,
@@ -362,8 +365,25 @@ class Aggregator:
     sum_weights = self.aggregation_fn(mask.astype(stat.dtype))
     if sum_weighted_statistics is None or sum_weights is None:
       return None
-    else:
-      return AggregationState(sum_weighted_statistics, sum_weights)
+
+    if (
+        self.spatial_coarsen_window_size is not None
+        and self.spatial_coarsen_window_size > 1
+    ):
+      coarsen_dims = {
+          d: self.spatial_coarsen_window_size
+          for d in ('latitude', 'longitude', 'lat', 'lon')
+          if d in sum_weighted_statistics.dims
+      }
+      if coarsen_dims:
+        sum_weighted_statistics = sum_weighted_statistics.coarsen(
+            coarsen_dims, boundary='trim'
+        ).sum()
+        sum_weights = sum_weights.coarsen(
+            coarsen_dims, boundary='trim'
+        ).sum()
+
+    return AggregationState(sum_weighted_statistics, sum_weights)
 
   def aggregate_stat_vars(
       self, stats: Mapping[Hashable, xr.DataArray]) -> AggregationState:
