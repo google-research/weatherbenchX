@@ -804,7 +804,17 @@ class BeamPipelineTest(parameterized.TestCase):
         lead_time_chunk_size=lead_time_chunk_size,
     )
 
-    pred_loader = xarray_loaders.PredictionsFromXarray(self.predictions_path)
+    # We'll check that this additional coordinate of lead time is dropped.
+    # This happens because the template is constructed from a single lead time
+    # chunk, so it doesn't contain these coords, and attempting to write them
+    # to zarr would result in a ValueError if it isn't dropped.
+    preds_with_aux_coord = self.predictions.assign_coords(
+        lead_time_secs=(
+            'prediction_timedelta',
+            self.predictions.prediction_timedelta.dt.total_seconds().values,
+        )
+    )
+    pred_loader = xarray_loaders.PredictionsFromXarray(ds=preds_with_aux_coord)
     target_loader = xarray_loaders.TargetsFromXarray(self.targets_path)
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
     aggregator = aggregation.Aggregator(reduce_dims=reduce_dims)
@@ -834,6 +844,8 @@ class BeamPipelineTest(parameterized.TestCase):
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertNotIn('lead_time_secs', pipeline_ds.coords)
+    direct_metrics = direct_metrics.drop_vars('lead_time_secs')
 
     for var in direct_metrics.data_vars:
       xr.testing.assert_allclose(

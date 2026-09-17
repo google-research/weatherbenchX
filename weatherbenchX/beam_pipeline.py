@@ -587,6 +587,24 @@ def _get_template_metrics_dataset(
   return template
 
 
+def _drop_non_template_coords(
+    key_and_chunk: tuple[xbeam.Key, xr.Dataset],
+    template_coords: set[Hashable],
+) -> tuple[xbeam.Key, xr.Dataset]:
+  """Drops chunk coordinates that were stripped from the expanded template."""
+  key, chunk_ds = key_and_chunk
+  extra_coords = set(chunk_ds.coords) - template_coords
+  if extra_coords:
+    logging.log_first_n(
+        logging.INFO,
+        'Dropping non-template coordinates before Zarr write: %s',
+        10,
+        extra_coords,
+    )
+    chunk_ds = chunk_ds.drop_vars(extra_coords, errors='ignore')
+  return key, chunk_ds
+
+
 class WriteMetricsChunksToZarr(beam.PTransform):
   """Writes lead-time-chunked metrics to a Zarr store using xarray-beam."""
 
@@ -659,12 +677,18 @@ class WriteMetricsChunksToZarr(beam.PTransform):
       if self.zarr_chunks:
         out_chunks.update(self.zarr_chunks)
 
+      template_coords = set(template.coords)
       label_suffix = f'_{agg_name}' if agg_name else ''
       res = (
           pcoll
           | f'Filter{label_suffix}'
           >> beam.Filter(lambda x, name=agg_name: x[0] == name)
-          | f'ExtractChunk{label_suffix}' >> beam.Map(lambda x: x[1])
+          | f'ExtractChunk{label_suffix}'
+          >> beam.Map(
+              lambda x, coords=template_coords: _drop_non_template_coords(
+                  x[1], coords
+              )
+          )
           | f'Rechunk{label_suffix}'
           >> xbeam.Rechunk(
               dim_sizes=dim_sizes,
@@ -1269,6 +1293,7 @@ def define_unaggregated_aggregation_state_pipeline(
     if zarr_chunks:
       out_chunks.update(zarr_chunks)
 
+    template_coords = set(template.coords)
     label_suffix = f'_{agg_name}' if agg_name else ''
 
     _ = (
@@ -1292,6 +1317,8 @@ def define_unaggregated_aggregation_state_pipeline(
                 spatial_coarsen_window_size=spatial_coarsen_window_size,
             )
         )
+        | f'DropNonTemplateCoords{label_suffix}'
+        >> beam.Map(_drop_non_template_coords, template_coords)
         | f'Rechunk{label_suffix}'
         >> xbeam.Rechunk(
             dim_sizes=dim_sizes,
