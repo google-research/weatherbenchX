@@ -194,7 +194,7 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
 
   def __init__(
       self,
-      data_loader: xarray_loaders.XarrayDataLoader,
+      data_loader: base.DataLoader,
       latency: np.timedelta64,
       init_time_dim: str = 'init_time',
       concat_dim: str = 'init_time',
@@ -212,9 +212,15 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
   def maybe_set_nominal_init_times(self):
     if self._nominal_init_times_set:
       return
-    assert isinstance(self.data_loader, xarray_loaders.XarrayDataLoader)
-    self.data_loader.maybe_prepare_dataset()
-    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access  # pyrefly: ignore[unsupported-operation]
+    if hasattr(self.data_loader, 'maybe_prepare_dataset'):
+      self.data_loader.maybe_prepare_dataset()
+    if hasattr(self.data_loader, '_ds') and self.data_loader._ds is not None:
+      self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access  # pyrefly: ignore[unsupported-operation]
+    else:
+      raise ValueError(
+          'data_loader must have a prepared _ds attribute containing nominal'
+          ' init times.'
+      )
     self._nominal_init_times_set = True
 
   def _load_chunk_from_source(
