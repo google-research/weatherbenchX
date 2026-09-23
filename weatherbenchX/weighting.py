@@ -130,6 +130,42 @@ class GridAreaWeighting(Weighting):
     return weights
 
 
+@dataclasses.dataclass
+class CosineLatitudeWeighting(Weighting):
+  """Return weights proportional to cosine of latitude.
+
+  Note:
+    This weighting scheme has only very minor differences compared to
+    `GridAreaWeighting`. Prefer `GridAreaWeighting` for general use; this class
+    should generally only be used when exact parity with external benchmarks
+    (e.g., ECMWF AI Weather Quest) is required.
+
+  Attributes:
+    latitude_name: Name of latitude dimension on statistic data array. Default:
+      'latitude'
+    return_normalized: Whether to return weights normalized to a mean of 1. This
+      should not matter for the aggregation. Default: True.
+  """
+
+  latitude_name: str = 'latitude'
+  return_normalized: bool = True
+
+  def weights(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    # If latitude is not a dimension, do not apply any weighting.
+    if self.latitude_name not in statistic.dims:
+      return xr.DataArray(1)
+
+    latitude = statistic[self.latitude_name].data
+    weights = np.cos(np.deg2rad(latitude))
+    if self.return_normalized:
+      weights /= np.mean(weights)
+    weights = statistic[self.latitude_name].copy(data=weights)
+    return weights
+
+
 def _haversine(
     lat1: np.ndarray,
     lon1: np.ndarray,
