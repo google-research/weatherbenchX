@@ -704,8 +704,8 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
-  def test_define_unaggregated_aggregation_state_pipeline(self):
-    """Test unaggregated aggregation state pipeline outputs valid Zarr store."""
+  def test_define_unreduced_pipeline(self):
+    """Test define_pipeline outputs valid unaggregated AggregationState Zarr store."""
     init_times = self.predictions.time.values
     lead_times = self.predictions.prediction_timedelta.values
 
@@ -724,7 +724,7 @@ class BeamPipelineTest(parameterized.TestCase):
     )
 
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
-    aggregation_method = aggregation.Aggregator(reduce_dims=[])
+    aggregator = aggregation.Aggregator(reduce_dims=[])
 
     # Compute expected aggregation state directly
     statistics = metrics_base.compute_unique_statistics_for_all_metrics(
@@ -732,18 +732,18 @@ class BeamPipelineTest(parameterized.TestCase):
         prediction_loader.load_chunk(init_times, lead_times),
         target_loader.load_chunk(init_times, lead_times),
     )
-    direct_agg_state = aggregation_method.aggregate_statistics(statistics)
+    direct_agg_state = aggregator.aggregate_statistics(statistics)
 
     results_path = self.create_tempdir('unaggregated_agg_state.zarr').full_path
     with test_pipeline.TestPipeline() as root:
-      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+      beam_pipeline.define_pipeline(
           root,
           times,
           prediction_loader,
           target_loader,
           all_metrics,
-          aggregation_method,
-          out_path=results_path,
+          aggregator,
+          aggregation_state_out_path=results_path,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
@@ -916,10 +916,10 @@ class BeamPipelineTest(parameterized.TestCase):
             atol=1e-5,
         )
 
-  def test_define_unaggregated_aggregation_state_pipeline_spatial_coarsening(
+  def test_define_pipeline_unreduced_agg_state_with_spatial_coarsening(
       self,
   ):
-    """Test unaggregated aggregation state pipeline with spatial coarsening."""
+    """Test define_pipeline with spatial coarsening on Aggregator."""
     init_times = self.predictions.time.values
     lead_times = self.predictions.prediction_timedelta.values
 
@@ -938,22 +938,20 @@ class BeamPipelineTest(parameterized.TestCase):
     )
 
     all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
-    aggregation_method = aggregation.Aggregator(reduce_dims=[])
-    spatial_coarsen_window_size = 2
+    target_spatial_resolution = 20.0
+    aggregator = aggregation.Aggregator(
+        reduce_dims=[], target_spatial_resolution=target_spatial_resolution
+    )
 
-    # Compute expected aggregation state directly and apply coarsening
+    # Compute expected aggregation state directly (which applies spatial
+    # coarsening)
     statistics = metrics_base.compute_unique_statistics_for_all_metrics(
         all_metrics,
         prediction_loader.load_chunk(init_times, lead_times),
         target_loader.load_chunk(init_times, lead_times),
     )
-    direct_agg_state = aggregation_method.aggregate_statistics(statistics)
+    direct_agg_state = aggregator.aggregate_statistics(statistics)
     direct_ds = direct_agg_state.to_dataset()
-    direct_ds = direct_ds.coarsen(
-        latitude=spatial_coarsen_window_size,
-        longitude=spatial_coarsen_window_size,
-        boundary='trim',
-    ).sum()
     # The pipeline outputs the aggregation state with init_time and lead_time
     # dimensions transposed to the first two dimensions. Apply the same to the
     # directly computed aggregation state for comparison.
@@ -961,28 +959,90 @@ class BeamPipelineTest(parameterized.TestCase):
 
     results_path = self.create_tempdir('coarsened_agg_state.zarr').full_path
     with test_pipeline.TestPipeline() as root:
-      beam_pipeline.define_unaggregated_aggregation_state_pipeline(
+      beam_pipeline.define_pipeline(
           root,
           times,
           prediction_loader,
           target_loader,
           all_metrics,
-          aggregation_method,
-          out_path=results_path,
-          spatial_coarsen_window_size=spatial_coarsen_window_size,
+          aggregator,
+          aggregation_state_out_path=results_path,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
 
-    # Verify spatial dimensions have been coarsened by the window size
+    # Verify spatial dimensions have been coarsened to target_spatial_resolution
+    # (native 10.0 deg -> 20.0 deg yields window size 2).
     orig_lat_size = self.predictions.sizes['latitude']
     orig_lon_size = self.predictions.sizes['longitude']
-    expected_lat_size = orig_lat_size // spatial_coarsen_window_size
-    expected_lon_size = orig_lon_size // spatial_coarsen_window_size
+    expected_lat_size = orig_lat_size // 2
+    expected_lon_size = orig_lon_size // 2
     self.assertEqual(pipeline_ds.sizes['latitude'], expected_lat_size)
     self.assertEqual(pipeline_ds.sizes['longitude'], expected_lon_size)
 
     xr.testing.assert_allclose(pipeline_ds, direct_ds)
+
+  def test_define_unreduced_pipeline_multiple_aggregators(
+      self,
+  ):
+    """Test define_pipeline outputs valid unaggregated AggregationState Zarrs for multiple aggregators."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregators = {
+        'unreduced': aggregation.Aggregator(reduce_dims=[]),
+        'coarsened': aggregation.Aggregator(
+            reduce_dims=[], target_spatial_resolution=20.0
+        ),
+    }
+
+    # Compute expected aggregation state directly for each aggregator.
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+
+    base_dir = self.create_tempdir('multi_agg_unreduced').full_path
+    out_paths = {
+        'unreduced': f'{base_dir}/unreduced.zarr',
+        'coarsened': f'{base_dir}/coarsened.zarr',
+    }
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregators,
+          aggregation_state_out_path=out_paths,
+      )
+
+    for agg_name, agg in aggregators.items():
+      direct_ds = (
+          agg.aggregate_statistics(statistics)
+          .to_dataset()
+          .transpose('init_time', 'lead_time', ...)
+      )
+      pipeline_ds = xr.open_zarr(out_paths[agg_name]).compute()
+      xr.testing.assert_allclose(pipeline_ds, direct_ds)
 
   def test_atomic_write_dir_success(self):
     target_dir = os.path.join(self.create_tempdir().full_path, 'test_dir')

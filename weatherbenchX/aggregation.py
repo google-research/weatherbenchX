@@ -286,6 +286,17 @@ class Aggregator:
       passed to aggregate_statistics.
     skipna: If True, NaNs will be omitted in the aggregation. This option is not
       recommended, as it won't catch unexpected NaNs.
+    target_spatial_resolution: Optional target spatial resolution for coarsening
+      (in degrees) by summing the sum_weighted_statistics and sum_weights along
+      the lat/lon dimensions. Note: The actual output resolution is determined
+      by the closest multiple of the native resolution grid cells to the
+      target resolution. If the target resolution does not divide the native
+      resolution, the output resolution will be different from
+      target_spatial_resolution.
+    lat_name: Name of the latitude dimension. Only used for spatial coarsening,
+      i.e. when target_spatial_resolution is not None.
+    lon_name: Name of the longitude dimension. Only used for spatial coarsening,
+      i.e. when target_spatial_resolution is not None.
   """
 
   reduce_dims: Collection[str]
@@ -293,6 +304,28 @@ class Aggregator:
   weigh_by: Sequence[weighting.Weighting] | None = None
   masked: bool = False
   skipna: bool = False
+  target_spatial_resolution: float | None = None
+  lat_name: str = 'latitude'
+  lon_name: str = 'longitude'
+
+  def _coarsen_to_target_spatial_resolution(
+      self,
+      stat: xr.DataArray,
+  ) -> xr.DataArray:
+    """Coarsens (by summing) the DataArray to the target spatial resolution."""
+    if self.target_spatial_resolution is None:
+      return stat
+    # Note: This assumes the latitute and longitude dimensions are regularly
+    # spaced and have the same resolution.
+    native_lat_res = float(abs(stat[self.lat_name][1] - stat[self.lat_name][0]))
+    window_size = int(round(self.target_spatial_resolution / native_lat_res))
+    if window_size <= 1:
+      return stat
+    coarsen_dims = {
+        self.lat_name: window_size,
+        self.lon_name: window_size,
+    }
+    return stat.coarsen(coarsen_dims, boundary='trim').sum()
 
   def aggregation_fn(
       self,
@@ -332,7 +365,15 @@ class Aggregator:
     # Some downstream code relies on attrs on statistics being preserved, which
     # xr.dot will not do by default.
     with xr.set_options(keep_attrs=True):
-      return xr.dot(stat, *weights, *bin_masks, dim=reduce_dims_set)
+      result = xr.dot(stat, *weights, *bin_masks, dim=reduce_dims_set)
+      if (
+          self.target_spatial_resolution is not None
+          and self.lat_name in result.dims
+          and self.lon_name in result.dims
+          and len(result[self.lat_name]) > 1
+      ):
+        result = self._coarsen_to_target_spatial_resolution(result)
+      return result
 
   def aggregate_stat_var(self, stat: xr.DataArray) -> AggregationState | None:
     """Aggregate one statistic DataArray for one variable."""
@@ -362,8 +403,8 @@ class Aggregator:
     sum_weights = self.aggregation_fn(mask.astype(stat.dtype))
     if sum_weighted_statistics is None or sum_weights is None:
       return None
-    else:
-      return AggregationState(sum_weighted_statistics, sum_weights)
+
+    return AggregationState(sum_weighted_statistics, sum_weights)
 
   def aggregate_stat_vars(
       self, stats: Mapping[Hashable, xr.DataArray]) -> AggregationState:

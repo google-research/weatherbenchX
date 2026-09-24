@@ -245,6 +245,96 @@ class AggregationTest(absltest.TestCase):
         set(actual.dims), set(['bins1', 'bins2', 'lead_time', 'level'])
     )
 
+  def test_spatial_coarsening(self):
+    predictions, targets = self._get_test_data()
+    all_metrics = {'rmse': deterministic.RMSE()}
+
+    orig_lat_size = predictions.sizes['latitude']
+    orig_lon_size = predictions.sizes['longitude']
+    target_spatial_resolution = 20.0
+
+    agg_state = self._aggregate(
+        all_metrics,
+        predictions,
+        targets,
+        {
+            'reduce_dims': ['init_time'],
+            'target_spatial_resolution': target_spatial_resolution,
+        },
+    )
+    actual = agg_state.metric_values(all_metrics)
+    # Native resolution is 10.0 degrees; target 20.0 degrees gives window
+    # size 2.
+    self.assertEqual(
+        actual['rmse.2m_temperature'].sizes['latitude'],
+        orig_lat_size // 2,
+    )
+    self.assertEqual(
+        actual['rmse.2m_temperature'].sizes['longitude'],
+        orig_lon_size // 2,
+    )
+
+  def test_spatial_coarsening_multiple_resolution_inputs(self):
+    pred_fine = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        lead_start='0 days',
+        lead_stop='1 day',
+        spatial_resolution_in_degrees=5.0,
+    ).rename({'time': 'init_time', 'prediction_timedelta': 'lead_time'})
+    pred_coarse = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        lead_start='0 days',
+        lead_stop='1 day',
+        spatial_resolution_in_degrees=10.0,
+    ).rename({'time': 'init_time', 'prediction_timedelta': 'lead_time'})
+
+    predictions = {
+        'fine_var': xr.zeros_like(pred_fine['2m_temperature']),
+        'coarse_var': xr.zeros_like(pred_coarse['2m_temperature']),
+    }
+    targets = {
+        'fine_var': xr.ones_like(pred_fine['2m_temperature']),
+        'coarse_var': xr.ones_like(pred_coarse['2m_temperature']),
+    }
+    all_metrics = {'rmse': deterministic.RMSE()}
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics, predictions, targets
+    )
+    aggregator = aggregation.Aggregator(
+        reduce_dims=['init_time'],
+        target_spatial_resolution=20.0,
+    )
+    agg_state = aggregator.aggregate_statistics(statistics)
+    mean_stats = agg_state.mean_statistics()
+
+    fine_stat = mean_stats['SquaredError']['fine_var']
+    coarse_stat = mean_stats['SquaredError']['coarse_var']
+
+    fine_lat_res = float(
+        abs(fine_stat['latitude'][1] - fine_stat['latitude'][0])
+    )
+    coarse_lat_res = float(
+        abs(coarse_stat['latitude'][1] - coarse_stat['latitude'][0])
+    )
+    self.assertEqual(fine_lat_res, 20.0)
+    self.assertEqual(coarse_lat_res, 20.0)
+
+    fine_lon_res = float(
+        abs(fine_stat['longitude'][1] - fine_stat['longitude'][0])
+    )
+    coarse_lon_res = float(
+        abs(coarse_stat['longitude'][1] - coarse_stat['longitude'][0])
+    )
+    self.assertEqual(fine_lon_res, 20.0)
+    self.assertEqual(coarse_lon_res, 20.0)
+
+    self.assertEqual(fine_stat.sizes['latitude'], coarse_stat.sizes['latitude'])
+    self.assertEqual(
+        fine_stat.sizes['longitude'], coarse_stat.sizes['longitude']
+    )
+
   def test_aggregation_state_round_trip_data_tree(self):
     aggregation_state = self._get_example_aggregation_state()
     data_tree = aggregation_state.to_data_tree()
