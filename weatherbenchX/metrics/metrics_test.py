@@ -1771,6 +1771,67 @@ class MetricsTest(parameterized.TestCase):
         'tiled_es',
     )
 
+  def test_quantile_score(self):
+    target = xr.DataArray(
+        [1.0, 0.0, 3.0], dims='x', coords={'mask': ('x', [1, 1, 0])}
+    )
+    pred = xr.DataArray([0.0, 1.0, 3.0], dims='x')
+
+    # Under-prediction costs tau, over-prediction costs (1 - tau), times 2.
+    res = probabilistic.QuantileScore(0.9)._compute_per_variable(pred, target)
+    np.testing.assert_allclose(res.values, [1.8, 0.2, 0.0])
+    np.testing.assert_array_equal(res.mask.values, [1, 1, 0])
+
+    res = probabilistic.QuantileScore(
+        np.float32(0.9), factor_of_two=False
+    )._compute_per_variable(pred, target)
+    np.testing.assert_allclose(res.values, [0.9, 0.1, 0.0], rtol=1e-6)
+
+    # Only the configured quantiles are scored, with tau from the coordinate.
+    multi_pred = xr.concat([pred, pred, pred], dim='quantile').assign_coords(
+        quantile=[0.1, 0.5, 0.9]
+    )
+    res = probabilistic.QuantileScore([0.9, 0.1])._compute_per_variable(
+        multi_pred, target
+    )
+    np.testing.assert_allclose(res['quantile'].values, [0.9, 0.1])
+    np.testing.assert_allclose(
+        res.transpose('quantile', 'x').values, [[1.8, 0.2, 0.0], [0.2, 1.8, 0.0]]
+    )
+
+  def test_quantile_score_median_equals_absolute_error(self):
+    target = test_utils.mock_target_data(random=True, seed=0)['2m_temperature']
+    pred = test_utils.mock_target_data(random=True, seed=1)['2m_temperature']
+    xr.testing.assert_allclose(
+        probabilistic.QuantileScore(0.5)._compute_per_variable(pred, target),
+        deterministic.AbsoluteError()._compute_per_variable(pred, target),
+    )
+
+  def test_quantile_score_invalid_inputs(self):
+    for quantiles in (0.0, 1.0, [], [0.5, np.nan]):
+      with self.assertRaises(ValueError):
+        probabilistic.QuantileScore(quantiles)
+    x = xr.DataArray([0.0], dims='x')
+    with self.assertRaises(ValueError):
+      probabilistic.QuantileScore([0.1, 0.9])._compute_per_variable(x, x)
+    with self.assertRaises(ValueError):
+      probabilistic.QuantileScore(0.5)._compute_per_variable(
+          x, x.expand_dims(quantile=[0.5])
+      )
+
+  def test_ensemble_quantile_score(self):
+    ens_pred = xr.Dataset(
+        {'t': (('realization', 'x'), [[0.0], [1.0], [2.0], [3.0]])}
+    )
+    target = xr.Dataset({'t': ('x', [0.0])})
+    eqs = probabilistic.EnsembleQuantileScore(
+        quantiles=[0.25, 0.75], ensemble_dim='realization'
+    )
+    # Linearly interpolated ensemble quantiles are 0.75 and 2.25, so
+    # 2 * 0.75 * 0.75 = 1.125 and 2 * 2.25 * 0.25 = 1.125.
+    res = eqs.compute(ens_pred, target)['t']
+    np.testing.assert_allclose(res.values, [[1.125, 1.125]])
+
 
 if __name__ == '__main__':
   absltest.main()
