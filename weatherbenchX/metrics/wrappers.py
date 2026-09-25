@@ -845,6 +845,49 @@ class Select(InputTransform):
     return da
 
 
+class InterpolateCoordinate(InputTransform):
+  """Interpolates coordinate values along a dimension using xr.DataArray.interp."""
+
+  def __init__(
+      self,
+      which: str,
+      coord_name: str,
+      coord_values: Sequence[float] | np.ndarray,
+      method: str = 'linear',
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      coord_name: Name of the coordinate/dimension to interpolate along.
+      coord_values: Target coordinate values to interpolate to.
+      method: Interpolation method passed to `xr.DataArray.interp`. Accepts any
+        method supported by xarray (e.g. 'linear', 'nearest', 'zero', 'slinear',
+        'quadratic', 'cubic', 'pchip', 'akima', etc.). Default: 'linear'.
+    """
+    super().__init__(which)
+    self._coord_name = coord_name
+    self._coord_values = coord_values
+    self._method = method
+
+  @property
+  def unique_name_suffix(self) -> str:
+    values_str = '_'.join(f'{v:.4f}' for v in self._coord_values)
+    return (
+        f'InterpolateCoordinate_{self._coord_name}_{self._method}_{values_str}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._coord_name not in da.dims:
+      return da
+
+    return da.interp(
+        coords={self._coord_name: self._coord_values},
+        method=self._method,  # pyrefly: ignore[bad-argument-type]
+    )
+
+
 class StackToNewDimension(InputTransform):
   """Stacks any number of existing dimensions into a "range" new dimension.
 
