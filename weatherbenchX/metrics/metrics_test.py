@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -814,6 +814,89 @@ class MetricsTest(parameterized.TestCase):
     out = tile.transform_fn(da)
     self.assertEqual(out.sizes, {'window': 9, 'latitude': 3, 'longitude': 3})
 
+  def test_construct_tiles_custom_dims(self):
+    """Check construct_tiles with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+    )
+    out = wrappers.construct_tiles(
+        da, window_size=3, lat_dim='lat', lon_dim='lon', wrap_longitude=False
+    )
+    np.testing.assert_array_equal(out['lat'].values, [1, 2, 3])
+    np.testing.assert_array_equal(out['lon'].values, [1, 2, 3])
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  def test_tile_wrapper_custom_dims(self):
+    """Check Tile wrapper with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both',
+        window_size=3,
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window_lat_lat_lon_lon',
+    )
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='tiled_energy_score',
+          metric_cls=probabilistic.TiledEnergyScore,
+      ),
+      dict(
+          testcase_name='tiled_variogram_score',
+          metric_cls=probabilistic.TiledVariogramScore,
+      ),
+  )
+  def test_tiled_metrics_custom_dims(self, metric_cls):
+    """Check tiled metrics with non-default spatial dimension names."""
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=43,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+
+    metric = metric_cls(
+        window_size=3,
+        ensemble_dim='realization',
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    results = compute_all_metrics(
+        {'score': metric}, predictions, targets, reduce_dims=['time']
+    )
+    self.assertIn('score.2m_temperature', results)
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lat'],
+        len(predictions['lat']) - 2,
+    )
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lon'],
+        len(predictions['lon']) - 2,
+    )
+    self.assertFalse(np.isnan(results['score.2m_temperature'].values).any())
+
   def test_energy_score(self):
     ensemble_size = 4
     targets = test_utils.mock_prediction_data(
@@ -839,6 +922,159 @@ class MetricsTest(parameterized.TestCase):
     )
     for v in ['2m_temperature', 'geopotential']:
       self.assertIn(f'es.{v}', results)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([2.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[2.0, 4.0], [2.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=0.0,
+          expected_spread=0.0,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Targets: [0.0]. Predictions: [[3.0], [5.0]] with ensemble size M=2.
+          # Skill: mean(|3 - 0|, |5 - 0|) = 4.0.
+          # Spread (fair=True): 2 * |3 - 5| / (2 * 1) = 2.0.
+          # Total EnergyScore: 4.0 - 0.5 * 2.0 = 3.0.
+          targets={'x': xr.DataArray(np.array([0.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[3.0], [5.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=4.0,
+          expected_spread=2.0,
+          expected_score=3.0,
+      ),
+  )
+  def test_energy_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      expected_skill: float,
+      expected_spread: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of EnergyScore skill and spread."""
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+    skill = skill_stat.compute(predictions, targets)['x']
+    spread = spread_stat.compute(predictions, targets)['x']
+    es = skill - 0.5 * spread
+    self.assertAlmostEqual(float(skill.values), expected_skill)
+    self.assertAlmostEqual(float(spread.values), expected_spread)
+    self.assertAlmostEqual(float(es.values), expected_score)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([1.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[1.0, 4.0], [1.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=0.5,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Known analytical values with p=1.0:
+          # Targets: [0.0, 1.0]. |y_0 - y_1| = 1.0.
+          # Predictions: M=2, x^(1)=[0.0, 4.0], x^(2)=[0.0, 9.0].
+          # Prediction mean diff: (4.0 + 9.0) / 2 = 6.5.
+          # Targets term: [[0, 1], [1, 0]].
+          # Predictions term: [[0, 6.5], [6.5, 0]].
+          # Difference: [[0, -5.5], [-5.5, 0]].
+          # Sum of squared diffs: (-5.5)^2 + (-5.5)^2 = 30.25 + 30.25 = 60.5.
+          targets={'x': xr.DataArray(np.array([0.0, 1.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[0.0, 4.0], [0.0, 9.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=1.0,
+          expected_score=60.5,
+      ),
+  )
+  def test_variogram_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      p: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of VariogramScore."""
+    vs = probabilistic.VariogramScore(dim='dim', ensemble_dim='sample', p=p)
+    res = vs.compute(predictions, targets)['x']
+    self.assertAlmostEqual(float(res.values), expected_score)
+
+  def test_energy_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[3.0], [5.0]])
+    targets = jnp.array([0.0])
+
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+
+    @jax.jit
+    def compute_skill(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return skill_stat._compute_per_variable(p_da, t_da).data
+
+    @jax.jit
+    def compute_spread(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return spread_stat._compute_per_variable(p_da, t_da).data
+
+    res_skill = compute_skill(predictions, targets)
+    res_spread = compute_spread(predictions, targets)
+    self.assertAlmostEqual(float(res_skill), 4.0)
+    self.assertAlmostEqual(float(res_spread), 2.0)
+
+  def test_variogram_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[0.0, 4.0], [0.0, 9.0]])
+    targets = jnp.array([0.0, 1.0])
+
+    vs_stat = probabilistic.VariogramScore(
+        dim='dim', ensemble_dim='sample', p=1.0
+    )
+
+    @jax.jit
+    def compute_vs(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return vs_stat._compute_per_variable(p_da, t_da).data
+
+    res_vs = compute_vs(predictions, targets)
+    self.assertAlmostEqual(float(res_vs), 60.5)
 
   def test_direct_rps(self):
     # CDFs
@@ -1534,6 +1770,68 @@ class MetricsTest(parameterized.TestCase):
         ),
         'tiled_es',
     )
+
+  def test_quantile_score(self):
+    target = xr.DataArray(
+        [1.0, 0.0, 3.0], dims='x', coords={'mask': ('x', [1, 1, 0])}
+    )
+    pred = xr.DataArray([0.0, 1.0, 3.0], dims='x')
+    pred = xr.concat([pred, pred], dim='quantile').assign_coords(
+        quantile=[0.9, 0.1]
+    )
+
+    # Under-prediction costs tau, over-prediction costs (1 - tau), times 2,
+    # with tau taken from the prediction's quantile coordinate.
+    res = probabilistic.QuantileScore()._compute_per_variable(pred, target)
+    np.testing.assert_allclose(res['quantile'].values, [0.9, 0.1])
+    np.testing.assert_allclose(
+        res.transpose('quantile', 'x').values,
+        [[1.8, 0.2, 0.0], [0.2, 1.8, 0.0]],
+    )
+    np.testing.assert_array_equal(res.mask.values, [1, 1, 0])
+
+  def test_quantile_score_skips_variables_without_quantile_dim(self):
+    x = xr.DataArray([0.0], dims='x')
+    q = x.expand_dims(quantile=[0.5])
+    res = probabilistic.QuantileScore().compute(
+        {'a': x, 'b': q}, {'a': x, 'b': x}
+    )
+    self.assertEqual(list(res), ['b'])
+
+  def test_quantile_score_median_equals_absolute_error(self):
+    target = test_utils.mock_target_data(random=True, seed=0)['2m_temperature']
+    pred = test_utils.mock_target_data(random=True, seed=1)['2m_temperature']
+    xr.testing.assert_allclose(
+        probabilistic.QuantileScore()
+        ._compute_per_variable(pred.expand_dims(quantile=[0.5]), target)
+        .squeeze('quantile', drop=True),
+        deterministic.AbsoluteError()._compute_per_variable(pred, target),
+    )
+
+  def test_quantile_score_invalid_inputs(self):
+    x = xr.DataArray([0.0], dims='x')
+    qs = probabilistic.QuantileScore()
+    for levels in ([0.0], [1.0], [0.5, np.nan]):
+      with self.assertRaises(ValueError):
+        qs._compute_per_variable(x.expand_dims(quantile=levels), x)
+    with self.assertRaisesRegex(ValueError, 'coordinate'):
+      qs._compute_per_variable(x.expand_dims('quantile'), x)
+    with self.assertRaises(ValueError):
+      q = x.expand_dims(quantile=[0.5])
+      qs._compute_per_variable(q, q)
+
+  def test_ensemble_quantile_score(self):
+    ens_pred = xr.Dataset(
+        {'t': (('realization', 'x'), [[0.0], [1.0], [2.0], [3.0]])}
+    )
+    target = xr.Dataset({'t': ('x', [0.0])})
+    eqs = probabilistic.EnsembleQuantileScore(
+        quantiles=[0.25, 0.75], ensemble_dim='realization'
+    )
+    # Linearly interpolated ensemble quantiles are 0.75 and 2.25, so
+    # 2 * 0.75 * 0.75 = 1.125 and 2 * 2.25 * 0.25 = 1.125.
+    res = eqs.compute(ens_pred, target)['t']
+    np.testing.assert_allclose(res.values, [[1.125, 1.125]])
 
 
 if __name__ == '__main__':

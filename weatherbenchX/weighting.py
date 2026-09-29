@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -124,6 +124,42 @@ class GridAreaWeighting(Weighting):
     weights = cell_area_from_latitude(np.deg2rad(latitude))
     if needs_reversing:
       weights = weights[::-1]
+    if self.return_normalized:
+      weights /= np.mean(weights)
+    weights = statistic[self.latitude_name].copy(data=weights)
+    return weights
+
+
+@dataclasses.dataclass
+class CosineLatitudeWeighting(Weighting):
+  """Return weights proportional to cosine of latitude.
+
+  Note:
+    This weighting scheme has only very minor differences compared to
+    `GridAreaWeighting`. Prefer `GridAreaWeighting` for general use; this class
+    should generally only be used when exact parity with external benchmarks
+    (e.g., ECMWF AI Weather Quest) is required.
+
+  Attributes:
+    latitude_name: Name of latitude dimension on statistic data array. Default:
+      'latitude'
+    return_normalized: Whether to return weights normalized to a mean of 1. This
+      should not matter for the aggregation. Default: True.
+  """
+
+  latitude_name: str = 'latitude'
+  return_normalized: bool = True
+
+  def weights(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    # If latitude is not a dimension, do not apply any weighting.
+    if self.latitude_name not in statistic.dims:
+      return xr.DataArray(1)
+
+    latitude = statistic[self.latitude_name].data
+    weights = np.cos(np.deg2rad(latitude))
     if self.return_normalized:
       weights /= np.mean(weights)
     weights = statistic[self.latitude_name].copy(data=weights)

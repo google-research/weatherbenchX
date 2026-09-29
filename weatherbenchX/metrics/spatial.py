@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -200,8 +200,8 @@ class SquaredFractionsError(base.PerVariableStatistic):
     )
     result = np.square(predictions - targets)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
@@ -234,8 +234,8 @@ class SquaredPredictionFraction(base.PerVariableStatistic):
     )
     result = np.square(predictions)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
@@ -268,8 +268,8 @@ class SquaredTargetFraction(base.PerVariableStatistic):
     )
     result = np.square(targets)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass

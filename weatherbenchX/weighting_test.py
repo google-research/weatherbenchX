@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,6 +44,32 @@ class WeightingTest(absltest.TestCase):
     xr.testing.assert_allclose(
         regional_weights, weights.sel(latitude=slice(-30, 30))
     )
+
+  def test_cosine_latitude_weights(self):
+    statistic_values = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00', time_stop='2020-01-03T00'
+    )
+    cosine_weighting = weighting.CosineLatitudeWeighting()
+    weights = cosine_weighting.weights(statistic_values['2m_temperature'])
+
+    # 1. Test for normalization
+    self.assertAlmostEqual(weights.mean().values, 1.0)
+    # 2. Test for shape
+    self.assertEqual(weights.shape, statistic_values.latitude.shape)
+
+    # Test unnormalized weights match cos(deg2rad(latitude)) exactly.
+    unnormalized_weighting = weighting.CosineLatitudeWeighting(
+        return_normalized=False
+    )
+    unnormalized_weights = unnormalized_weighting.weights(
+        statistic_values['2m_temperature']
+    )
+    expected = np.cos(np.deg2rad(statistic_values.latitude.values))
+    np.testing.assert_allclose(unnormalized_weights.values, expected)
+
+    # Test missing latitude dimension returns scalar 1.
+    no_lat_stat = xr.DataArray([1.0, 2.0], dims=['time'])
+    self.assertEqual(float(cosine_weighting.weights(no_lat_stat)), 1.0)
 
 
 class StationDensityWeightingTest(absltest.TestCase):
@@ -227,7 +253,6 @@ class StationDensityWeightingTest(absltest.TestCase):
     )
     self.assertEqual(float(w), 1.0)
     self.assertNotIn('weighting_alpha_0', w.dims)
-
 
 
 if __name__ == '__main__':
