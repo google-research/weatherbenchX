@@ -200,8 +200,8 @@ class SquaredFractionsError(base.PerVariableStatistic):
     )
     result = np.square(predictions - targets)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
@@ -234,8 +234,8 @@ class SquaredPredictionFraction(base.PerVariableStatistic):
     )
     result = np.square(predictions)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
@@ -268,8 +268,8 @@ class SquaredTargetFraction(base.PerVariableStatistic):
     )
     result = np.square(targets)
     if mask is not None:
-      result = result.assign_coords(mask=mask)
-    return result
+      result = result.assign_coords(mask=mask)  # pyrefly: ignore[missing-attribute]
+    return result  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass
