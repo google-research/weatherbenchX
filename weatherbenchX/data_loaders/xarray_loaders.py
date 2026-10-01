@@ -167,6 +167,12 @@ class XarrayDataLoader(base.DataLoader):
       self._ds = self._ds.sel(**self._sel_kwargs)
     self._preprocessed = True
 
+  def nominal_init_times(self, init_time_dim: str = 'init_time') -> np.ndarray:
+    """Returns the nominal initialization times from the underlying dataset."""
+    self.maybe_prepare_dataset()
+    assert self._ds is not None
+    return self._ds[init_time_dim].values
+
   def _load_chunk_from_source(
       self,
       init_times: np.ndarray,

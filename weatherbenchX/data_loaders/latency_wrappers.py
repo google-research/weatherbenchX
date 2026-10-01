@@ -19,7 +19,6 @@ from absl import logging
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base
-from weatherbenchX.data_loaders import xarray_loaders
 import xarray as xr
 
 
@@ -129,7 +128,7 @@ class ConstantLatencyWrapper(base.DataLoader):
       chunk: Chunk loaded from adjusted nominal init/lead times but with the
         requested init/lead times assigned as coordinates.
     """
-    if isinstance(self.data_loader, xarray_loaders.XarrayDataLoader):
+    if hasattr(self.data_loader, 'maybe_prepare_dataset'):
       # Normally, maybe_prepare_dataset() is called in load_chunk(). However,
       # since we are calling _load_chunk_from_source() directly, we need to call
       # it here.
@@ -186,15 +185,15 @@ class ConstantLatencyWrapper(base.DataLoader):
 
 
 class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
-  """Wraps an XarrayDataLoader in a latency wrapper.
+  """Wraps an XarrayDataLoader (or ConcatDataLoader of XarrayDataLoaders) in a latency wrapper.
 
-  This is a shortcut that uses the init_time coordinate on the Zarr file to
-  determine the nominal init times.
+  This is a shortcut that uses `nominal_init_times()` on the wrapped loader to
+  determine the nominal init times from the underlying Zarr file(s).
   """
 
   def __init__(
       self,
-      data_loader: xarray_loaders.XarrayDataLoader,
+      data_loader: base.DataLoader,
       latency: np.timedelta64,
       init_time_dim: str = 'init_time',
       concat_dim: str = 'init_time',
@@ -212,9 +211,15 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
   def maybe_set_nominal_init_times(self):
     if self._nominal_init_times_set:
       return
-    assert isinstance(self.data_loader, xarray_loaders.XarrayDataLoader)
-    self.data_loader.maybe_prepare_dataset()
-    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access  # pyrefly: ignore[unsupported-operation]
+    if hasattr(self.data_loader, 'nominal_init_times'):
+      self.nominal_init_times = self.data_loader.nominal_init_times(  # pyrefly: ignore[missing-attribute]
+          self._init_time_dim
+      )
+    else:
+      raise ValueError(
+          'data_loader must implement nominal_init_times() returning nominal'
+          ' init times.'
+      )
     self._nominal_init_times_set = True
 
   def _load_chunk_from_source(
