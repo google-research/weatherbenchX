@@ -121,6 +121,46 @@ class ContinuousToBinaryTest(parameterized.TestCase):
             expected,
         )
 
+  def test_sel_coords_and_nan_threshold(self):
+    x = xr.DataArray(
+        np.array([1.5, 25.0, np.nan], dtype=np.float32),
+        dims=['index'],
+        coords={
+            'index': [0, 1, 2],
+            'station': ('index', ['s0', 's1', 's0']),
+            'longitude': ('index', [355.0, 5.0, 355.0]),
+        },
+    )
+    thresholds = xr.DataArray(
+        np.array([[1.0, 2.0], [10.0, np.nan]], dtype=np.float32),
+        dims=['station', 'quantile'],
+        coords={
+            'station': ['s0', 's1'],
+            'quantile': [0.5, 0.9],
+            # Non-dimension coord with conflicting value (-5.0 vs 355.0) should
+            # be dropped when indexing via sel_coords.
+            'longitude': ('station', [-5.0, 5.0]),
+        },
+    )
+    ctb = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='quantile',
+        unique_name_suffix='station_quantiles',
+        sel_coords=['station'],
+    )
+    y = ctb.transform_fn(x)
+    self.assertEqual(y.dims, ('index', 'quantile'))
+    expected = np.array(
+        [
+            [1.0, 0.0],
+            [1.0, np.nan],
+            [np.nan, np.nan],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(y.values, expected, equal_nan=True)
+
 
 class EnsembleMeanTest(parameterized.TestCase):
 
