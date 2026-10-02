@@ -127,9 +127,9 @@ class XarrayDataLoader(base.DataLoader):
       logging.info('Opening dataset from path: %s', self._path)
       assert self._path is not None
       if self._path.rstrip('/').endswith('.zarr'):
-        self._ds = xr.open_zarr(self._path)
+        self._ds = xr.open_zarr(self._path, decode_timedelta=True)
       else:
-        self._ds = xr.open_dataset(self._path)
+        self._ds = xr.open_dataset(self._path, decode_timedelta=True)
 
     if self._preprocessing_fn is not None:
       self._ds = self._preprocessing_fn(self._ds)  # pyrefly: ignore[bad-argument-type]
