@@ -521,5 +521,81 @@ class SelectBinThresholdsByTimeFromChunkTest(parameterized.TestCase):
     xr.testing.assert_equal(selected, expected)
 
 
+
+class InterpolateCoordinateTest(parameterized.TestCase):
+
+  def test_linear_interpolation(self):
+    da = xr.DataArray(
+        [10.0, 20.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': [0.0, 0.5, 1.0]},
+        name='temp',
+    )
+    target_quantiles = [0.25, 0.75]
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=target_quantiles,
+        method='linear',
+    )
+    output = transform.transform_fn(da)
+    expected = xr.DataArray(
+        [15.0, 25.0],
+        dims=['quantile'],
+        coords={'quantile': target_quantiles},
+        name='temp',
+    )
+    xr.testing.assert_allclose(output, expected)
+
+  def test_nearest_interpolation(self):
+    da = xr.DataArray(
+        [10.0, 20.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': [0.0, 0.5, 1.0]},
+        name='temp',
+    )
+    target_quantiles = [0.2, 0.8]
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=target_quantiles,
+        method='nearest',
+    )
+    output = transform.transform_fn(da)
+    expected = xr.DataArray(
+        [10.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': target_quantiles},
+        name='temp',
+    )
+    xr.testing.assert_allclose(output, expected)
+
+  def test_missing_coordinate_dim_returns_unchanged(self):
+    da = xr.DataArray(
+        [1.0, 2.0],
+        dims=['time'],
+        coords={'time': [0, 1]},
+    )
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=[0.2, 0.8],
+    )
+    output = transform.transform_fn(da)
+    xr.testing.assert_equal(output, da)
+
+  def test_unique_name_suffix(self):
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=[0.2, 0.8],
+        method='linear',
+    )
+    self.assertEqual(
+        transform.unique_name_suffix,
+        'InterpolateCoordinate_quantile_linear_0.2000_0.8000',
+    )
+
+
 if __name__ == '__main__':
   absltest.main()
