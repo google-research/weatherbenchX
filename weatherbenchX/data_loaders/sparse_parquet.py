@@ -52,16 +52,16 @@ def get_parquet_files_subset(
 
 def parquet_filename_for_time(path: str, time: np.datetime64, unit: str) -> str:
   """Return parquet partition filename for a given time."""
-  year = time.item().year  # pyrefly: ignore[missing-attribute]
-  month = time.item().month  # pyrefly: ignore[missing-attribute]
+  year = time.item().year
+  month = time.item().month
   if unit == 'M':
     fn = f'year={year}/month={month}/{year}-{str(month).zfill(2)}.parquet'
   elif unit == 'D':
-    day = time.item().day  # pyrefly: ignore[missing-attribute]
+    day = time.item().day
     fn = f'year={year}/month={month}/day={day}/{year}-{str(month).zfill(2)}-{str(day).zfill(2)}.parquet'
   elif unit == 'h':
-    day = time.item().day  # pyrefly: ignore[missing-attribute]
-    hour = time.item().hour  # pyrefly: ignore[missing-attribute]
+    day = time.item().day
+    hour = time.item().hour
     fn = f'year={year}/month={month}/day={day}/hour={hour}/{year}-{str(month).zfill(2)}-{str(day).zfill(2)}T{str(hour).zfill(2)}.parquet'
   else:
     raise NotImplementedError
@@ -272,7 +272,7 @@ class SparseObservationsFromParquet(base.DataLoader):
     df = pd.concat([_read_single_file(fn) for fn in files], ignore_index=True)
 
     if self._preprocessing_fn is not None:
-      df = self._preprocessing_fn(df)  # pyrefly: ignore[bad-argument-type]
+      df = self._preprocessing_fn(df)
 
     if self._remove_duplicates:
       assert (
@@ -281,13 +281,13 @@ class SparseObservationsFromParquet(base.DataLoader):
       df = self._pick_closest_from_duplicates(df, valid_time)  # pyrefly: ignore[bad-argument-type]
 
     if self._rename_variables is not None:
-      df = df.rename(columns=self._rename_variables)  # pyrefly: ignore[no-matching-overload]
+      df = df.rename(columns=self._rename_variables)
 
-    df = df.rename(columns={self._time_dim: 'valid_time'})  # pyrefly: ignore[no-matching-overload]
+    df = df.rename(columns={self._time_dim: 'valid_time'})
 
     return df.loc[
         :,
-        self._variables + self._coordinate_variables,  # pytype: disable=unsupported-operands
+        self._variables + self._coordinate_variables,
     ]
 
   def _load_chunk_from_source(

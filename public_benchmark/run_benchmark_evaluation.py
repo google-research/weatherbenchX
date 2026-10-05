@@ -191,10 +191,10 @@ def main(argv: Sequence[str]) -> None:
   elif PREDICTION.value == 'probabilistic_climatology':
     prediction_loader = xarray_loaders.ProbabilisticClimatologyFromXarray
     prediction_loader_kwargs['start_year'] = (
-        1990  #   pytype: disable=unsupported-operands
+        1990
     )
     prediction_loader_kwargs['end_year'] = (
-        2019  #   pytype: disable=unsupported-operands
+        2019
     )
   else:
     prediction_loader = xarray_loaders.PredictionsFromXarray

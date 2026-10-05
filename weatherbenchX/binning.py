@@ -614,7 +614,7 @@ class ByCoordBins(Binning):
 
     if self.add_global_bin:
       mask = xr.full_like(statistic.coords[self.dim_name], True, dtype=bool)
-      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)  # pyrefly: ignore[missing-attribute]
+      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
       mask.coords[self.dim_name] = ['global']
       masks.append(mask)
 

@@ -170,7 +170,7 @@ class ConstantLatencyWrapper(base.DataLoader):
       # adjusted times before and query times after. However, since for sparse
       # data init/lead times are coordinates with dimension index (with
       # possibly missing init/lead times), this isn't trivial.
-      raw_chunk = xarray_tree.map_structure(  # pytype: disable=wrong-arg-types
+      raw_chunk = xarray_tree.map_structure(
           adjust_init_and_lead_times,
           raw_chunk,
       )
@@ -212,7 +212,7 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
     if self._nominal_init_times_set:
       return
     if hasattr(self.data_loader, 'nominal_init_times'):
-      self.nominal_init_times = self.data_loader.nominal_init_times(  # pyrefly: ignore[missing-attribute]
+      self.nominal_init_times = self.data_loader.nominal_init_times(
           self._init_time_dim
       )
     else:

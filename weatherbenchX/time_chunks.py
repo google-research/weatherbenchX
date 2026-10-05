@@ -172,7 +172,7 @@ class TimeChunks(Iterable[TimeChunk]):
 
   @property
   def lead_time_chunk_size(self) -> int:
-    return self._lead_time_chunk_size  # pytype: disable=bad-return-type
+    return self._lead_time_chunk_size  # pyrefly: ignore[bad-return]
 
   def __iter__(self) -> Iterator[TimeChunk]:
     return itertools.product(self._init_time_chunks, self._lead_time_chunks)

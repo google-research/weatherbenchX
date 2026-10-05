@@ -109,7 +109,7 @@ def interpolate_to_coords(
       **dim_args,  # pyrefly: ignore[bad-argument-type]
       method=method,  # pyrefly: ignore[bad-argument-type]
       kwargs=interp_kwargs,
-  )  # pytype: disable=wrong-arg-types
+  )
   return out
 
 
@@ -253,7 +253,7 @@ class InterpolateToReferenceCoords(Interpolation):
   def interpolate_data_array(  # pyrefly: ignore[bad-override]
       self,
       da: xr.DataArray,
-      reference: xr.DataArray,  # pytype: disable=signature-mismatch
+      reference: xr.DataArray,
   ) -> xr.DataArray:
 
     if self._wrap_longitude:
@@ -351,7 +351,7 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
   def interpolate_data_array(
       self,
       da: xr.DataArray,
-      reference: xr.DataArray,  # pytype: disable=signature-mismatch
+      reference: xr.DataArray,
   ) -> xr.DataArray:
     if da.name in ['2m_temperature', '10m_wind_speed']:
       # Sometimes coordinates (e.g. latitude ordering North-South vs South-North)
