@@ -137,7 +137,7 @@ class _TTestResults:
     z_score = xr.where((difference == 0) & (self.standard_error == 0),
                        0., difference / self.standard_error)
     t_dist = scipy.stats.t(df=self.degrees_of_freedom)
-    return 2 * (1 - xr.apply_ufunc(t_dist.cdf, abs(z_score)))
+    return 2 * xr.apply_ufunc(t_dist.sf, abs(z_score))
 
 
 class _Base(base.StatisticalInferenceMethod):
