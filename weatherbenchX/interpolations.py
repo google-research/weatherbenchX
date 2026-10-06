@@ -255,6 +255,24 @@ class InterpolateToReferenceCoords(Interpolation):
       da: xr.DataArray,
       reference: xr.DataArray,
   ) -> xr.DataArray:
+    # If dims not explicit, interpolate all dims that have a corresponding
+    # coordinate in the reference.
+    if self._dims is None:
+      dims = [d for d in da.dims if d in reference.coords]
+    else:
+      dims = self._dims
+
+    if reference.size > 0 and all(
+        dim in da.coords
+        and da[dim].shape == reference[dim].shape
+        and (
+            np.allclose(da[dim].values, reference[dim].values, atol=1e-4)
+            if np.issubdtype(da[dim].dtype, np.floating)
+            else np.array_equal(da[dim].values, reference[dim].values)
+        )
+        for dim in dims
+    ):
+      return da.assign_coords({dim: reference[dim] for dim in dims})
 
     if self._wrap_longitude:
       da = pad_longitude(da)
@@ -264,13 +282,6 @@ class InterpolateToReferenceCoords(Interpolation):
         reference = reference.sel(
             {coord: slice(da[coord].min(), da[coord].max())}
         )
-
-    # If dims not explicit, interpolate all dims that have a corresponding
-    # coordinate in the reference.
-    if self._dims is None:
-      dims = [d for d in da.dims if d in reference.coords]
-    else:
-      dims = self._dims
 
     # Catch case where reference doesn't contain any data.
     if reference.size == 0:
@@ -497,3 +508,265 @@ class Subsample(Interpolation):
         if dim in da.dims
     }
     return da.isel(**isel_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+
+def _cell_edges_1d(
+    coords: np.ndarray,
+    wrap_longitude: bool = False,
+    shared_bounds: Optional[tuple[Optional[float], Optional[float]]] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Computes 1D cell lower/upper edges in ascending coordinate order."""
+  raw = np.asarray(coords)
+  coords_f64 = raw.astype(np.float64)
+  if raw.dtype == np.float32:
+    # Eliminate float32 representation jitter (for example,
+    # float32(359.9) == 359.899994) before computing cell boundaries in float64.
+    coords_f64 = np.round(coords_f64, 5)
+  sort_order = np.argsort(coords_f64)
+  u = coords_f64[sort_order]
+  midpoints = 0.5 * (u[:-1] + u[1:])
+  if wrap_longitude:
+    first_edge = 0.5 * ((u[-1] - 360.0) + u[0])
+    last_edge = 0.5 * (u[-1] + (u[0] + 360.0))
+  else:
+    first_edge = u[0] - 0.5 * (u[1] - u[0])
+    last_edge = u[-1] + 0.5 * (u[-1] - u[-2])
+    if shared_bounds is not None:
+      min_bound, max_bound = shared_bounds
+      if min_bound is not None:
+        first_edge = max(first_edge, min_bound)
+      if max_bound is not None:
+        last_edge = min(last_edge, max_bound)
+  edges_lo = np.concatenate([[first_edge], midpoints])
+  edges_hi = np.concatenate([midpoints, [last_edge]])
+  return sort_order, edges_lo, edges_hi
+
+
+def _coarsen_1d(
+    da: xr.DataArray,
+    dim: str,
+    target_coord: xr.DataArray,
+    wrap_longitude: bool = False,
+) -> xr.DataArray:
+  """Coarsens `da` along `dim` onto `target_coord` via box-overlap averaging."""
+  src_raw = np.asarray(da[dim].values)
+  tgt_raw = np.asarray(target_coord.values)
+  src_vals = (
+      np.round(src_raw.astype(np.float64), 4)
+      if src_raw.dtype == np.float32
+      else src_raw.astype(np.float64)
+  )
+  tgt_vals = (
+      np.round(tgt_raw.astype(np.float64), 4)
+      if tgt_raw.dtype == np.float32
+      else tgt_raw.astype(np.float64)
+  )
+
+  if len(src_vals) == len(tgt_vals) and np.allclose(
+      src_vals, tgt_vals, atol=1e-5
+  ):
+    return da.assign_coords({dim: target_coord})
+
+  if len(src_vals) < 2 or len(tgt_vals) < 2:
+    raise ValueError(
+        f'Coarsen requires at least 2 points along {dim!r}, got'
+        f' {len(src_vals)} source and {len(tgt_vals)} target points.'
+    )
+
+  is_wrapped = wrap_longitude and dim == 'longitude'
+  if not is_wrapped:
+    src_min, src_max = float(np.min(src_vals)), float(np.max(src_vals))
+    tgt_min, tgt_max = float(np.min(tgt_vals)), float(np.max(tgt_vals))
+    min_bound = (
+        0.5 * (src_min + tgt_min) if abs(src_min - tgt_min) < 1e-4 else None
+    )
+    max_bound = (
+        0.5 * (src_max + tgt_max) if abs(src_max - tgt_max) < 1e-4 else None
+    )
+    shared_bounds = (min_bound, max_bound)
+  else:
+    shared_bounds = None
+
+  src_order, src_lo, src_hi = _cell_edges_1d(
+      src_vals, wrap_longitude=is_wrapped, shared_bounds=shared_bounds
+  )
+  tgt_order, tgt_lo, tgt_hi = _cell_edges_1d(
+      tgt_vals, wrap_longitude=is_wrapped, shared_bounds=shared_bounds
+  )
+
+  src_step = float(np.median(src_hi - src_lo))
+  tgt_step = float(np.median(tgt_hi - tgt_lo))
+  if src_step > tgt_step * (1.0 + 1e-4):
+    raise ValueError(
+        f'Cannot coarsen along {dim!r} from coarser source resolution'
+        f' ({src_step:g}) to finer target resolution ({tgt_step:g}).'
+    )
+
+  inv_tgt_order = np.argsort(tgt_order)
+  tgt_lo = tgt_lo[inv_tgt_order]
+  tgt_hi = tgt_hi[inv_tgt_order]
+
+  n_tgt = len(tgt_vals)
+  n_src = len(src_vals)
+  if is_wrapped:
+    overlap_sorted = np.zeros((n_tgt, n_src), dtype=np.float64)
+    for shift in (-360.0, 0.0, 360.0):
+      s_lo = src_lo[None, :] + shift
+      s_hi = src_hi[None, :] + shift
+      overlap_sorted += np.maximum(
+          0.0,
+          np.minimum(tgt_hi[:, None], s_hi) - np.maximum(tgt_lo[:, None], s_lo),
+      )
+  else:
+    overlap_sorted = np.maximum(
+        0.0,
+        np.minimum(tgt_hi[:, None], src_hi[None, :])
+        - np.maximum(tgt_lo[:, None], src_lo[None, :]),
+    )
+
+  tol = 1e-5 * min(src_step, tgt_step)
+  overlap_sorted[overlap_sorted < tol] = 0.0
+  row_sum = overlap_sorted.sum(axis=1, keepdims=True)
+  if np.any(row_sum <= 0.0):
+    raise ValueError(
+        f'Target cells along {dim!r} have zero overlap with source grid.'
+    )
+  weights_sorted = overlap_sorted / row_sum
+
+  counts = np.count_nonzero(weights_sorted > 0.0, axis=1)
+  max_k = int(np.max(counts))
+  idx_table = np.zeros((max_k, n_tgt), dtype=np.intp)
+  weight_table = np.zeros((max_k, n_tgt), dtype=np.float64)
+  for j in range(n_tgt):
+    nz = np.flatnonzero(weights_sorted[j] > 0.0)
+    k = len(nz)
+    idx_table[:k, j] = src_order[nz]
+    weight_table[:k, j] = weights_sorted[j, nz]
+    if k < max_k:
+      idx_table[k:, j] = idx_table[k - 1, j]
+
+  aux_coords = [c for c in da.coords if c != dim and dim in da.coords[c].dims]
+  da_clean = da.drop_vars(aux_coords) if aux_coords else da
+
+  out_dtype = (
+      da.dtype if np.issubdtype(da.dtype, np.floating) else np.dtype(np.float32)
+  )
+  target_coord_da = (
+      target_coord
+      if isinstance(target_coord, xr.DataArray)
+      else xr.DataArray(target_coord, dims=[dim])
+  )
+  acc: Optional[xr.DataArray] = None
+  for k in range(max_k):
+    w_da = xr.DataArray(
+        weight_table[k].astype(out_dtype),
+        dims=[dim],
+        coords={dim: target_coord_da},
+    )
+    sliced = da_clean.isel({dim: idx_table[k]}).assign_coords(
+        {dim: target_coord_da}
+    )
+    term = sliced * w_da
+    acc = term if acc is None else (acc + term)
+
+  assert acc is not None
+  out = acc.transpose(*da.dims).astype(out_dtype)
+  out.attrs = dict(da.attrs)
+  out.name = da.name
+  return out
+
+
+class Coarsen(Interpolation):
+  """Coarsens a DataArray to a coarser reference or fixed coordinate grid.
+
+  Uses 1D first-order conservative box-overlap averaging along each specified
+  dimension, supporting both integer and non-integer grid resolution ratios
+  (such as coarsening a 0.1 deg forecast onto a 0.25 deg target grid).
+  """
+
+  def __init__(
+      self,
+      dims: Optional[Sequence[str]] = None,
+      wrap_longitude: bool = False,
+      coords: Optional[Mapping[str, Union[xr.DataArray, np.ndarray]]] = None,
+  ):
+    """Init.
+
+    Args:
+      dims: (Optional) Dimensions over which to coarsen. If None (default),
+        infer dimensions from the intersection of DataArray dimensions and
+        reference/target coordinates.
+      wrap_longitude: If True, treat the 'longitude' dimension as periodic with
+        period 360 degrees. Default: False.
+      coords: (Optional) Dictionary of fixed target coordinates to coarsen to
+        when `reference` is not passed to `interpolate_data_array`.
+    """
+    self._dims = dims
+    self._wrap_longitude = wrap_longitude
+    self._coords = coords
+
+  def interpolate(
+      self,
+      ds: Mapping[Hashable, xr.DataArray],
+      reference: Optional[Mapping[Hashable, xr.DataArray]] = None,
+  ) -> Mapping[Hashable, xr.DataArray]:
+    if reference is None:
+      return xarray_tree.map_structure(self.interpolate_data_array, ds)
+    if isinstance(reference, xr.DataArray):
+      ref_da = reference
+    elif isinstance(reference, xr.Dataset):
+      ref_da = (
+          next(iter(reference.data_vars.values()))
+          if reference.data_vars
+          else xr.DataArray(coords=reference.coords)
+      )
+    else:
+      ref_da = next(iter(reference.values()), None)
+    def _interpolate_var(da: xr.DataArray) -> xr.DataArray:
+      if (
+          isinstance(reference, Mapping)
+          and da.name is not None
+          and da.name in reference
+      ):
+        var_ref = reference[da.name]
+      else:
+        var_ref = ref_da
+      return self.interpolate_data_array(da, var_ref)
+
+    return xarray_tree.map_structure(_interpolate_var, ds)
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    if reference is not None:
+      target_coords = reference.coords
+    elif self._coords is not None:
+      target_coords = self._coords
+    else:
+      raise ValueError(
+          'Coarsen requires either a reference DataArray or fixed coords.'
+      )
+
+    if self._dims is None:
+      dims = [str(d) for d in da.dims if d in target_coords]
+    else:
+      dims = [str(d) for d in self._dims if d in da.dims and d in target_coords]
+
+    if reference is not None and reference.size == 0:
+      da_dims_to_retain = set(da.dims) - set(dims)
+      return reference.copy().expand_dims({d: da[d] for d in da_dims_to_retain})
+
+    out = da
+    for dim in dims:
+      tgt_coord = target_coords[dim]
+      if not isinstance(tgt_coord, xr.DataArray):
+        tgt_coord = xr.DataArray(tgt_coord, dims=[dim])
+      out = _coarsen_1d(
+          out,
+          dim=dim,
+          target_coord=tgt_coord,
+          wrap_longitude=self._wrap_longitude,
+      )
+    return out

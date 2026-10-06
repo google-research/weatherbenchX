@@ -135,13 +135,20 @@ class DataLoader(abc.ABC):
     # TODO: https://github.com/google-research/weatherbenchX/issues/67 - add
     # full functionality for computing derived variables, which would complement
     # adhoc chunk processing with process_chunk_fn.
-    if self._process_chunk_fn is not None:
-      chunk = self._process_chunk_fn(chunk)
-
-    if self._interpolation is not None:
-      # TODO(srasp): Potentially implement consistency check between lead_times
-      # and lead_time coordinate on reference.
+    if isinstance(self._interpolation, interpolations.Coarsen):
+      # When coarsening, average linear vector components (e.g. u/v wind) onto
+      # the coarser grid before computing non-linear derived quantities (such as
+      # wind speed = sqrt(u^2 + v^2)) in process_chunk_fn.
       chunk = self._interpolation.interpolate(chunk, reference)
+      if self._process_chunk_fn is not None:
+        chunk = self._process_chunk_fn(chunk)
+    else:
+      if self._process_chunk_fn is not None:
+        chunk = self._process_chunk_fn(chunk)
+      if self._interpolation is not None:
+        # TODO(srasp): Potentially implement consistency check between
+        # lead_times and lead_time coordinate on reference.
+        chunk = self._interpolation.interpolate(chunk, reference)
 
     # A temporary workaround for https://github.com/pydata/xarray/issues/10325.
     def _compute_and_keep_dtype(x: xr.DataArray) -> xr.DataArray:

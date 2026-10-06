@@ -126,7 +126,7 @@ class XarrayDataLoader(base.DataLoader):
     if self._ds is None:
       logging.info('Opening dataset from path: %s', self._path)
       assert self._path is not None
-      if self._path.rstrip('/').endswith('.zarr'):
+      if self._path.rstrip('/').endswith('.zarr') or '.zarr/' in self._path:
         self._ds = xr.open_zarr(self._path)
       else:
         self._ds = xr.open_dataset(self._path)
