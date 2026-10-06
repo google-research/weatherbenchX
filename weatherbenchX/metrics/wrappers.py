@@ -51,16 +51,20 @@ def binarize_thresholds(
     x: xr.DataArray,
     thresholds: Union[Iterable[float], xr.DataArray, xr.Dataset],
     threshold_dim: str,
+    sel_coords: Sequence[str] | None = None,
 ) -> xr.DataArray:
   """Binarizes a continuous array using a threshold value or a list of values.
 
-  Note that this retains NaNs in the input array. If NaNs are present, the
-  output will be of type float otherwise bool.
+  Note that this retains NaNs in the input and threshold arrays.
 
   Args:
     x: Input DataArray.
     thresholds: List, xarray.DataArray or xarray.Dataset of threshold values.
     threshold_dim: Name of dimension to use for threshold values.
+    sel_coords: Optional sequence of coordinate names to index into `thresholds`
+      using the corresponding coordinates on `x` (e.g., for indexing station
+      thresholds onto sparse observations). Each coordinate must be a dimension
+      in `thresholds` and a coordinate or dimension in `x`.
 
   Returns:
     binary_x: Binarized DataArray.
@@ -85,7 +89,15 @@ def binarize_thresholds(
     threshold = xr.DataArray(
         thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
     )
-  return (x > threshold).where(~xu.isnan(x)).astype(np.float32)
+  if sel_coords is not None:
+    threshold = threshold.reset_coords(drop=True).sel(
+        {coord: x[coord] for coord in sel_coords}
+    )
+  return (
+      (x > threshold)
+      .where(~xu.isnan(x) & ~xu.isnan(threshold))
+      .astype(np.float32)
+  )
 
 
 # Transforms
@@ -261,6 +273,7 @@ class ContinuousToBinary(InputTransform):
       threshold_value: Union[float, Iterable[float], xr.DataArray, xr.Dataset],
       threshold_dim: str,
       unique_name_suffix: str | None = None,
+      sel_coords: Sequence[str] | None = None,
   ):
     """Init.
 
@@ -274,6 +287,9 @@ class ContinuousToBinary(InputTransform):
         `threshold_values` is an xarray.DataArray or xarray.Dataset, this must
         be provided, and must be unique over all the threshold_value that you
         intend to use within a set of Metrics that are computed together.
+      sel_coords: Optional sequence of coordinate names to index into
+        `threshold_value` using the corresponding coordinates on the input
+        DataArray.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
@@ -291,6 +307,7 @@ class ContinuousToBinary(InputTransform):
             ' xarray.DataArray or xarray.Dataset.'
         )
     self._unique_name_suffix = unique_name_suffix
+    self._sel_coords = tuple(sel_coords) if sel_coords is not None else None
 
   @property
   def unique_name_suffix(self) -> str:
@@ -301,7 +318,12 @@ class ContinuousToBinary(InputTransform):
     return f'{self._threshold_dim}={unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
+    return binarize_thresholds(
+        da,
+        self._threshold_value,
+        self._threshold_dim,
+        sel_coords=self._sel_coords,
+    )
 
 
 def select_bin_thresholds_by_time_from_chunk(
