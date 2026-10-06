@@ -478,8 +478,8 @@ def write_dataset(
     ds: The dataset to write.
     target_path: The path to write the dataset to.
     zarr_chunks: Optional chunking specification for Zarr output files.
-    drop_attrs: Whether to remove attributes that may have been propagated from
-      the targets or predictions.
+    drop_attrs: If True, drop all dataset and variable attributes before
+      writing.
 
   Raises:
     ValueError: If the target path is not a Zarr or NetCDF file.
@@ -605,6 +605,77 @@ def _drop_non_template_coords(
   return key, chunk_ds
 
 
+def _compute_in_and_out_chunks(
+    template: xr.Dataset,
+    times: time_chunks.TimeChunks,
+    zarr_chunks: Mapping[str, int] | None,
+) -> tuple[dict[str, int], dict[str, int]]:
+  """Computes input and output chunk dictionaries for template dimensions."""
+  dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+  in_chunks = {}
+  for dim, size in dim_sizes.items():
+    if dim == 'init_time':
+      in_chunks[dim] = times.init_time_chunk_size or -1
+    elif dim == 'lead_time':
+      in_chunks[dim] = times.lead_time_chunk_size or -1
+    else:
+      in_chunks[dim] = size
+  out_chunks = in_chunks.copy()
+  if zarr_chunks:
+    out_chunks.update(zarr_chunks)
+  return in_chunks, out_chunks
+
+
+def _compute_agg_state_disk_chunks(
+    template: xr.Dataset,
+    times: time_chunks.TimeChunks,
+    zarr_chunks: Mapping[str, int] | None,
+) -> dict[str, int]:
+  """Computes AggregationState disk chunks, capping fine-grid latitude."""
+  dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+  _, out_chunks = _compute_in_and_out_chunks(template, times, zarr_chunks)
+  disk_chunks = out_chunks.copy()
+  lat_dim = next((d for d in ('latitude', 'lat') if d in dim_sizes), None)
+  lon_dim = next((d for d in ('longitude', 'lon') if d in dim_sizes), None)
+  if (
+      lat_dim is not None
+      and lon_dim is not None
+      and (zarr_chunks is None or lat_dim not in zarr_chunks)
+      and out_chunks.get(lat_dim) == dim_sizes[lat_dim]
+      and dim_sizes[lat_dim] * dim_sizes[lon_dim] > 1_040_000
+  ):
+    disk_chunks[lat_dim] = max(1, 1_040_000 // max(1, dim_sizes[lon_dim]))
+  return disk_chunks
+
+
+def _chunk_template_for_zarr(
+    template: xr.Dataset,
+    disk_chunks: Mapping[str, int],
+) -> xr.Dataset:
+  """Chunks lazy Dask variables in `template` according to `disk_chunks`."""
+  dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+  resolved = {
+      dim: c if c != -1 else dim_sizes[dim]
+      for dim, c in disk_chunks.items()
+      if dim in dim_sizes
+  }
+  out = template.copy()
+  for k, v in template.variables.items():
+    if v.chunks is not None:
+      var_chunks = {d: resolved[str(d)] for d in v.dims if str(d) in resolved}
+      if var_chunks:
+        out[k] = out[k].chunk(var_chunks)
+  return out
+
+
+def _extract_metrics_chunk_with_template(
+    element: tuple[str | None, tuple[xbeam.Key, xr.Dataset]],
+    template: xr.Dataset,
+) -> tuple[xbeam.Key, xr.Dataset]:
+  """Drops non-template coordinates from a metrics chunk using `template`."""
+  return _drop_non_template_coords(element[1], frozenset(template.coords))
+
+
 class WriteMetricsChunksToZarr(beam.PTransform):
   """Writes lead-time-chunked metrics to a Zarr store using xarray-beam."""
 
@@ -676,68 +747,123 @@ class WriteMetricsChunksToZarr(beam.PTransform):
             'Output path with chunk_metrics_by_lead_time must end with .zarr,'
             f' got {target_path}'
         )
-
-      template = _get_template_metrics_dataset(
-          self.metrics,
-          self.predictions_loader,
-          self.targets_loader,
-          self.times,
-          agg,
-          setup_fn=self.setup_fn,
-          ignore_missing_variables=self.ignore_missing_variables,
-      )
-      dim_sizes = typing.cast(Mapping[str, int], template.sizes)
-      if 'lead_time' not in dim_sizes:
+      if 'lead_time' in agg.reduce_dims:
         raise ValueError(
             'Cannot use chunk_metrics_by_lead_time=True when lead_time is not a'
             ' dimension in the output (e.g. it was reduced).'
         )
 
-      in_chunks = {}
-      for dim, size in dim_sizes.items():
-        if dim == 'init_time':
-          in_chunks[dim] = self.times.init_time_chunk_size or -1
-        elif dim == 'lead_time':
-          in_chunks[dim] = self.times.lead_time_chunk_size or -1
-        else:
-          in_chunks[dim] = size
-      out_chunks = in_chunks.copy()
-      if self.zarr_chunks:
-        out_chunks.update(self.zarr_chunks)
-
-      template_coords = frozenset(template.coords)
       label_suffix = f'_{agg_name}' if agg_name else ''
-      res = (
-          partitioned_pcoll
-          | f'ExtractChunk{label_suffix}'
-          >> beam.Map(
-              lambda x, coords=template_coords: _drop_non_template_coords(
-                  x[1], coords
-              )
+      if self.zarr_chunks is None:
+        # Build the template lazily on a Beam worker via AsSingleton so the
+        # Flume controller does not need to load a full 0.1 deg ensemble chunk.
+        def _build_worker_metrics_template(
+            _,
+            metrics=self.metrics,
+            predictions_loader=self.predictions_loader,
+            targets_loader=self.targets_loader,
+            times=self.times,
+            agg=agg,
+            setup_fn=self.setup_fn,
+            ignore_missing_variables=self.ignore_missing_variables,
+        ) -> xr.Dataset:
+          tmpl = _get_template_metrics_dataset(
+              metrics,
+              predictions_loader,
+              targets_loader,
+              times,
+              agg,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
-          | f'Rechunk{label_suffix}'
-          >> xbeam.Rechunk(
+          if 'lead_time' not in tmpl.sizes:
+            raise ValueError(
+                'Cannot use chunk_metrics_by_lead_time=True when lead_time is'
+                ' not a dimension in the output (e.g. it was reduced).'
+            )
+          _, out_c = _compute_in_and_out_chunks(tmpl, times, None)
+          return _chunk_template_for_zarr(tmpl, out_c)
+
+        template_pcoll = (
+            pcoll.pipeline
+            | f'CreateMetricsTemplateSeed{label_suffix}' >> beam.Create([None])
+            | f'BuildMetricsTemplate{label_suffix}'
+            >> beam.Map(_build_worker_metrics_template)
+        )
+        template_singleton = beam.pvalue.AsSingleton(template_pcoll)
+        chunk_pcoll = (
+            partitioned_pcoll
+            | f'ExtractChunk{label_suffix}'
+            >> beam.Map(
+                _extract_metrics_chunk_with_template,
+                template=template_singleton,
+            )
+        )
+        res = (
+            chunk_pcoll
+            | f'WriteMetricsToZarr{label_suffix}'
+            >> xbeam.ChunksToZarr(
+                target_path,
+                template=template_singleton,
+            )
+        )
+      else:
+        template = _get_template_metrics_dataset(
+            self.metrics,
+            self.predictions_loader,
+            self.targets_loader,
+            self.times,
+            agg,
+            setup_fn=self.setup_fn,
+            ignore_missing_variables=self.ignore_missing_variables,
+        )
+        dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+        if 'lead_time' not in dim_sizes:
+          raise ValueError(
+              'Cannot use chunk_metrics_by_lead_time=True when lead_time is not'
+              ' a dimension in the output (e.g. it was reduced).'
+          )
+
+        in_chunks, out_chunks = _compute_in_and_out_chunks(
+            template, self.times, self.zarr_chunks
+        )
+        template_coords = frozenset(template.coords)
+        chunk_pcoll = (
+            partitioned_pcoll
+            | f'ExtractChunk{label_suffix}'
+            >> beam.Map(
+                lambda x, coords=template_coords: _drop_non_template_coords(
+                    x[1], coords
+                )
+            )
+        )
+        if out_chunks != in_chunks:
+          chunk_pcoll = chunk_pcoll | f'Rechunk{label_suffix}' >> xbeam.Rechunk(
               dim_sizes=dim_sizes,
               source_chunks=in_chunks,
               target_chunks=out_chunks,
               itemsize=4,
           )
-          | f'WriteMetricsToZarr{label_suffix}'
-          >> xbeam.ChunksToZarr(
-              target_path,
-              template=template,
-              zarr_chunks=out_chunks,
-          )
-      )
+        res = (
+            chunk_pcoll
+            | f'WriteMetricsToZarr{label_suffix}'
+            >> xbeam.ChunksToZarr(
+                target_path,
+                template=template,
+                zarr_chunks=out_chunks,
+            )
+        )
       results.append(res)
     return results
 
 
 def _format_aggregation_state_chunk(
     element: tuple[_AggregationKey, xr.DataArray],
-    coords_to_keep: frozenset[Hashable],
+    coords_to_keep: frozenset[Hashable] | xr.Dataset,
 ) -> tuple[xbeam.Key, xr.Dataset]:
   """Formats a single (_AggregationKey, DataArray) pair into an xarray-beam chunk."""
+  if isinstance(coords_to_keep, xr.Dataset):
+    coords_to_keep = frozenset(coords_to_keep.coords)
   key, da = element
   var_name = f'{key.statistic_name}#{key.variable_name}#{key.type}'
   var_ds = xr.Dataset({var_name: da})
@@ -757,6 +883,52 @@ def _format_aggregation_state_chunk(
   return _drop_non_template_coords(
       (xbeam.Key(offsets, vars={var_name}), var_ds), coords_to_keep
   )
+
+
+class _MergeConsecutiveOffsetChunks(beam.DoFn):
+  """Merges consecutive single-variable chunks with identical time offsets."""
+
+  def start_bundle(self):
+    self._current_key = None
+    self._current_offsets = None
+    self._current_vars = {}
+    self._current_coords = {}
+
+  def _flush(self):
+    if self._current_vars:
+      ds = xr.Dataset(self._current_vars, coords=self._current_coords)
+      key = xbeam.Key(
+          self._current_offsets, vars=frozenset(self._current_vars.keys())
+      )
+      self._current_key = None
+      self._current_offsets = None
+      self._current_vars = {}
+      self._current_coords = {}
+      return (key, ds)
+    return None
+
+  def process(self, element: tuple[xbeam.Key, xr.Dataset]):
+    key, ds = element
+    offset_tuple = tuple(sorted(key.offsets.items()))
+    if self._current_key is not None and offset_tuple != self._current_key:
+      flushed = self._flush()
+      if flushed is not None:
+        yield flushed
+    if self._current_key is None:
+      self._current_key = offset_tuple
+      self._current_offsets = dict(key.offsets)
+      self._current_coords = dict(ds.coords)
+    for var_name, da in ds.data_vars.items():
+      self._current_vars[var_name] = da
+
+  def finish_bundle(self):
+    flushed = self._flush()
+    if flushed is not None:
+      yield beam.transforms.window.WindowedValue(
+          flushed,
+          beam.transforms.window.MIN_TIMESTAMP,
+          [beam.transforms.window.GlobalWindow()],
+      )
 
 
 class WriteAggregationStateChunksToZarr(beam.PTransform):
@@ -835,57 +1007,111 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
           f' output, got {target_path}'
       )
 
-      # Whereas the input pcoll calls aggregate_stat_var on a single statistic
-      # variable at a time, here we compute the full aggregation state for all
-      # variables and statistics at once from the first chunk of predictions and
-      # targets. This constructs the template used by xbeam to know the data
-      # variables, dims, and coords that will be written to.
-      template = _get_template_aggregation_state_dataset(
-          self.metrics,
-          self.predictions_loader,
-          self.targets_loader,
-          self.times,
-          agg,
-          setup_fn=self.setup_fn,
-          ignore_missing_variables=self.ignore_missing_variables,
-      )
-      dim_sizes = typing.cast(Mapping[str, int], template.sizes)
-
-      in_chunks = {}
-      for dim, size in dim_sizes.items():
-        if dim == 'init_time':
-          in_chunks[dim] = self.times.init_time_chunk_size or -1
-        elif dim == 'lead_time':
-          in_chunks[dim] = self.times.lead_time_chunk_size or -1
-        else:
-          in_chunks[dim] = size
-      out_chunks = in_chunks.copy()
-      if self.zarr_chunks:
-        out_chunks.update(self.zarr_chunks)
-
-      template_coords = frozenset(template.coords)
       label_suffix = f'_{agg_name}' if agg_name else ''
-      res = (
-          partitioned_pcoll
-          | f'FormatAggStateChunk{label_suffix}'
-          >> beam.Map(
-              _format_aggregation_state_chunk,
-              coords_to_keep=template_coords,
+      if self.zarr_chunks is None:
+        # Compute the first-chunk template inside a Beam worker via AsSingleton
+        # so the Flume controller stays lightweight (~16 GiB RAM) and does not
+        # load 64-member 0.1 deg forecast chunks in the controller process.
+        def _build_worker_agg_state_template(
+            _,
+            metrics=self.metrics,
+            predictions_loader=self.predictions_loader,
+            targets_loader=self.targets_loader,
+            times=self.times,
+            agg=agg,
+            setup_fn=self.setup_fn,
+            ignore_missing_variables=self.ignore_missing_variables,
+        ) -> xr.Dataset:
+          tmpl = _get_template_aggregation_state_dataset(
+              metrics,
+              predictions_loader,
+              targets_loader,
+              times,
+              agg,
+              setup_fn=setup_fn,
+              ignore_missing_variables=ignore_missing_variables,
           )
-          | f'RechunkAggState{label_suffix}'
-          >> xbeam.Rechunk(
-              dim_sizes=dim_sizes,
-              source_chunks=in_chunks,
-              target_chunks=out_chunks,
-              itemsize=4,
+          disk_c = _compute_agg_state_disk_chunks(tmpl, times, None)
+          return _chunk_template_for_zarr(tmpl, disk_c)
+
+        template_pcoll = (
+            pcoll.pipeline
+            | f'CreateAggStateTemplateSeed{label_suffix}' >> beam.Create([None])
+            | f'BuildAggStateTemplate{label_suffix}'
+            >> beam.Map(_build_worker_agg_state_template)
+        )
+        template_singleton = beam.pvalue.AsSingleton(template_pcoll)
+        chunk_pcoll = (
+            partitioned_pcoll
+            | f'FormatAggStateChunk{label_suffix}'
+            >> beam.Map(
+                _format_aggregation_state_chunk,
+                coords_to_keep=template_singleton,
+            )
+            | f'MergeAggStateChunkVars{label_suffix}'
+            >> beam.ParDo(_MergeConsecutiveOffsetChunks())
+        )
+        res = (
+            chunk_pcoll
+            | f'WriteAggregationStateToZarr{label_suffix}'
+            >> xbeam.ChunksToZarr(
+                target_path,
+                template=template_singleton,
+            )
+        )
+      else:
+        # Whereas the input pcoll calls aggregate_stat_var on a single statistic
+        # variable at a time, here we compute the full aggregation state for all
+        # variables and statistics at once from the first chunk of predictions
+        # and targets. This constructs the template used by xbeam to know the
+        # data variables, dims, and coords that will be written to.
+        template = _get_template_aggregation_state_dataset(
+            self.metrics,
+            self.predictions_loader,
+            self.targets_loader,
+            self.times,
+            agg,
+            setup_fn=self.setup_fn,
+            ignore_missing_variables=self.ignore_missing_variables,
+        )
+        dim_sizes = typing.cast(Mapping[str, int], template.sizes)
+        in_chunks, out_chunks = _compute_in_and_out_chunks(
+            template, self.times, self.zarr_chunks
+        )
+        template_coords = frozenset(template.coords)
+        chunk_pcoll = (
+            partitioned_pcoll
+            | f'FormatAggStateChunk{label_suffix}'
+            >> beam.Map(
+                _format_aggregation_state_chunk,
+                coords_to_keep=template_coords,
+            )
+            | f'MergeAggStateChunkVars{label_suffix}'
+            >> beam.ParDo(_MergeConsecutiveOffsetChunks())
+        )
+        if out_chunks != in_chunks:
+          chunk_pcoll = (
+              chunk_pcoll
+              | f'RechunkAggState{label_suffix}'
+              >> xbeam.Rechunk(
+                  dim_sizes=dim_sizes,
+                  source_chunks=in_chunks,
+                  target_chunks=out_chunks,
+                  itemsize=4,
+              )
           )
-          | f'WriteAggregationStateToZarr{label_suffix}'
-          >> xbeam.ChunksToZarr(
-              target_path,
-              template=template,
-              zarr_chunks=out_chunks,
-          )
-      )
+        disk_chunks = _compute_agg_state_disk_chunks(
+            template, self.times, self.zarr_chunks
+        )
+        res = (
+            chunk_pcoll
+            | f'WriteAggregationStateToZarr{label_suffix}'
+            >> xbeam.ChunksToZarr(
+                target_path,
+                template=template,
+                zarr_chunks=disk_chunks,
+            )
+        )
       results.append(res)
     return results
 
@@ -958,9 +1184,19 @@ def define_pipeline(
         'be specified.'
     )
 
+  if isinstance(aggregator, Mapping):
+    aggregators_for_check = aggregator.values()
+  else:
+    aggregators_for_check = [aggregator]
+  need_time_combine = any(
+      'init_time' in agg.reduce_dims or 'lead_time' in agg.reduce_dims
+      for agg in aggregators_for_check
+  )
+
   summed_stat_chunks = (
       root
       | 'CreateTimeChunks' >> beam.Create(times.iter_with_chunk_offsets())
+      | 'ReshuffleTimeChunks' >> beam.Reshuffle()
       | beam.ParDo(
           LoadPredictionsAndTargets(
               predictions_loader,
@@ -977,17 +1213,21 @@ def define_pipeline(
       | beam.ParDo(
           ComputeStatisticsAggregateAndPrepareForCombine(metrics, aggregator)
       )
-      # Sum up the statistic DataArrays over dimensions of the TimeChunks that
-      # we are reducing over, typically just init_time but can also be
-      # lead_time. This is done separately for each statistic, each variable,
-      # and each chunk offset along dimensions not being reduced over (e.g.
-      # typically lead_time is not reduced over).
-      # If reduce_dims=[], this should be an identity pass-through, because
-      # the keys include init_time and lead_time offsets, so there should only
-      # be one DataArray element per key.
-      | 'SumPerStatisticPerVariableAndPerUnreducedOffset'
-      >> beam.CombinePerKey(beam_utils.CombiningSum())
   )
+  if need_time_combine:
+    # Sum up the statistic DataArrays over dimensions of the TimeChunks that
+    # we are reducing over, typically just init_time but can also be
+    # lead_time. This is done separately for each statistic, each variable,
+    # and each chunk offset along dimensions not being reduced over (e.g.
+    # typically lead_time is not reduced over).
+    # When neither init_time nor lead_time is in reduce_dims, the keys include
+    # both init_time and lead_time offsets so there is only one DataArray
+    # element per key and we skip CombinePerKey to avoid shuffling all chunks.
+    summed_stat_chunks = (
+        summed_stat_chunks
+        | 'SumPerStatisticPerVariableAndPerUnreducedOffset'
+        >> beam.CombinePerKey(beam_utils.CombiningSum())
+    )
 
   write_agg_state_as_zarr = _is_zarr_path(aggregation_state_out_path)
   if aggregation_state_out_path is not None and write_agg_state_as_zarr:
@@ -1166,6 +1406,17 @@ def _expand_template_time_dimensions(
   """Convert first chunk to template, expanding time dimensions if necessary."""
   template = xbeam.make_template(first_chunk)
 
+  # Drop dimensionless (scalar) coordinates. Each chunk is
+  # written into its slice of the output Zarr via
+  # `to_zarr(region={dim: slice, ...})` (see `xbeam.write_chunk_to_zarr`), and
+  # xarray rejects any variable that has none of the sliced dimensions. Since
+  # `_drop_non_template_coords` keeps only coords present in the template when
+  # writing chunks, removing them here also strips them from every chunk before
+  # writing.
+  scalar_coords = [name for name, c in template.coords.items() if not c.dims]
+  logging.info('Dropping scalar coordinates from template: %s', scalar_coords)
+  template = template.drop_vars(scalar_coords)
+
   if 'mask' in template.coords:
     raise ValueError(
         'mask coordinate found in template. add_nan_mask=True on data loaders '
@@ -1291,6 +1542,8 @@ def _load_first_chunk(
     ignore_missing_variables: bool = False,
 ) -> tuple[Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
   """Loads the first chunk of preds and targets for template generation."""
+  import copy  # pylint: disable=g-import-not-at-top
+
   if setup_fn is not None:
     setup_fn()
 
@@ -1300,10 +1553,15 @@ def _load_first_chunk(
   except IndexError:
     raise ValueError('Cannot generate template: TimeChunks is empty') from None
 
-  targets_chunk = targets_loader.load_chunk(first_init_times, first_lead_times)
-  predictions_chunk = predictions_loader.load_chunk(
+  local_targets_loader = copy.deepcopy(targets_loader)
+  local_predictions_loader = copy.deepcopy(predictions_loader)
+  targets_chunk = local_targets_loader.load_chunk(
+      first_init_times, first_lead_times
+  )
+  predictions_chunk = local_predictions_loader.load_chunk(
       first_init_times, first_lead_times, targets_chunk
   )
+  del local_targets_loader, local_predictions_loader
   if ignore_missing_variables:
     common_vars = [v for v in targets_chunk.keys() if v in predictions_chunk]
     targets_chunk = {v: targets_chunk[v] for v in common_vars}
