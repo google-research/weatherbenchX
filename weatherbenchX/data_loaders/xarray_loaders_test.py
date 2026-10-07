@@ -58,6 +58,41 @@ class XarrayLoadersTest(absltest.TestCase):
     for d in target_chunk.dims:
       xr.testing.assert_equal(target_chunk[d], prediction_chunk[d])
 
+  def test_prediction_loader_decodes_legacy_timedelta_units(self):
+    prediction = xr.Dataset(
+        {
+            '2m_temperature': (
+                ('time', 'prediction_timedelta'),
+                np.arange(4, dtype=np.float32).reshape(2, 2),
+            )
+        },
+        coords={
+            'time': np.array(
+                ['2020-01-01T00', '2020-01-02T00'], dtype='datetime64[ns]'
+            ),
+            'prediction_timedelta': xr.DataArray(
+                np.array([0, 6], dtype=np.int64),
+                dims='prediction_timedelta',
+                attrs={'units': 'hours'},
+            ),
+        },
+    )
+    prediction_path = self.create_tempdir('legacy_timedelta.zarr').full_path
+    prediction.to_zarr(prediction_path)
+
+    raw = xr.open_zarr(prediction_path, decode_timedelta=False)
+    self.assertTrue(np.issubdtype(raw.prediction_timedelta.dtype, np.integer))
+
+    loader = xarray_loaders.PredictionsFromXarray(
+        path=prediction_path, variables=['2m_temperature']
+    )
+    init_times = np.array(['2020-01-01T00'], dtype='datetime64[ns]')
+    lead_times = np.array([0, 6], dtype='timedelta64[h]')
+    chunk = loader.load_chunk(init_times, lead_times)
+
+    self.assertTrue(np.issubdtype(chunk.lead_time.dtype, np.timedelta64))
+    np.testing.assert_array_equal(chunk.lead_time.values, lead_times)
+
   def test_climatology_loader(self):
     target = test_utils.mock_prediction_data(
         time_start='2020-01-01T00',
