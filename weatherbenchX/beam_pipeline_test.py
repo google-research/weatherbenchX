@@ -1129,6 +1129,31 @@ class BeamPipelineTest(parameterized.TestCase):
     self.assertNotIn('some_attr', loaded.attrs)
     xr.testing.assert_allclose(loaded, ds.drop_attrs())
 
+  @parameterized.parameters('nc', 'zarr')
+  def test_write_dataset_attrs(self, ext):
+    da = xr.DataArray(
+        np.arange(6, dtype=np.float32).reshape(2, 3),
+        dims=('x', 'y'),
+        attrs={'var_attr': 'should_be_dropped'},
+    )
+    ds = xr.Dataset(
+        {'var1': da},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    out_path = os.path.join(self.create_tempdir().full_path, f'output.{ext}')
+    custom_attrs = {'xid': 12345, 'wid': 1, 'model_slug': 'fgn_test'}
+    beam_pipeline.write_dataset(ds, out_path, attrs=custom_attrs)
+
+    loaded = (
+        xr.open_zarr(out_path).compute()
+        if ext == 'zarr'
+        else xr.open_dataset(out_path).compute()
+    )
+    self.assertNotIn('some_attr', loaded.attrs)
+    self.assertNotIn('var_attr', loaded['var1'].attrs)
+    self.assertEqual(dict(loaded.attrs), custom_attrs)
+
 
 if __name__ == '__main__':
   absltest.main()
