@@ -16,6 +16,7 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
+from weatherbenchX import aggregation
 from weatherbenchX import test_utils
 from weatherbenchX.metrics import deterministic
 from weatherbenchX.metrics import wrappers
@@ -185,6 +186,135 @@ class EnsembleMeanTest(parameterized.TestCase):
     y = em.transform_fn(x)
 
     xr.testing.assert_equal(x.mean('realization', skipna=skipna), y)
+
+
+class EnsembleMeanMaskTest(parameterized.TestCase):
+  """Averaging must not discard masks used for weighted aggregation."""
+
+  @parameterized.parameters(
+      dict(
+          skipna=True,
+          expected_mask=[True, True, False],
+          expected_mean=[2.0, 5.0, np.nan],
+      ),
+      dict(
+          skipna=False,
+          expected_mask=[True, False, False],
+          expected_mean=[2.0, np.nan, np.nan],
+      ),
+  )
+  def test_mean_preserves_reduced_nan_mask(
+      self, skipna, expected_mask, expected_mean
+  ):
+    values = xr.DataArray(
+        [[1.0, np.nan, np.nan], [3.0, 5.0, np.nan]],
+        dims=('number', 'station'),
+        coords={'number': [0, 1], 'station': ['a', 'b', 'c']},
+    )
+    values.coords['mask'] = ~values.isnull()
+
+    result = wrappers.EnsembleMean(
+        which='predictions', skipna=skipna
+    ).transform_fn(values)
+
+    self.assertEqual(result.dims, ('station',))
+    self.assertIn('mask', result.coords)
+    np.testing.assert_array_equal(result['mask'].values, expected_mask)
+    np.testing.assert_allclose(result.values, expected_mean, equal_nan=True)
+
+  @parameterized.parameters(
+      dict(skipna=True, expected=[True, True]),
+      dict(skipna=False, expected=[False, False]),
+  )
+  def test_explicit_mask_uses_any_or_all(self, skipna, expected):
+    values = xr.DataArray(
+        [[1.0, 3.0], [2.0, 4.0]],
+        dims=('number', 'station'),
+    )
+    # Masks may also encode reasons for invalidity other than NaN values.
+    values.coords['mask'] = (
+        ('number', 'station'),
+        [[True, False], [False, True]],
+    )
+    result = wrappers.EnsembleMean(
+        which='predictions', skipna=skipna
+    ).transform_fn(values)
+    np.testing.assert_array_equal(result['mask'].values, expected)
+    np.testing.assert_allclose(result.values, [1.5, 3.5])
+
+  def test_mask_survives_into_masked_aggregation(self):
+    values = xr.DataArray(
+        [[1.0, np.nan, np.nan], [3.0, 5.0, np.nan]],
+        dims=('number', 'station'),
+    )
+    values.coords['mask'] = ~values.isnull()
+
+    result = wrappers.EnsembleMean(
+        which='predictions', skipna=True
+    ).transform_fn(values)
+    reduced = aggregation.Aggregator(
+        reduce_dims=('station',), masked=True
+    ).aggregate_stat_var(result)
+
+    self.assertIsNotNone(reduced)
+    np.testing.assert_allclose(reduced.sum_weighted_statistics, 7.0)
+    np.testing.assert_allclose(reduced.sum_weights, 2.0)
+    np.testing.assert_allclose(reduced.mean_statistics(), 3.5)
+
+  def test_xarray_default_skipna_uses_any_for_float_masks(self):
+    values = xr.DataArray(
+        [[np.nan, 1.0], [3.0, 5.0]],
+        dims=('number', 'station'),
+    )
+    values.coords['mask'] = ~values.isnull()
+    result = wrappers.EnsembleMean(
+        which='predictions', skipna=None
+    ).transform_fn(values)
+    np.testing.assert_array_equal(result['mask'].values, [True, True])
+    np.testing.assert_allclose(result.values, [3.0, 3.0])
+
+  def test_mask_without_ensemble_axis_is_retained(self):
+    values = xr.DataArray(
+        [[1.0, 2.0], [3.0, 4.0]],
+        dims=('number', 'station'),
+        coords={'mask': ('station', [False, True])},
+    )
+    result = wrappers.EnsembleMean(which='predictions').transform_fn(values)
+    np.testing.assert_array_equal(result['mask'].values, [False, True])
+    np.testing.assert_allclose(result.values, [2.0, 3.0])
+
+  def test_default_without_mask_preserves_xarray_behavior(self):
+    values = xr.DataArray(
+        [[1.0, np.nan], [3.0, 5.0]],
+        dims=('number', 'station'),
+    )
+    result = wrappers.EnsembleMean(
+        which='predictions', skipna=True
+    ).transform_fn(values)
+    xr.testing.assert_equal(result, values.mean('number', skipna=True))
+
+  def test_named_ensemble_axis_is_supported(self):
+    values = xr.DataArray(
+        [[1.0, np.nan], [3.0, 4.0]],
+        dims=('realization', 'station'),
+    )
+    values.coords['mask'] = ~values.isnull()
+    result = wrappers.EnsembleMean(
+        which='predictions', ensemble_dim='realization', skipna=False
+    ).transform_fn(values)
+    np.testing.assert_array_equal(result['mask'].values, [True, False])
+
+  def test_missing_ensemble_axis_returns_same_input(self):
+    values = xr.DataArray(
+        [1.0, np.nan],
+        dims=('station',),
+        coords={'mask': ('station', [True, False])},
+    )
+    result = wrappers.EnsembleMean(
+        which='predictions',
+        skip_if_ensemble_dim_missing=True,
+    ).transform_fn(values)
+    self.assertIs(result, values)
 
 
 class EnsembleMedianTest(parameterized.TestCase):
