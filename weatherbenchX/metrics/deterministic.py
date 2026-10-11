@@ -309,6 +309,26 @@ PredictionAverage = PredictionPassthrough
 TargetAverage = TargetPassthrough
 
 
+class SoftAccuracy(base.PerVariableStatistic):
+  """Soft (probabilistic) accuracy: 1 - |predictions - targets|.
+
+  When predictions are exceedance probabilities and targets are binary
+  indicators, this gives a soft measure of accuracy where partial agreement
+  is credited proportionally. For example, if 75% of ensemble members predict
+  rain and it does rain, the soft accuracy is 0.75.
+
+  This is the complement of the MAE of probabilities, in the same way that
+  the Brier score is the MSE of probabilities.
+  """
+
+  def _compute_per_variable(
+      self,
+      predictions: xr.DataArray,
+      targets: xr.DataArray,
+  ) -> xr.DataArray:
+    return 1.0 - abs(predictions - targets)
+
+
 class RMSE(base.PerVariableMetric):
   """Root mean squared error."""
 
