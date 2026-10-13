@@ -561,7 +561,6 @@ class SelectBinThresholdsByTimeFromChunkTest(parameterized.TestCase):
     xr.testing.assert_equal(selected, expected)
 
 
-
 class InterpolateCoordinateTest(parameterized.TestCase):
 
   def test_linear_interpolation(self):
@@ -635,6 +634,157 @@ class InterpolateCoordinateTest(parameterized.TestCase):
         transform.unique_name_suffix,
         'InterpolateCoordinate_quantile_linear_0.2000_0.8000',
     )
+
+
+class BinProbabilitiesTransformsTest(parameterized.TestCase):
+
+  _BIN_BOUNDARIES = (0.0, 0.5, 1.0, 2.0, 4.0, 8.0)
+
+  def _bin_probabilities(self, probabilities) -> xr.DataArray:
+    probabilities = np.asarray(probabilities, dtype=np.float32)
+    return xr.DataArray(
+        probabilities,
+        dims=['x', 'rate_bins'],
+        coords={'x': np.arange(probabilities.shape[0])},
+        name='rate',
+    )
+
+  def test_cdf_at_interior_edges(self):
+    da = self._bin_probabilities([[0.2, 0.3, 0.1, 0.2, 0.2]])
+    transform = wrappers.BinProbabilitiesToCDF(
+        which='predictions',
+        bin_dim='rate_bins',
+        threshold_dim='threshold',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x', 'threshold'))
+    np.testing.assert_array_equal(out.threshold, [0.5, 1.0, 2.0, 4.0])
+    np.testing.assert_allclose(out.values[0], [0.2, 0.5, 0.6, 0.8], rtol=1e-6)
+    self.assertNotIn('rate_bins', out.coords)
+    self.assertIn('BinProbabilitiesToCDF', transform.unique_name_suffix)
+
+  def test_cdf_matches_continuous_to_cdf_of_a_point_mass(self):
+    # A point mass in one bin gives the same CDF at the edges as the
+    # continuous value binned by `ContinuousToBins` and evaluated by
+    # `ContinuousToCDF(right_inclusive=False)`.
+    value = xr.DataArray([1.5], dims=['x'], name='rate')
+    binned = wrappers.ContinuousToBins(
+        which='predictions',
+        bin_values=self._BIN_BOUNDARIES,
+        bin_dim='rate_bins',
+    ).transform_fn(value)
+    cdf_from_bins = wrappers.BinProbabilitiesToCDF(
+        which='predictions', bin_dim='rate_bins', threshold_dim='threshold'
+    ).transform_fn(
+        binned
+    )  # Edges read from the `rate_bins_left/right` coords.
+    cdf_from_value = wrappers.ContinuousToCDF(
+        which='targets',
+        threshold_values=self._BIN_BOUNDARIES[1:-1],
+        threshold_dim='threshold',
+        right_inclusive=False,
+    ).transform_fn(value)
+    np.testing.assert_array_equal(
+        cdf_from_bins.values, cdf_from_value.transpose('x', 'threshold').values
+    )
+
+  def test_cdf_propagates_nans_and_checks_number_of_bins(self):
+    da = self._bin_probabilities([[np.nan, 0.0, 0.0, 0.0, 1.0]])
+    out = wrappers.BinProbabilitiesToCDF(
+        which='predictions',
+        bin_dim='rate_bins',
+        threshold_dim='threshold',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    ).transform_fn(da)
+    self.assertTrue(np.isnan(out.values).all())
+    with self.assertRaisesRegex(ValueError, 'define 4 bins'):
+      wrappers.BinProbabilitiesToCDF(
+          which='predictions',
+          bin_dim='rate_bins',
+          threshold_dim='threshold',
+          bin_boundaries=self._BIN_BOUNDARIES[:-1],
+      ).transform_fn(da)
+    with self.assertRaisesRegex(ValueError, 'no .rate_bins_left'):
+      wrappers.BinProbabilitiesToCDF(
+          which='predictions', bin_dim='rate_bins', threshold_dim='threshold'
+      ).transform_fn(da)
+
+  def test_median_interpolates_cdf(self):
+    # Examples from the docstring of the median computation.
+    da = self._bin_probabilities([
+        [0.2, 0.3, 0.1, 0.2, 0.2],  # CDF hits 0.5 exactly at the edge 1.0.
+        [0.2, 0.2, 0.2, 0.2, 0.2],  # Middle of the third bin.
+        [1.0, 0.0, 0.0, 0.0, 0.0],  # Middle of the first bin.
+        [0.0, 0.0, 0.0, 0.0, 1.0],  # Middle of the last bin.
+    ])
+    transform = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x',))
+    self.assertEqual(out.dtype, np.float32)
+    np.testing.assert_allclose(out.values, [1.0, 1.5, 0.25, 6.0], rtol=1e-6)
+    self.assertEqual(
+        transform.unique_name_suffix, 'BinProbabilitiesToMedian_rate_bins'
+    )
+
+  def test_median_matches_numpy_interpolation(self):
+    rng = np.random.default_rng(0)
+    probabilities = rng.dirichlet(np.ones(5), size=50).astype(np.float32)
+    da = self._bin_probabilities(probabilities)
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    ).transform_fn(da)
+    expected = [
+        np.interp(
+            0.5, np.concatenate([[0.0], np.cumsum(p)]), self._BIN_BOUNDARIES
+        )
+        for p in probabilities
+    ]
+    np.testing.assert_allclose(out.values, expected, rtol=1e-5, atol=1e-6)
+
+  def test_median_with_zero_centred_first_bin_is_zero_when_dry(self):
+    da = self._bin_probabilities([[0.9, 0.1, 0.0, 0.0, 0.0]])
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-0.01, 0.01, 1.0, 2.0, 4.0, 8.0),
+    ).transform_fn(da)
+    np.testing.assert_allclose(
+        out.values, [-0.01 + 0.02 * 0.5 / 0.9], atol=1e-6
+    )
+
+  def test_median_handles_infinite_outer_boundaries_and_nans(self):
+    da = self._bin_probabilities([
+        [1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0],
+        [np.nan, 0.0, 0.0, 0.0, 1.0],
+    ])
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-np.inf, 0.5, 1.0, 2.0, 4.0, np.inf),
+    ).transform_fn(da)
+    # -inf -> 0 and +inf -> last left edge (4.0), so the outer medians are
+    # the centres of [0, 0.5] and [4, 4].
+    np.testing.assert_allclose(out.values[:2], [0.25, 4.0], rtol=1e-6)
+    self.assertTrue(np.isnan(out.values[2]))
+
+  def test_median_rejects_negative_distribution_with_inf_lower_boundary(self):
+    transform = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-np.inf, -1.0, 0.0, 1.0, 2.0, np.inf),
+    )
+    with self.assertRaisesRegex(ValueError, 'non-negative'):
+      transform.transform_fn(
+          self._bin_probabilities([[0.2, 0.2, 0.2, 0.2, 0.2]])
+      )
 
 
 if __name__ == '__main__':

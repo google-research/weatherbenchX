@@ -326,6 +326,196 @@ class ContinuousToBinary(InputTransform):
     )
 
 
+def _resolve_bin_boundaries(
+    da: xr.DataArray,
+    bin_dim: str,
+    bin_boundaries: Sequence[float] | None,
+) -> np.ndarray:
+  """Returns the (validated) bin boundaries of a binned DataArray.
+
+  Args:
+    da: DataArray with a bin dimension.
+    bin_dim: Name of the bin dimension.
+    bin_boundaries: Strictly increasing bin edges, one more than the size of
+      `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+      `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+
+  Returns:
+    1D array of bin boundaries.
+  """
+  if bin_dim not in da.dims:
+    raise ValueError(f'Bin dimension {bin_dim!r} not found in {da.dims}')
+  if bin_boundaries is None:
+    left_name, right_name = f'{bin_dim}_left', f'{bin_dim}_right'
+    if left_name not in da.coords or right_name not in da.coords:
+      raise ValueError(
+          f'bin_boundaries not given and {da.name} has no {left_name!r} and'
+          f' {right_name!r} coordinates.'
+      )
+    left = np.asarray(da[left_name].values, dtype=float)
+    right = np.asarray(da[right_name].values, dtype=float)
+    if not np.allclose(left[1:], right[:-1]):
+      raise ValueError(
+          f'Bins of {da.name} are not contiguous: left edges {left}, right'
+          f' edges {right}.'
+      )
+    boundaries = np.concatenate([left, right[-1:]])
+  else:
+    boundaries = np.asarray(bin_boundaries, dtype=float)
+  if boundaries.ndim != 1 or boundaries.size < 2:
+    raise ValueError(f'Need at least two bin boundaries, got {boundaries}')
+  if np.any(np.diff(boundaries) <= 0):
+    raise ValueError(
+        f'Bin boundaries must be strictly increasing, got {boundaries}'
+    )
+  if da.sizes[bin_dim] != boundaries.size - 1:
+    raise ValueError(
+        f'{boundaries.size} bin boundaries define {boundaries.size - 1} bins,'
+        f' but {da.name} has {da.sizes[bin_dim]} entries along {bin_dim!r}.'
+    )
+  return boundaries
+
+
+class BinProbabilitiesToCDF(InputTransform):
+  """Converts probabilities over bins to the CDF at the interior bin edges.
+
+  For an input that holds the probability of each bin of a continuous variable
+  (e.g. a categorical precipitation forecast), the CDF is known exactly at the
+  bin edges: `P(x < edge)` is the sum of the probabilities of all bins below
+  it. The result has a new dimension `threshold_dim` with the interior edges as
+  coordinate instead of `bin_dim`, in the same form as `ContinuousToCDF` with
+  `right_inclusive=False` produces from a continuous input, so that e.g. the
+  Brier score of a binned forecast is `MSE` wrapped with this transform on the
+  predictions and `ContinuousToCDF(right_inclusive=False)` on the targets.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_dim: str,
+      threshold_dim: str,
+      bin_boundaries: Sequence[float] | None = None,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_dim: Name of the bin dimension of the input.
+      threshold_dim: Name of the new dimension holding the interior bin edges.
+      bin_boundaries: Strictly increasing edges of the bins, one more than the
+        size of `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+        `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+    """
+    super().__init__(which)
+    self._bin_dim = bin_dim
+    self._threshold_dim = threshold_dim
+    self._bin_boundaries = (
+        None
+        if bin_boundaries is None
+        else tuple(float(b) for b in bin_boundaries)
+    )
+
+  @property
+  def unique_name_suffix(self) -> str:
+    edges = (
+        'coords'
+        if self._bin_boundaries is None
+        else ','.join(str(b) for b in self._bin_boundaries)
+    )
+    return (
+        f'BinProbabilitiesToCDF_{self._bin_dim}_{self._threshold_dim}_{edges}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    boundaries = _resolve_bin_boundaries(
+        da, self._bin_dim, self._bin_boundaries
+    )
+    # CDF at the right edge of each bin; the last one (always 1) is dropped so
+    # that only the interior edges remain.
+    cdf = da.cumsum(self._bin_dim, skipna=False).isel(
+        {self._bin_dim: slice(None, -1)}
+    )
+    cdf = cdf.where(~xu.isnan(da).any(self._bin_dim))
+    cdf = cdf.drop_vars(
+        [c for c in cdf.coords if self._bin_dim in cdf[c].dims], errors='ignore'
+    )
+    return cdf.rename({self._bin_dim: self._threshold_dim}).assign_coords(
+        {self._threshold_dim: boundaries[1:-1]}
+    )
+
+
+class BinProbabilitiesToMedian(InputTransform):
+  """Converts probabilities over bins to the median of the distribution.
+
+  The CDF is known exactly at the bin edges and is interpolated linearly within
+  the bin that contains the 0.5 quantile. The median therefore always lies
+  strictly inside a bin: for a distribution entirely in one bin it is the
+  centre of that bin, so a first bin centred on zero (e.g. `[-0.01, 0.01)`)
+  yields a median of (nearly) zero for dry predictions. Infinite outer
+  boundaries are replaced to keep the result finite: a `-inf` lower boundary
+  followed by a positive one becomes 0 (a distribution over non-negative
+  values), and a `+inf` upper boundary becomes the left edge of the last bin.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_dim: str,
+      bin_boundaries: Sequence[float] | None = None,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_dim: Name of the bin dimension of the input.
+      bin_boundaries: Strictly increasing edges of the bins, one more than the
+        size of `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+        `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+    """
+    super().__init__(which)
+    self._bin_dim = bin_dim
+    self._bin_boundaries = (
+        None
+        if bin_boundaries is None
+        else tuple(float(b) for b in bin_boundaries)
+    )
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'BinProbabilitiesToMedian_{self._bin_dim}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    bin_dim = self._bin_dim
+    edges = _resolve_bin_boundaries(da, bin_dim, self._bin_boundaries)
+    if edges[0] == -np.inf:
+      if edges[1] <= 0:
+        raise ValueError(
+            'A -inf lower bin boundary is only supported for distributions over'
+            f' non-negative values, got {edges}.'
+        )
+      edges[0] = 0.0
+    if edges[-1] == np.inf:
+      edges[-1] = edges[-2]
+    edges = edges.astype(np.float32)
+    # CDF at the right edge of each bin, and at its left edge (0 for the first).
+    cdf_right = da.cumsum(bin_dim, skipna=False)
+    cdf_left = cdf_right - da
+    left = xr.DataArray(edges[:-1], dims=[bin_dim])
+    right = xr.DataArray(edges[1:], dims=[bin_dim])
+    # Exactly one bin contains the median: the first whose right-edge CDF
+    # reaches 0.5. Interpolate the CDF linearly within it.
+    contains_median = (cdf_left < 0.5) & (cdf_right >= 0.5)
+    width = right - left
+    mass = xu.maximum(cdf_right - cdf_left, np.finfo(np.float32).tiny)
+    within = left + (0.5 - cdf_left) / mass * width
+    median = within.where(contains_median, 0.0).sum(bin_dim, skipna=False)
+    # Propagate NaNs of the input (e.g. masked points).
+    median = median.where(~xu.isnan(da).any(bin_dim))
+    return median.astype(da.dtype)
+
+
 def select_bin_thresholds_by_time_from_chunk(
     bin_thresholds: xr.DataArray,
     chunk: xr.DataArray,
