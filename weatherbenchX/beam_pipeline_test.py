@@ -735,6 +735,7 @@ class BeamPipelineTest(parameterized.TestCase):
     direct_agg_state = aggregator.aggregate_statistics(statistics)
 
     results_path = self.create_tempdir('unaggregated_agg_state.zarr').full_path
+    custom_attrs = {'custom_attr': 'test_val'}
     with test_pipeline.TestPipeline() as root:
       beam_pipeline.define_pipeline(
           root,
@@ -744,9 +745,11 @@ class BeamPipelineTest(parameterized.TestCase):
           all_metrics,
           aggregator,
           aggregation_state_out_path=results_path,
+          attrs=custom_attrs,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertEqual(dict(pipeline_ds.attrs), custom_attrs)
     pipeline_agg_state = aggregation.AggregationState.from_dataset(pipeline_ds)
 
     def _transpose_to_leading_time_dims(agg_state):
@@ -831,6 +834,7 @@ class BeamPipelineTest(parameterized.TestCase):
     ).compute()
 
     results_path = self.create_tempdir('streamed_metrics.zarr').full_path
+    custom_attrs = {'custom_attr': 'test_val'}
     with test_pipeline.TestPipeline() as root:
       beam_pipeline.define_pipeline(
           root,
@@ -841,9 +845,11 @@ class BeamPipelineTest(parameterized.TestCase):
           aggregator,
           out_path=results_path,
           chunk_metrics_by_lead_time=True,
+          attrs=custom_attrs,
       )
 
     pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertEqual(dict(pipeline_ds.attrs), custom_attrs)
     self.assertNotIn('lead_time_secs', pipeline_ds.coords)
     direct_metrics = direct_metrics.drop_vars('lead_time_secs')
 
@@ -1128,6 +1134,31 @@ class BeamPipelineTest(parameterized.TestCase):
     loaded = xr.open_zarr(zarr_path).compute()
     self.assertNotIn('some_attr', loaded.attrs)
     xr.testing.assert_allclose(loaded, ds.drop_attrs())
+
+  @parameterized.parameters('nc', 'zarr')
+  def test_write_dataset_attrs(self, ext):
+    da = xr.DataArray(
+        np.arange(6, dtype=np.float32).reshape(2, 3),
+        dims=('x', 'y'),
+        attrs={'var_attr': 'should_be_dropped'},
+    )
+    ds = xr.Dataset(
+        {'var1': da},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    out_path = os.path.join(self.create_tempdir().full_path, f'output.{ext}')
+    custom_attrs = {'xid': 12345, 'wid': 1, 'model_slug': 'fgn_test'}
+    beam_pipeline.write_dataset(ds, out_path, attrs=custom_attrs)
+
+    loaded = (
+        xr.open_zarr(out_path).compute()
+        if ext == 'zarr'
+        else xr.open_dataset(out_path).compute()
+    )
+    self.assertNotIn('some_attr', loaded.attrs)
+    self.assertNotIn('var_attr', loaded['var1'].attrs)
+    self.assertEqual(dict(loaded.attrs), custom_attrs)
 
 
 if __name__ == '__main__':

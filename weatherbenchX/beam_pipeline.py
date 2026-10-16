@@ -18,7 +18,7 @@ import dataclasses
 import os
 import time
 import typing
-from typing import Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Never, Optional, Union
 
 from absl import logging
 import apache_beam as beam
@@ -471,6 +471,7 @@ def write_dataset(
     target_path: str,
     zarr_chunks: Mapping[str, int] | None = None,
     drop_attrs: bool = True,
+    attrs: Mapping[str, Any] | None = None,
 ) -> None:
   """Atomically writes a dataset to NetCDF or to a Zarr file with chunking.
 
@@ -480,6 +481,8 @@ def write_dataset(
     zarr_chunks: Optional chunking specification for Zarr output files.
     drop_attrs: Whether to remove attributes that may have been propagated from
       the targets or predictions.
+    attrs: Optional dataset-level attributes to attach before writing (applied
+      after dropping existing attributes if `drop_attrs` is True).
 
   Raises:
     ValueError: If the target path is not a Zarr or NetCDF file.
@@ -488,6 +491,8 @@ def write_dataset(
     # Remove attributes that may have been propagated from the targets or
     # predictions.
     ds = ds.drop_attrs(deep=True)
+  if attrs:
+    ds = ds.assign_attrs(attrs)
 
   if target_path.endswith('.zarr'):
     encoding = None
@@ -520,9 +525,11 @@ class WriteMetrics(beam.DoFn):
       self,
       out_path: str | Mapping[str, str],
       zarr_chunks: Mapping[str, int] | None = None,
+      attrs: Mapping[str, Any] | None = None,
   ):
     self.out_path = out_path
     self.zarr_chunks = zarr_chunks
+    self.attrs = attrs
 
   def process(self, element: tuple[str | None, xr.Dataset]) -> Iterable[Never]:
     agg_name, metrics = element
@@ -530,7 +537,7 @@ class WriteMetrics(beam.DoFn):
         logging.INFO, 'WriteMetrics inputs: %s, %s', 10, agg_name, metrics
     )
     target_path = _resolve_out_path(self.out_path, agg_name)
-    write_dataset(metrics, target_path, self.zarr_chunks)
+    write_dataset(metrics, target_path, self.zarr_chunks, attrs=self.attrs)
     return []
 
 
@@ -541,9 +548,11 @@ class WriteAggregationState(beam.DoFn):
       self,
       out_path: str | Mapping[str, str],
       zarr_chunks: Mapping[str, int] | None = None,
+      attrs: Mapping[str, Any] | None = None,
   ):
     self.out_path = out_path
     self.zarr_chunks = zarr_chunks
+    self.attrs = attrs
 
   def process(
       self, element: tuple[str | None, aggregation.AggregationState]
@@ -551,7 +560,9 @@ class WriteAggregationState(beam.DoFn):
     agg_name, aggregation_state = element
     aggregation_state_ds = aggregation_state.to_dataset()
     target_path = _resolve_out_path(self.out_path, agg_name)
-    write_dataset(aggregation_state_ds, target_path, self.zarr_chunks)
+    write_dataset(
+        aggregation_state_ds, target_path, self.zarr_chunks, attrs=self.attrs
+    )
     return []
 
 
@@ -619,6 +630,7 @@ class WriteMetricsChunksToZarr(beam.PTransform):
       setup_fn: Optional[Callable[[], None]] = None,
       ignore_missing_variables: bool = False,
       zarr_chunks: Mapping[str, int] | None = None,
+      attrs: Mapping[str, Any] | None = None,
   ):
     super().__init__()
     self.out_path = out_path
@@ -630,6 +642,7 @@ class WriteMetricsChunksToZarr(beam.PTransform):
     self.setup_fn = setup_fn
     self.ignore_missing_variables = ignore_missing_variables
     self.zarr_chunks = zarr_chunks
+    self.attrs = attrs
 
   def expand(
       self,
@@ -686,6 +699,10 @@ class WriteMetricsChunksToZarr(beam.PTransform):
           setup_fn=self.setup_fn,
           ignore_missing_variables=self.ignore_missing_variables,
       )
+
+      if self.attrs:
+        template = template.assign_attrs(self.attrs)
+
       dim_sizes = typing.cast(Mapping[str, int], template.sizes)
       if 'lead_time' not in dim_sizes:
         raise ValueError(
@@ -773,6 +790,7 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
       setup_fn: Optional[Callable[[], None]] = None,
       ignore_missing_variables: bool = False,
       zarr_chunks: Mapping[str, int] | None = None,
+      attrs: Mapping[str, Any] | None = None,
   ):
     super().__init__()
     self.aggregation_state_out_path = aggregation_state_out_path
@@ -784,6 +802,7 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
     self.setup_fn = setup_fn
     self.ignore_missing_variables = ignore_missing_variables
     self.zarr_chunks = zarr_chunks
+    self.attrs = attrs
 
   def expand(
       self,
@@ -849,6 +868,10 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
           setup_fn=self.setup_fn,
           ignore_missing_variables=self.ignore_missing_variables,
       )
+
+      if self.attrs:
+        template = template.assign_attrs(self.attrs)
+
       dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
       in_chunks = {}
@@ -911,6 +934,7 @@ def define_pipeline(
     zarr_chunks: Mapping[str, int] | None = None,
     ignore_missing_variables: bool = False,
     chunk_metrics_by_lead_time: bool = False,
+    attrs: Mapping[str, Any] | None = None,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
 
@@ -942,6 +966,8 @@ def define_pipeline(
       Note that this will not be appropriate for metrics that rely on having
       multiple lead times available at once, and may produce unexpected
       behaviour in such cases.
+    attrs: Optional dataset-level attributes to attach to output metrics and
+      aggregation state datasets.
   """
 
   if isinstance(aggregator, Mapping):
@@ -1004,6 +1030,7 @@ def define_pipeline(
             setup_fn=setup_fn,
             ignore_missing_variables=ignore_missing_variables,
             zarr_chunks=zarr_chunks,
+            attrs=attrs,
         )
     )
 
@@ -1038,6 +1065,7 @@ def define_pipeline(
             WriteMetrics(
                 out_path,
                 zarr_chunks=zarr_chunks,
+                attrs=attrs,
             )
         )
       else:
@@ -1054,6 +1082,7 @@ def define_pipeline(
                 setup_fn=setup_fn,
                 ignore_missing_variables=ignore_missing_variables,
                 zarr_chunks=zarr_chunks,
+                attrs=attrs,
             )
         )
 
@@ -1063,6 +1092,7 @@ def define_pipeline(
             WriteAggregationState(
                 aggregation_state_out_path,
                 zarr_chunks=zarr_chunks,
+                attrs=attrs,
             )
         )
       else:
