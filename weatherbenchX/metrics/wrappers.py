@@ -52,6 +52,7 @@ def binarize_thresholds(
     thresholds: Union[Iterable[float], xr.DataArray, xr.Dataset],
     threshold_dim: str,
     sel_coords: Sequence[str] | None = None,
+    include_equal: bool = False,
 ) -> xr.DataArray:
   """Binarizes a continuous array using a threshold value or a list of values.
 
@@ -65,6 +66,8 @@ def binarize_thresholds(
       using the corresponding coordinates on `x` (e.g., for indexing station
       thresholds onto sparse observations). Each coordinate must be a dimension
       in `thresholds` and a coordinate or dimension in `x`.
+    include_equal: If True, uses `x >= threshold` instead of `x > threshold`.
+      Default: False.
 
   Returns:
     binary_x: Binarized DataArray.
@@ -93,11 +96,8 @@ def binarize_thresholds(
     threshold = threshold.reset_coords(drop=True).sel(
         {coord: x[coord] for coord in sel_coords}
     )
-  return (
-      (x > threshold)
-      .where(~xu.isnan(x) & ~xu.isnan(threshold))
-      .astype(np.float32)
-  )
+  exceeded = (x >= threshold) if include_equal else (x > threshold)
+  return exceeded.where(~xu.isnan(x) & ~xu.isnan(threshold)).astype(np.float32)
 
 
 # Transforms
@@ -263,8 +263,8 @@ class EnsembleQuantiles(InputTransform):
 class ContinuousToBinary(InputTransform):
   """Converts a continuous input to a binary one.
 
-  Applies x > threshold for all threholds and concatenates along a new dimension
-  of name `threshold_dim`.
+  Applies x > threshold (or x >= threshold if `include_equal=True`) for all
+  thresholds and concatenates along a new dimension of name `threshold_dim`.
   """
 
   def __init__(
@@ -274,6 +274,7 @@ class ContinuousToBinary(InputTransform):
       threshold_dim: str,
       unique_name_suffix: str | None = None,
       sel_coords: Sequence[str] | None = None,
+      include_equal: bool = False,
   ):
     """Init.
 
@@ -290,6 +291,8 @@ class ContinuousToBinary(InputTransform):
       sel_coords: Optional sequence of coordinate names to index into
         `threshold_value` using the corresponding coordinates on the input
         DataArray.
+      include_equal: If True, uses `x >= threshold` instead of `x > threshold`.
+        Default: False.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
@@ -308,6 +311,7 @@ class ContinuousToBinary(InputTransform):
         )
     self._unique_name_suffix = unique_name_suffix
     self._sel_coords = tuple(sel_coords) if sel_coords is not None else None
+    self._include_equal = include_equal
 
   @property
   def unique_name_suffix(self) -> str:
@@ -315,7 +319,8 @@ class ContinuousToBinary(InputTransform):
       unique_name_suffix = ','.join([str(t) for t in self._threshold_value])
     else:
       unique_name_suffix = self._unique_name_suffix
-    return f'{self._threshold_dim}={unique_name_suffix}'
+    op = '>=' if self._include_equal else '='
+    return f'{self._threshold_dim}{op}{unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     return binarize_thresholds(
@@ -323,6 +328,7 @@ class ContinuousToBinary(InputTransform):
         self._threshold_value,
         self._threshold_dim,
         sel_coords=self._sel_coords,
+        include_equal=self._include_equal,
     )
 
 
