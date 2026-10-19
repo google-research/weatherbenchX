@@ -161,6 +161,46 @@ class ContinuousToBinaryTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(y.values, expected, equal_nan=True)
 
+  def test_include_equal(self):
+    x = xr.DataArray(
+        np.array([0.1, 0.5, 1.0, np.nan], dtype=np.float32),
+        dims=['index'],
+    )
+    thresholds = [0.5, 1.0]
+    ctb_strict = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='threshold',
+        include_equal=False,
+    )
+    ctb_inclusive = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='threshold',
+        include_equal=True,
+    )
+    self.assertEqual(ctb_strict.unique_name_suffix, 'threshold=0.5,1.0')
+    self.assertEqual(ctb_inclusive.unique_name_suffix, 'threshold>=0.5,1.0')
+
+    y_strict = ctb_strict.transform_fn(x)
+    y_inclusive = ctb_inclusive.transform_fn(x)
+    np.testing.assert_allclose(
+        y_strict.values,
+        np.array(
+            [[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [np.nan, np.nan]],
+            dtype=np.float32,
+        ),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        y_inclusive.values,
+        np.array(
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [np.nan, np.nan]],
+            dtype=np.float32,
+        ),
+        equal_nan=True,
+    )
+
 
 class EnsembleMeanTest(parameterized.TestCase):
 
