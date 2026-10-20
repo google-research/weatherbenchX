@@ -422,8 +422,8 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
         lead_times, dims=['lead_time'], coords={'lead_time': lead_times}
     )
     valid_times = init_times + lead_times
-    doy = valid_times.dt.dayofyear
-    hod = valid_times.dt.hour
+    doy = valid_times.dt.dayofyear  # pyrefly: ignore[missing-attribute]
+    hod = valid_times.dt.hour  # pyrefly: ignore[missing-attribute]
     cat_times = []
     for year in range(self._start_year, self._end_year + 1):
       cat_times.append(
