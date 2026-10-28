@@ -1285,7 +1285,7 @@ class MetricsTest(parameterized.TestCase):
     preds = test_utils.mock_prediction_data(
         ensemble_size=10,
         time_start='2020-01-01T00',
-        time_stop='2020-01-01T00',
+        time_stop='2020-01-02T00',
         variables_2d=['2m_temperature'],
         variables_3d=[],
     ).rename(time='init_time', prediction_timedelta='lead_time')
