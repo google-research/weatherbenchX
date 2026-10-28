@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -121,6 +121,86 @@ class ContinuousToBinaryTest(parameterized.TestCase):
             expected,
         )
 
+  def test_sel_coords_and_nan_threshold(self):
+    x = xr.DataArray(
+        np.array([1.5, 25.0, np.nan], dtype=np.float32),
+        dims=['index'],
+        coords={
+            'index': [0, 1, 2],
+            'station': ('index', ['s0', 's1', 's0']),
+            'longitude': ('index', [355.0, 5.0, 355.0]),
+        },
+    )
+    thresholds = xr.DataArray(
+        np.array([[1.0, 2.0], [10.0, np.nan]], dtype=np.float32),
+        dims=['station', 'quantile'],
+        coords={
+            'station': ['s0', 's1'],
+            'quantile': [0.5, 0.9],
+            # Non-dimension coord with conflicting value (-5.0 vs 355.0) should
+            # be dropped when indexing via sel_coords.
+            'longitude': ('station', [-5.0, 5.0]),
+        },
+    )
+    ctb = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='quantile',
+        unique_name_suffix='station_quantiles',
+        sel_coords=['station'],
+    )
+    y = ctb.transform_fn(x)
+    self.assertEqual(y.dims, ('index', 'quantile'))
+    expected = np.array(
+        [
+            [1.0, 0.0],
+            [1.0, np.nan],
+            [np.nan, np.nan],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(y.values, expected, equal_nan=True)
+
+  def test_include_equal(self):
+    x = xr.DataArray(
+        np.array([0.1, 0.5, 1.0, np.nan], dtype=np.float32),
+        dims=['index'],
+    )
+    thresholds = [0.5, 1.0]
+    ctb_strict = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='threshold',
+        include_equal=False,
+    )
+    ctb_inclusive = wrappers.ContinuousToBinary(
+        which='both',
+        threshold_value=thresholds,
+        threshold_dim='threshold',
+        include_equal=True,
+    )
+    self.assertEqual(ctb_strict.unique_name_suffix, 'threshold=0.5,1.0')
+    self.assertEqual(ctb_inclusive.unique_name_suffix, 'threshold>=0.5,1.0')
+
+    y_strict = ctb_strict.transform_fn(x)
+    y_inclusive = ctb_inclusive.transform_fn(x)
+    np.testing.assert_allclose(
+        y_strict.values,
+        np.array(
+            [[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [np.nan, np.nan]],
+            dtype=np.float32,
+        ),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        y_inclusive.values,
+        np.array(
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [np.nan, np.nan]],
+            dtype=np.float32,
+        ),
+        equal_nan=True,
+    )
+
 
 class EnsembleMeanTest(parameterized.TestCase):
 
@@ -145,6 +225,73 @@ class EnsembleMeanTest(parameterized.TestCase):
     y = em.transform_fn(x)
 
     xr.testing.assert_equal(x.mean('realization', skipna=skipna), y)
+
+
+class EnsembleMedianTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      dict(skipna=True),
+      dict(skipna=False),
+  )
+  def test_median_over_realization_dim(self, skipna):
+    forecast = test_utils.mock_target_data(random=True, ensemble_size=3)
+
+    # Set one single realization to nan
+    forecast = xr.where(
+        forecast.level == forecast.realization[0],
+        np.nan,
+        forecast,
+    )
+    em = wrappers.EnsembleMedian(
+        which='both', ensemble_dim='realization', skipna=skipna
+    )
+
+    x = forecast.geopotential
+    y = em.transform_fn(x)
+
+    xr.testing.assert_equal(x.median('realization', skipna=skipna), y)
+
+
+class EnsembleQuantilesTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      dict(skipna=True, quantiles=0.5),
+      dict(skipna=False, quantiles=0.5),
+      dict(skipna=True, quantiles=[0.1, 0.5, 0.9]),
+      dict(skipna=False, quantiles=[0.1, 0.5, 0.9]),
+  )
+  def test_quantiles_over_realization_dim(self, skipna, quantiles):
+    forecast = test_utils.mock_target_data(random=True, ensemble_size=3)
+    # Slice to a very small size, as numpy.nanquantile can be extremely slow
+    # when applied over many dimensions.
+    forecast = forecast.isel(
+        latitude=slice(0, 2), longitude=slice(0, 2), level=0
+    )
+
+    # Set one single realization to nan
+    forecast = xr.where(
+        forecast.latitude == forecast.latitude[0],
+        np.nan,
+        forecast,
+    )
+    eq = wrappers.EnsembleQuantiles(
+        which='both',
+        quantiles=quantiles,
+        quantile_dim='my_quantile',
+        ensemble_dim='realization',
+        skipna=skipna,
+    )
+
+    x = forecast.geopotential
+    y = eq.transform_fn(x)
+
+    expected_quantiles = (
+        quantiles if isinstance(quantiles, (list, tuple)) else [quantiles]
+    )
+    expected = x.quantile(
+        expected_quantiles, dim='realization', skipna=skipna
+    ).rename({'quantile': 'my_quantile'})
+    xr.testing.assert_equal(expected, y)
 
 
 class WeibullEnsembleToProbabilisticTest(parameterized.TestCase):
@@ -346,14 +493,338 @@ class IntersectPredictionAndTargetVariablesTest(parameterized.TestCase):
         'e': (('time',), np.arange(10)),
     })
 
-    metric = wrappers.IntersectPredictionAndTargetVariables(
-        deterministic.MAE()
-    )
+    metric = wrappers.IntersectPredictionAndTargetVariables(deterministic.MAE())
     stats = metric.statistics
     mae_stat = stats['self']
     result = mae_stat.compute(predictions, targets)
 
     self.assertSequenceEqual(list(result.keys()), ['c', 'd'])
+
+
+class SelectBinThresholdsByTimeFromChunkTest(parameterized.TestCase):
+
+  def test_select_dayofyear_from_init_lead_time_chunk(self):
+    init_times = np.array(['2023-01-01', '2023-01-02'], dtype='datetime64[ns]')
+    lead_times = np.array([24, 48], dtype='timedelta64[h]')
+    chunk = xr.DataArray(
+        np.random.rand(2, 2),
+        dims=['init_time', 'lead_time'],
+        coords={'init_time': init_times, 'lead_time': lead_times},
+    )
+
+    doys = np.arange(1, 366)
+    thresholds = xr.DataArray(
+        np.arange(1, 366),
+        dims=['dayofyear'],
+        coords={'dayofyear': doys},
+    )
+
+    selected = wrappers.select_bin_thresholds_by_time_from_chunk(
+        thresholds, chunk
+    )
+
+    expected_doy = np.array([[2, 3], [3, 4]])
+    expected = xr.DataArray(
+        expected_doy,
+        dims=['init_time', 'lead_time'],
+        coords={
+            'init_time': init_times,
+            'lead_time': lead_times,
+            'dayofyear': (['init_time', 'lead_time'], expected_doy),
+        },
+    )
+
+    xr.testing.assert_equal(selected, expected)
+
+  def test_select_dayofyear_from_valid_time_chunk(self):
+    valid_times = np.array(
+        ['2023-01-02', '2023-01-03'], dtype='datetime64[ns]'
+    )
+    chunk = xr.DataArray(
+        np.random.rand(2),
+        dims=['valid_time'],
+        coords={'valid_time': valid_times},
+    )
+
+    doys = np.arange(1, 366)
+    thresholds = xr.DataArray(
+        np.arange(1, 366),
+        dims=['dayofyear'],
+        coords={'dayofyear': doys},
+    )
+
+    selected = wrappers.select_bin_thresholds_by_time_from_chunk(
+        thresholds, chunk
+    )
+
+    expected_doy = np.array([2, 3])
+    expected = xr.DataArray(
+        expected_doy,
+        dims=['valid_time'],
+        coords={
+            'valid_time': valid_times,
+            'dayofyear': ('valid_time', expected_doy),
+        },
+    )
+
+    xr.testing.assert_equal(selected, expected)
+
+  def test_select_dayofyear_from_station_chunk(self):
+    times = np.array(['2023-01-02', '2023-01-03'], dtype='datetime64[ns]')
+    chunk = xr.DataArray(
+        np.random.rand(2),
+        dims=['index'],
+        coords={'time': ('index', times)},
+    )
+
+    doys = np.arange(1, 366)
+    thresholds = xr.DataArray(
+        np.arange(1, 366),
+        dims=['dayofyear'],
+        coords={'dayofyear': doys},
+    )
+
+    selected = wrappers.select_bin_thresholds_by_time_from_chunk(
+        thresholds, chunk
+    )
+
+    expected_doy = np.array([2, 3])
+    expected = xr.DataArray(
+        expected_doy,
+        dims=['index'],
+        coords={
+            'time': ('index', times),
+            'dayofyear': ('index', expected_doy),
+        },
+    )
+
+    xr.testing.assert_equal(selected, expected)
+
+
+class InterpolateCoordinateTest(parameterized.TestCase):
+
+  def test_linear_interpolation(self):
+    da = xr.DataArray(
+        [10.0, 20.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': [0.0, 0.5, 1.0]},
+        name='temp',
+    )
+    target_quantiles = [0.25, 0.75]
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=target_quantiles,
+        method='linear',
+    )
+    output = transform.transform_fn(da)
+    expected = xr.DataArray(
+        [15.0, 25.0],
+        dims=['quantile'],
+        coords={'quantile': target_quantiles},
+        name='temp',
+    )
+    xr.testing.assert_allclose(output, expected)
+
+  def test_nearest_interpolation(self):
+    da = xr.DataArray(
+        [10.0, 20.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': [0.0, 0.5, 1.0]},
+        name='temp',
+    )
+    target_quantiles = [0.2, 0.8]
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=target_quantiles,
+        method='nearest',
+    )
+    output = transform.transform_fn(da)
+    expected = xr.DataArray(
+        [10.0, 30.0],
+        dims=['quantile'],
+        coords={'quantile': target_quantiles},
+        name='temp',
+    )
+    xr.testing.assert_allclose(output, expected)
+
+  def test_missing_coordinate_dim_returns_unchanged(self):
+    da = xr.DataArray(
+        [1.0, 2.0],
+        dims=['time'],
+        coords={'time': [0, 1]},
+    )
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=[0.2, 0.8],
+    )
+    output = transform.transform_fn(da)
+    xr.testing.assert_equal(output, da)
+
+  def test_unique_name_suffix(self):
+    transform = wrappers.InterpolateCoordinate(
+        which='predictions',
+        coord_name='quantile',
+        coord_values=[0.2, 0.8],
+        method='linear',
+    )
+    self.assertEqual(
+        transform.unique_name_suffix,
+        'InterpolateCoordinate_quantile_linear_0.2000_0.8000',
+    )
+
+
+class BinProbabilitiesTransformsTest(parameterized.TestCase):
+
+  _BIN_BOUNDARIES = (0.0, 0.5, 1.0, 2.0, 4.0, 8.0)
+
+  def _bin_probabilities(self, probabilities) -> xr.DataArray:
+    probabilities = np.asarray(probabilities, dtype=np.float32)
+    return xr.DataArray(
+        probabilities,
+        dims=['x', 'rate_bins'],
+        coords={'x': np.arange(probabilities.shape[0])},
+        name='rate',
+    )
+
+  def test_cdf_at_interior_edges(self):
+    da = self._bin_probabilities([[0.2, 0.3, 0.1, 0.2, 0.2]])
+    transform = wrappers.BinProbabilitiesToCDF(
+        which='predictions',
+        bin_dim='rate_bins',
+        threshold_dim='threshold',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x', 'threshold'))
+    np.testing.assert_array_equal(out.threshold, [0.5, 1.0, 2.0, 4.0])
+    np.testing.assert_allclose(out.values[0], [0.2, 0.5, 0.6, 0.8], rtol=1e-6)
+    self.assertNotIn('rate_bins', out.coords)
+    self.assertIn('BinProbabilitiesToCDF', transform.unique_name_suffix)
+
+  def test_cdf_matches_continuous_to_cdf_of_a_point_mass(self):
+    # A point mass in one bin gives the same CDF at the edges as the
+    # continuous value binned by `ContinuousToBins` and evaluated by
+    # `ContinuousToCDF(right_inclusive=False)`.
+    value = xr.DataArray([1.5], dims=['x'], name='rate')
+    binned = wrappers.ContinuousToBins(
+        which='predictions',
+        bin_values=self._BIN_BOUNDARIES,
+        bin_dim='rate_bins',
+    ).transform_fn(value)
+    cdf_from_bins = wrappers.BinProbabilitiesToCDF(
+        which='predictions', bin_dim='rate_bins', threshold_dim='threshold'
+    ).transform_fn(
+        binned
+    )  # Edges read from the `rate_bins_left/right` coords.
+    cdf_from_value = wrappers.ContinuousToCDF(
+        which='targets',
+        threshold_values=self._BIN_BOUNDARIES[1:-1],
+        threshold_dim='threshold',
+        right_inclusive=False,
+    ).transform_fn(value)
+    np.testing.assert_array_equal(
+        cdf_from_bins.values, cdf_from_value.transpose('x', 'threshold').values
+    )
+
+  def test_cdf_propagates_nans_and_checks_number_of_bins(self):
+    da = self._bin_probabilities([[np.nan, 0.0, 0.0, 0.0, 1.0]])
+    out = wrappers.BinProbabilitiesToCDF(
+        which='predictions',
+        bin_dim='rate_bins',
+        threshold_dim='threshold',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    ).transform_fn(da)
+    self.assertTrue(np.isnan(out.values).all())
+    with self.assertRaisesRegex(ValueError, 'define 4 bins'):
+      wrappers.BinProbabilitiesToCDF(
+          which='predictions',
+          bin_dim='rate_bins',
+          threshold_dim='threshold',
+          bin_boundaries=self._BIN_BOUNDARIES[:-1],
+      ).transform_fn(da)
+    with self.assertRaisesRegex(ValueError, 'no .rate_bins_left'):
+      wrappers.BinProbabilitiesToCDF(
+          which='predictions', bin_dim='rate_bins', threshold_dim='threshold'
+      ).transform_fn(da)
+
+  def test_median_interpolates_cdf(self):
+    # Examples from the docstring of the median computation.
+    da = self._bin_probabilities([
+        [0.2, 0.3, 0.1, 0.2, 0.2],  # CDF hits 0.5 exactly at the edge 1.0.
+        [0.2, 0.2, 0.2, 0.2, 0.2],  # Middle of the third bin.
+        [1.0, 0.0, 0.0, 0.0, 0.0],  # Middle of the first bin.
+        [0.0, 0.0, 0.0, 0.0, 1.0],  # Middle of the last bin.
+    ])
+    transform = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x',))
+    self.assertEqual(out.dtype, np.float32)
+    np.testing.assert_allclose(out.values, [1.0, 1.5, 0.25, 6.0], rtol=1e-6)
+    self.assertEqual(
+        transform.unique_name_suffix, 'BinProbabilitiesToMedian_rate_bins'
+    )
+
+  def test_median_matches_numpy_interpolation(self):
+    rng = np.random.default_rng(0)
+    probabilities = rng.dirichlet(np.ones(5), size=50).astype(np.float32)
+    da = self._bin_probabilities(probabilities)
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=self._BIN_BOUNDARIES,
+    ).transform_fn(da)
+    expected = [
+        np.interp(
+            0.5, np.concatenate([[0.0], np.cumsum(p)]), self._BIN_BOUNDARIES
+        )
+        for p in probabilities
+    ]
+    np.testing.assert_allclose(out.values, expected, rtol=1e-5, atol=1e-6)
+
+  def test_median_with_zero_centred_first_bin_is_zero_when_dry(self):
+    da = self._bin_probabilities([[0.9, 0.1, 0.0, 0.0, 0.0]])
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-0.01, 0.01, 1.0, 2.0, 4.0, 8.0),
+    ).transform_fn(da)
+    np.testing.assert_allclose(
+        out.values, [-0.01 + 0.02 * 0.5 / 0.9], atol=1e-6
+    )
+
+  def test_median_handles_infinite_outer_boundaries_and_nans(self):
+    da = self._bin_probabilities([
+        [1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0],
+        [np.nan, 0.0, 0.0, 0.0, 1.0],
+    ])
+    out = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-np.inf, 0.5, 1.0, 2.0, 4.0, np.inf),
+    ).transform_fn(da)
+    # -inf -> 0 and +inf -> last left edge (4.0), so the outer medians are
+    # the centres of [0, 0.5] and [4, 4].
+    np.testing.assert_allclose(out.values[:2], [0.25, 4.0], rtol=1e-6)
+    self.assertTrue(np.isnan(out.values[2]))
+
+  def test_median_rejects_negative_distribution_with_inf_lower_boundary(self):
+    transform = wrappers.BinProbabilitiesToMedian(
+        which='predictions',
+        bin_dim='rate_bins',
+        bin_boundaries=(-np.inf, -1.0, 0.0, 1.0, 2.0, np.inf),
+    )
+    with self.assertRaisesRegex(ValueError, 'non-negative'):
+      transform.transform_fn(
+          self._bin_probabilities([[0.2, 0.2, 0.2, 0.2, 0.2]])
+      )
 
 
 if __name__ == '__main__':

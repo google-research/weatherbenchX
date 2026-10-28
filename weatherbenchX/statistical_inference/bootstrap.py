@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -230,7 +230,7 @@ class ClusterBootstrap(Bootstrap):
         counts, dim=experimental_unit_dim)
     self._point_estimates = metrics_base.compute_metrics_from_statistics(
         metrics, aggregated_statistics.sum_along_dims(
-            [experimental_unit_dim]).mean_statistics())
+            [experimental_unit_dim]).mean_statistics())  # pyrefly: ignore[bad-argument-type]
     self._resampled_values = metrics_base.compute_metrics_from_statistics(
         metrics, resampled_stats.mean_statistics())
 
@@ -243,11 +243,11 @@ def stationary_bootstrap_indices(
 ) -> np.ndarray:
   """Samples indices for stationary bootstrap, shape (n_data, n_replicates)."""
   end_block_prob = 1/mean_block_length
-  current_indices = np.random.randint(n_data, size=(n_replicates,), dtype=dtype)
+  current_indices = np.random.randint(n_data, size=(n_replicates,), dtype=dtype)  # pyrefly: ignore[no-matching-overload]
   all_indices = [current_indices]
   for _ in range(1, n_data):
     end_block_flags = np.random.rand(n_replicates) < end_block_prob
-    new_random_indices = np.random.randint(
+    new_random_indices = np.random.randint(  # pyrefly: ignore[no-matching-overload]
         n_data, size=(n_replicates,), dtype=dtype)
     # Blocks wrap around in a periodic fashion. This feature of the stationary
     # bootstrap method exists to avoid endpoint bias / ensure that each data
@@ -512,7 +512,7 @@ class StationaryBootstrap(Bootstrap):
       #   name for them to any dimensions used in the statistics.
       resampled_values[var_name] = utils.apply_to_slices(
           functools.partial(self._bootstrap_results_for_metric_scalar,
-                            metric, var_name),
+                            metric, var_name),  # pyrefly: ignore[bad-argument-type]
           per_unit_tangents[var_name],
           sum_weighted_stats_for_this_var,
           sum_weights_for_this_var,

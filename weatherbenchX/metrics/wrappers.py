@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,26 +39,35 @@ wrappers.WrappedMetric(
 import abc
 from collections.abc import Sequence
 from typing import Any, Callable, Hashable, Iterable, Mapping, Union
+
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.metrics import base
 import xarray as xr
+import xarray.ufuncs as xu
 
 
 def binarize_thresholds(
     x: xr.DataArray,
     thresholds: Union[Iterable[float], xr.DataArray, xr.Dataset],
     threshold_dim: str,
+    sel_coords: Sequence[str] | None = None,
+    include_equal: bool = False,
 ) -> xr.DataArray:
   """Binarizes a continuous array using a threshold value or a list of values.
 
-  Note that this retains NaNs in the input array. If NaNs are present, the
-  output will be of type float otherwise bool.
+  Note that this retains NaNs in the input and threshold arrays.
 
   Args:
     x: Input DataArray.
     thresholds: List, xarray.DataArray or xarray.Dataset of threshold values.
     threshold_dim: Name of dimension to use for threshold values.
+    sel_coords: Optional sequence of coordinate names to index into `thresholds`
+      using the corresponding coordinates on `x` (e.g., for indexing station
+      thresholds onto sparse observations). Each coordinate must be a dimension
+      in `thresholds` and a coordinate or dimension in `x`.
+    include_equal: If True, uses `x >= threshold` instead of `x > threshold`.
+      Default: False.
 
   Returns:
     binary_x: Binarized DataArray.
@@ -83,7 +92,12 @@ def binarize_thresholds(
     threshold = xr.DataArray(
         thresholds, dims=[threshold_dim], coords={threshold_dim: thresholds}
     )
-  return (x > threshold).where(~np.isnan(x)).astype(np.float32)
+  if sel_coords is not None:
+    threshold = threshold.reset_coords(drop=True).sel(
+        {coord: x[coord] for coord in sel_coords}
+    )
+  exceeded = (x >= threshold) if include_equal else (x > threshold)
+  return exceeded.where(~xu.isnan(x) & ~xu.isnan(threshold)).astype(np.float32)
 
 
 # Transforms
@@ -146,11 +160,111 @@ class EnsembleMean(InputTransform):
     return da.mean(self._ensemble_dim, skipna=self._skipna)
 
 
+class EnsembleMedian(InputTransform):
+  """Compute ensemble median."""
+
+  def __init__(
+      self,
+      which: str,
+      ensemble_dim='number',
+      skipna=False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      ensemble_dim: Name of ensemble dimension. Default: 'number'.
+      skipna: If True, skip NaNs in the ensemble median. Default: False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble median if the
+        ensemble dimension is missing. Default: False.
+    """
+    super().__init__(which)
+    self._ensemble_dim = ensemble_dim
+    self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
+
+  @property
+  def unique_name_suffix(self) -> str:
+    """Unique name suffix for the ensemble median statistic."""
+    return f'ensemble_median_{self._ensemble_dim=}_{self._skipna=}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    """Apply the ensemble median transformation to the input DataArray."""
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
+    return da.median(self._ensemble_dim, skipna=self._skipna)
+
+
+class EnsembleQuantiles(InputTransform):
+  """Compute ensemble quantiles."""
+
+  def __init__(
+      self,
+      which: str,
+      quantiles: Union[float, Iterable[float]],
+      quantile_dim: str = 'quantile',
+      ensemble_dim: str = 'number',
+      skipna: bool = False,
+      skip_if_ensemble_dim_missing: bool = False,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      quantiles: Quantile or sequence of quantiles to compute, which must be
+        between 0 and 1 inclusive.
+      quantile_dim: Name of the new dimension and coordinate that will store the
+        quantiles. Default: 'quantile'.
+      ensemble_dim: Name of ensemble dimension. Default: 'number'.
+      skipna: If True, skip NaNs in the ensemble quantiles. Note that setting
+        this to True will SIGNIFICANTLY slow down the computation! Default:
+        False.
+      skip_if_ensemble_dim_missing: If True, skip the ensemble quantiles if the
+        ensemble dimension is missing. Default: False.
+    """
+    super().__init__(which)
+    # Ensure quantiles is a list so that xr.DataArray.quantile creates a
+    # dimension and coordinate for it.
+    self._quantiles = (
+        quantiles if isinstance(quantiles, Iterable) else [quantiles]
+    )
+    self._quantile_dim = quantile_dim
+    self._ensemble_dim = ensemble_dim
+    self._skipna = skipna
+    self._skip_if_ensemble_dim_missing = skip_if_ensemble_dim_missing
+
+  @property
+  def unique_name_suffix(self) -> str:
+    quantiles_str = ','.join([str(q) for q in self._quantiles])
+    return (
+        f'ensemble_quantiles_{self._ensemble_dim=}_{self._quantile_dim=}_'
+        f'{self._skipna=}_{quantiles_str}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
+      return da
+    if 'quantile' in da.dims:
+      raise ValueError(
+          'Input DataArray already has a `quantile` dimension. Please rename it'
+          ' before applying the EnsembleQuantiles wrapper.'
+      )
+    result = da.quantile(
+        self._quantiles, dim=self._ensemble_dim, skipna=self._skipna  # pyrefly: ignore[bad-argument-type]
+    )
+    if self._quantile_dim != 'quantile':
+      result = result.rename({'quantile': self._quantile_dim})
+    return result
+
+
 class ContinuousToBinary(InputTransform):
   """Converts a continuous input to a binary one.
 
-  Applies x > threshold for all threholds and concatenates along a new dimension
-  of name `threshold_dim`.
+  Applies x > threshold (or x >= threshold if `include_equal=True`) for all
+  thresholds and concatenates along a new dimension of name `threshold_dim`.
   """
 
   def __init__(
@@ -159,6 +273,8 @@ class ContinuousToBinary(InputTransform):
       threshold_value: Union[float, Iterable[float], xr.DataArray, xr.Dataset],
       threshold_dim: str,
       unique_name_suffix: str | None = None,
+      sel_coords: Sequence[str] | None = None,
+      include_equal: bool = False,
   ):
     """Init.
 
@@ -172,6 +288,11 @@ class ContinuousToBinary(InputTransform):
         `threshold_values` is an xarray.DataArray or xarray.Dataset, this must
         be provided, and must be unique over all the threshold_value that you
         intend to use within a set of Metrics that are computed together.
+      sel_coords: Optional sequence of coordinate names to index into
+        `threshold_value` using the corresponding coordinates on the input
+        DataArray.
+      include_equal: If True, uses `x >= threshold` instead of `x > threshold`.
+        Default: False.
     """
     super().__init__(which)
     # Convert to list if it isn't already.
@@ -189,6 +310,8 @@ class ContinuousToBinary(InputTransform):
             ' xarray.DataArray or xarray.Dataset.'
         )
     self._unique_name_suffix = unique_name_suffix
+    self._sel_coords = tuple(sel_coords) if sel_coords is not None else None
+    self._include_equal = include_equal
 
   @property
   def unique_name_suffix(self) -> str:
@@ -196,10 +319,207 @@ class ContinuousToBinary(InputTransform):
       unique_name_suffix = ','.join([str(t) for t in self._threshold_value])
     else:
       unique_name_suffix = self._unique_name_suffix
-    return f'{self._threshold_dim}={unique_name_suffix}'
+    op = '>=' if self._include_equal else '='
+    return f'{self._threshold_dim}{op}{unique_name_suffix}'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    return binarize_thresholds(da, self._threshold_value, self._threshold_dim)
+    return binarize_thresholds(
+        da,
+        self._threshold_value,
+        self._threshold_dim,
+        sel_coords=self._sel_coords,
+        include_equal=self._include_equal,
+    )
+
+
+def _resolve_bin_boundaries(
+    da: xr.DataArray,
+    bin_dim: str,
+    bin_boundaries: Sequence[float] | None,
+) -> np.ndarray:
+  """Returns the (validated) bin boundaries of a binned DataArray.
+
+  Args:
+    da: DataArray with a bin dimension.
+    bin_dim: Name of the bin dimension.
+    bin_boundaries: Strictly increasing bin edges, one more than the size of
+      `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+      `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+
+  Returns:
+    1D array of bin boundaries.
+  """
+  if bin_dim not in da.dims:
+    raise ValueError(f'Bin dimension {bin_dim!r} not found in {da.dims}')
+  if bin_boundaries is None:
+    left_name, right_name = f'{bin_dim}_left', f'{bin_dim}_right'
+    if left_name not in da.coords or right_name not in da.coords:
+      raise ValueError(
+          f'bin_boundaries not given and {da.name} has no {left_name!r} and'
+          f' {right_name!r} coordinates.'
+      )
+    left = np.asarray(da[left_name].values, dtype=float)
+    right = np.asarray(da[right_name].values, dtype=float)
+    if not np.allclose(left[1:], right[:-1]):
+      raise ValueError(
+          f'Bins of {da.name} are not contiguous: left edges {left}, right'
+          f' edges {right}.'
+      )
+    boundaries = np.concatenate([left, right[-1:]])
+  else:
+    boundaries = np.asarray(bin_boundaries, dtype=float)
+  if boundaries.ndim != 1 or boundaries.size < 2:
+    raise ValueError(f'Need at least two bin boundaries, got {boundaries}')
+  if np.any(np.diff(boundaries) <= 0):
+    raise ValueError(
+        f'Bin boundaries must be strictly increasing, got {boundaries}'
+    )
+  if da.sizes[bin_dim] != boundaries.size - 1:
+    raise ValueError(
+        f'{boundaries.size} bin boundaries define {boundaries.size - 1} bins,'
+        f' but {da.name} has {da.sizes[bin_dim]} entries along {bin_dim!r}.'
+    )
+  return boundaries
+
+
+class BinProbabilitiesToCDF(InputTransform):
+  """Converts probabilities over bins to the CDF at the interior bin edges.
+
+  For an input that holds the probability of each bin of a continuous variable
+  (e.g. a categorical precipitation forecast), the CDF is known exactly at the
+  bin edges: `P(x < edge)` is the sum of the probabilities of all bins below
+  it. The result has a new dimension `threshold_dim` with the interior edges as
+  coordinate instead of `bin_dim`, in the same form as `ContinuousToCDF` with
+  `right_inclusive=False` produces from a continuous input, so that e.g. the
+  Brier score of a binned forecast is `MSE` wrapped with this transform on the
+  predictions and `ContinuousToCDF(right_inclusive=False)` on the targets.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_dim: str,
+      threshold_dim: str,
+      bin_boundaries: Sequence[float] | None = None,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_dim: Name of the bin dimension of the input.
+      threshold_dim: Name of the new dimension holding the interior bin edges.
+      bin_boundaries: Strictly increasing edges of the bins, one more than the
+        size of `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+        `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+    """
+    super().__init__(which)
+    self._bin_dim = bin_dim
+    self._threshold_dim = threshold_dim
+    self._bin_boundaries = (
+        None
+        if bin_boundaries is None
+        else tuple(float(b) for b in bin_boundaries)
+    )
+
+  @property
+  def unique_name_suffix(self) -> str:
+    edges = (
+        'coords'
+        if self._bin_boundaries is None
+        else ','.join(str(b) for b in self._bin_boundaries)
+    )
+    return (
+        f'BinProbabilitiesToCDF_{self._bin_dim}_{self._threshold_dim}_{edges}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    boundaries = _resolve_bin_boundaries(
+        da, self._bin_dim, self._bin_boundaries
+    )
+    # CDF at the right edge of each bin; the last one (always 1) is dropped so
+    # that only the interior edges remain.
+    cdf = da.cumsum(self._bin_dim, skipna=False).isel(
+        {self._bin_dim: slice(None, -1)}
+    )
+    cdf = cdf.where(~xu.isnan(da).any(self._bin_dim))
+    cdf = cdf.drop_vars(
+        [c for c in cdf.coords if self._bin_dim in cdf[c].dims], errors='ignore'
+    )
+    return cdf.rename({self._bin_dim: self._threshold_dim}).assign_coords(
+        {self._threshold_dim: boundaries[1:-1]}
+    )
+
+
+class BinProbabilitiesToMedian(InputTransform):
+  """Converts probabilities over bins to the median of the distribution.
+
+  The CDF is known exactly at the bin edges and is interpolated linearly within
+  the bin that contains the 0.5 quantile. The median therefore always lies
+  strictly inside a bin: for a distribution entirely in one bin it is the
+  centre of that bin, so a first bin centred on zero (e.g. `[-0.01, 0.01)`)
+  yields a median of (nearly) zero for dry predictions. Infinite outer
+  boundaries are replaced to keep the result finite: a `-inf` lower boundary
+  followed by a positive one becomes 0 (a distribution over non-negative
+  values), and a `+inf` upper boundary becomes the left edge of the last bin.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      bin_dim: str,
+      bin_boundaries: Sequence[float] | None = None,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      bin_dim: Name of the bin dimension of the input.
+      bin_boundaries: Strictly increasing edges of the bins, one more than the
+        size of `bin_dim`. If None, they are read from the `{bin_dim}_left` and
+        `{bin_dim}_right` coordinates written by `ContinuousToBins`.
+    """
+    super().__init__(which)
+    self._bin_dim = bin_dim
+    self._bin_boundaries = (
+        None
+        if bin_boundaries is None
+        else tuple(float(b) for b in bin_boundaries)
+    )
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'BinProbabilitiesToMedian_{self._bin_dim}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    bin_dim = self._bin_dim
+    edges = _resolve_bin_boundaries(da, bin_dim, self._bin_boundaries)
+    if edges[0] == -np.inf:
+      if edges[1] <= 0:
+        raise ValueError(
+            'A -inf lower bin boundary is only supported for distributions over'
+            f' non-negative values, got {edges}.'
+        )
+      edges[0] = 0.0
+    if edges[-1] == np.inf:
+      edges[-1] = edges[-2]
+    edges = edges.astype(np.float32)
+    # CDF at the right edge of each bin, and at its left edge (0 for the first).
+    cdf_right = da.cumsum(bin_dim, skipna=False)
+    cdf_left = cdf_right - da
+    left = xr.DataArray(edges[:-1], dims=[bin_dim])
+    right = xr.DataArray(edges[1:], dims=[bin_dim])
+    # Exactly one bin contains the median: the first whose right-edge CDF
+    # reaches 0.5. Interpolate the CDF linearly within it.
+    contains_median = (cdf_left < 0.5) & (cdf_right >= 0.5)
+    width = right - left
+    mass = xu.maximum(cdf_right - cdf_left, np.finfo(np.float32).tiny)
+    within = left + (0.5 - cdf_left) / mass * width
+    median = within.where(contains_median, 0.0).sum(bin_dim, skipna=False)
+    # Propagate NaNs of the input (e.g. masked points).
+    median = median.where(~xu.isnan(da).any(bin_dim))
+    return median.astype(da.dtype)
 
 
 def select_bin_thresholds_by_time_from_chunk(
@@ -216,6 +536,7 @@ def select_bin_thresholds_by_time_from_chunk(
   Options for bin_threshold time dimensions are:
   - `valid_time`
   - `init_time` and `lead_time` (only compatible for init/lead_time chunks)
+  - `dayofyear` without `lead_time` or `valid_time` time dimensions
   - `dayofyear` (with `lead_time` for init/lead_time chunks)
   - No time dimensions (in which case the bin thresholds are returned
     unchanged)
@@ -229,37 +550,52 @@ def select_bin_thresholds_by_time_from_chunk(
     Data array containing bin thresholds selected by time.
   """
 
-  if {'init_time', 'lead_time'}.issubset(chunk.dims):
+  if {'init_time', 'lead_time'}.issubset(chunk.coords):
     if 'valid_time' in bin_thresholds.dims:
       bin_thresholds = bin_thresholds.sel(
           valid_time=chunk.init_time + chunk.lead_time
       )
-
+    elif 'time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(
+          time=chunk.init_time + chunk.lead_time
+      )
     elif {'init_time', 'lead_time'}.issubset(bin_thresholds.dims):
       bin_thresholds = bin_thresholds.sel(
           init_time=chunk.init_time, lead_time=chunk.lead_time
       )
-    elif {'dayofyear', 'lead_time'}.issubset(bin_thresholds.dims):
-      bin_thresholds = bin_thresholds.sel(
-          dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
-      )
+    elif 'dayofyear' in bin_thresholds.dims:
+      if 'lead_time' in bin_thresholds.dims:
+        # For example, lead-time-dependent climatology with dims
+        # ('dayofyear', 'lead_time', 'latitude', 'longitude').
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=chunk.init_time.dt.dayofyear, lead_time=chunk.lead_time
+        )
+      else:
+        # For example, bin_thresholds can be ERA5 rolling by day-of-year
+        # climatology with dims ('dayofyear', 'latitude', 'longitude').
+        valid_time = chunk.init_time + chunk.lead_time
+        bin_thresholds = bin_thresholds.sel(
+            dayofyear=valid_time.dt.dayofyear
+        )
     else:
-      # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
 
-  elif 'valid_time' in chunk.dims:
+  elif 'valid_time' in chunk.coords or 'time' in chunk.coords:
+    chunk_time = (
+        chunk.valid_time if 'valid_time' in chunk.coords else chunk.time
+    )
     if 'valid_time' in bin_thresholds.dims:
-      bin_thresholds = bin_thresholds.sel(valid_time=chunk.valid_time)
+      bin_thresholds = bin_thresholds.sel(valid_time=chunk_time)
+    elif 'time' in bin_thresholds.dims:
+      bin_thresholds = bin_thresholds.sel(time=chunk_time)
     elif 'dayofyear' in bin_thresholds.dims:
       bin_thresholds = bin_thresholds.sel(
-          dayofyear=chunk.valid_time.dt.dayofyear
+          dayofyear=chunk_time.dt.dayofyear
       )
     else:
-      # No time dimensions in bin_thresholds, so just return it.
       return bin_thresholds
 
   else:
-    # No time dimensions in chunk, so just return thresholds.
     return bin_thresholds
 
   return bin_thresholds.compute()
@@ -305,7 +641,7 @@ def compute_cdf(
   else:
     cdf = (da < thresholds).astype('float')
   # Make sure NaNs are propagated from da and thresholds.
-  cdf = cdf.where(~np.isnan(da)).where(~np.isnan(thresholds))
+  cdf = cdf.where(~xu.isnan(da)).where(~xu.isnan(thresholds))
   return cdf
 
 
@@ -483,6 +819,7 @@ class WeibullEnsembleToProbabilistic(InputTransform):
     Args:
       which: Which input to apply the wrapper to. Must be 'predictions'.
       ensemble_dim: Name of ensemble dimension. Default: 'number'.
+      skipna: If True, skip NaNs in the ensemble sum. Default: False.
     """
     assert (
         which == 'predictions'
@@ -560,7 +897,7 @@ class ReLU(InputTransform):
     return 'relu'
 
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
-    return xr.where(da > 0, da, 0).where(~np.isnan(da))
+    return xr.where(da > 0, da, 0).where(~xu.isnan(da))
 
 
 class ShiftAlongNewDim(InputTransform):
@@ -720,10 +1057,53 @@ class Select(InputTransform):
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     da = da.copy()
     if self._sel is not None:
-      da = da.sel(self._sel, **self._sel_kwargs)
+      da = da.sel(self._sel, **self._sel_kwargs)  # pyrefly: ignore[bad-unpacking]
     if self._isel is not None:
-      da = da.isel(self._isel, **self._isel_kwargs)
+      da = da.isel(self._isel, **self._isel_kwargs)  # pyrefly: ignore[bad-unpacking]
     return da
+
+
+class InterpolateCoordinate(InputTransform):
+  """Interpolates coordinate values along a dimension using xr.DataArray.interp."""
+
+  def __init__(
+      self,
+      which: str,
+      coord_name: str,
+      coord_values: Sequence[float] | np.ndarray,
+      method: str = 'linear',
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      coord_name: Name of the coordinate/dimension to interpolate along.
+      coord_values: Target coordinate values to interpolate to.
+      method: Interpolation method passed to `xr.DataArray.interp`. Accepts any
+        method supported by xarray (e.g. 'linear', 'nearest', 'zero', 'slinear',
+        'quadratic', 'cubic', 'pchip', 'akima', etc.). Default: 'linear'.
+    """
+    super().__init__(which)
+    self._coord_name = coord_name
+    self._coord_values = coord_values
+    self._method = method
+
+  @property
+  def unique_name_suffix(self) -> str:
+    values_str = '_'.join(f'{v:.4f}' for v in self._coord_values)
+    return (
+        f'InterpolateCoordinate_{self._coord_name}_{self._method}_{values_str}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    if self._coord_name not in da.dims:
+      return da
+
+    return da.interp(
+        coords={self._coord_name: self._coord_values},
+        method=self._method,  # pyrefly: ignore[bad-argument-type]
+    )
 
 
 class StackToNewDimension(InputTransform):
@@ -763,6 +1143,135 @@ class StackToNewDimension(InputTransform):
     stacked = da.stack({self._temporary_new_dim_name: self._dims_to_stack})
     return stacked.drop_vars(self._dims_to_stack).rename(
         {self._temporary_new_dim_name: self._new_dim_name}
+    )
+
+
+def construct_tiles(
+    da: xr.DataArray,
+    window_size: int = 3,
+    window_dim: str = 'window',
+    wrap_longitude: bool = False,
+    lat_dim: str = 'latitude',
+    lon_dim: str = 'longitude',
+) -> xr.DataArray:
+  """Constructs local neighborhood tiles (windows) across the spatial grid.
+
+  At each latitude/longitude pixel, a `window_size` x `window_size` patch of
+  adjacent pixels is collected along a new `window_dim` dimension by rolling the
+  data. To prevent rolling from wrapping around the poles, pixels where a
+  full spatial window cannot be formed without wrapping latitude boundaries are
+  removed. If `wrap_longitude` is False, pixels near the longitude edges are
+  also removed.
+
+  Args:
+    da: The input DataArray containing spatial dimensions. Note that wrappers
+      apply this function per DataArray, not per Dataset.
+    window_size: The length of the side of the square tile window (in pixels).
+    window_dim: The name of the new dimension along which the window pixels are
+      concatenated.
+    wrap_longitude: If True, assume the longitude dimension wraps around (e.g.
+      global grids). If False (default), also clip values near the longitude
+      dimension edges (e.g. for regional datasets).
+    lat_dim: Name of the latitude dimension. Default: 'latitude'.
+    lon_dim: Name of the longitude dimension. Default: 'longitude'.
+
+  Returns:
+    An `xr.DataArray` with the additional `window_dim` dimension representing
+    the local spatial patch for each point on the grid.
+  """
+  shifts = []
+  for i in range(window_size):
+    for j in range(window_size):
+      d_lat = i - window_size // 2
+      d_lon = j - window_size // 2
+
+      rolled = da.roll({lat_dim: d_lat, lon_dim: d_lon}, roll_coords=False)
+      shifts.append(rolled)
+
+  windowed = xr.concat(shifts, dim=window_dim)
+
+  # Remove any window that was rolled across the latitude edges.
+  half_window_size = window_size // 2
+  window_reach_lower = half_window_size
+  window_reach_upper = window_size - 1 - half_window_size
+
+  windowed = windowed.isel({
+      lat_dim: slice(window_reach_lower, da.sizes[lat_dim] - window_reach_upper)
+  })
+
+  if not wrap_longitude:
+    windowed = windowed.isel({
+        lon_dim: slice(
+            window_reach_lower, da.sizes[lon_dim] - window_reach_upper
+        )
+    })
+
+  return windowed  # pyrefly: ignore[bad-return]
+
+
+class Tile(InputTransform):
+  """Constructs local neighborhood tiles (windows) across the spatial grid.
+
+  After the transformation, each spatial location contains the data from a
+  rolling window of size window_size centered at that location.
+
+  Adds a new dimension to the DataArray named with window_dim. The size of the
+  dimension is defined by window_size, e.g. a window_size of 3 will give a new
+  dimension of size 3x3=9.
+
+  This transform shrinks the edges of the forecast where the windows were
+  incomplete. A window size of 3 will remove one row/column on the edges of each
+  spatial dimension (lat_dim, lon_dim). If wrap_longitude is True, no
+  shrinking happens on the lon_dim, and the values are rolled over
+  from the other edge.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      window_size: int = 3,
+      window_dim: str = 'window',
+      wrap_longitude: bool = False,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      window_size: The length of the side of the square tile window (in pixels).
+      window_dim: The name of the new dimension along which the window pixels
+        are concatenated.
+      wrap_longitude: If True, assume lon_dim wraps around. Default: False.
+      lat_dim: Name of the latitude dimension. Default: 'latitude'.
+      lon_dim: Name of the longitude dimension. Default: 'longitude'.
+    """
+    super().__init__(which)
+    self._window_size = window_size
+    self._window_dim = window_dim
+    self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
+
+  @property
+  def unique_name_suffix(self) -> str:
+    suffix = (
+        f'tiled_window_size_{self._window_size}_wrap_{self._wrap_longitude}_'
+        f'dim_{self._window_dim}'
+    )
+    if self._lat_dim != 'latitude' or self._lon_dim != 'longitude':
+      suffix += f'_lat_{self._lat_dim}_lon_{self._lon_dim}'
+    return suffix
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    return construct_tiles(
+        da,
+        window_size=self._window_size,
+        window_dim=self._window_dim,
+        wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
     )
 
 
@@ -849,7 +1358,7 @@ class WrappedMetric(base.Metric):
     self.unique_name_suffix = unique_name_suffix
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:  # pyrefly: ignore[bad-override]
     stats = {}
     for name, stat in self.metric.statistics.items():
       # Apply wrappers in reverse order since the last one will be called first
@@ -915,7 +1424,7 @@ class SubselectVariables(base.Metric):
     self.variables = variables
 
   @property
-  def statistics(self) -> Mapping[Hashable, base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, base.Statistic]:  # pyrefly: ignore[bad-override]
     stats = {}
     for name, stat in self.metric.statistics.items():
       stat = SubselectVariablesForStatistic(stat, self.variables)

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
 # limitations under the License.
 """Latency wrappers."""
 
-from typing import Any, Hashable, Mapping, Optional, Union
+from typing import Hashable, Mapping, Optional, Union
+
 from absl import logging
 import numpy as np
 from weatherbenchX import xarray_tree
 from weatherbenchX.data_loaders import base
-from weatherbenchX.data_loaders import xarray_loaders
 import xarray as xr
 
 
@@ -91,13 +91,25 @@ class ConstantLatencyWrapper(base.DataLoader):
         process_chunk_fn=data_loader._process_chunk_fn,
     )
 
-  def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
-    """Return most recent available nominal init time for requested init time."""
+  def get_available_init_time(
+      self, init_time: np.datetime64
+  ) -> np.datetime64 | None:
+    """Returns the most recent available nominal init time.
+
+    This finds the most recent available nominal init time for the requested
+    `init_time`, considering the constant latency.
+
+    Args:
+      init_time: The requested initialization time.
+    """
     issue_time = self.nominal_init_times + self.latency
-    diff = (issue_time - init_time).astype(int)
+    diff = (issue_time - init_time).astype(int)  # pyrefly: ignore[unsupported-operation]
     # Find index of issue time that is closest to requested init_time.
     # on the left, i.e. with issue_time > nominal init_time.
-    available_idx = np.nanargmax(np.where(diff <= 0, diff, np.nan))
+    diff = np.where(diff <= 0, diff, np.nan)
+    if np.all(np.isnan(diff)):
+      return None
+    available_idx = np.nanargmax(diff)
     available_init_time = self.nominal_init_times[available_idx]
     return available_init_time
 
@@ -116,7 +128,7 @@ class ConstantLatencyWrapper(base.DataLoader):
       chunk: Chunk loaded from adjusted nominal init/lead times but with the
         requested init/lead times assigned as coordinates.
     """
-    if isinstance(self.data_loader, xarray_loaders.XarrayDataLoader):
+    if hasattr(self.data_loader, 'maybe_prepare_dataset'):
       # Normally, maybe_prepare_dataset() is called in load_chunk(). However,
       # since we are calling _load_chunk_from_source() directly, we need to call
       # it here.
@@ -135,14 +147,16 @@ class ConstantLatencyWrapper(base.DataLoader):
       adjusted_lead_times = lead_times + lead_time_offset
       logging.info(
           'LatencyWrapper: loading chunk for init time %s, using available init'
-          ' time %s, adjusted lead times %s',
+          ' time %s, adjusted lead times %s min',
           init_time,
           available_init_time,
           adjusted_lead_times.astype('timedelta64[m]'),
       )
-      raw_chunk = self.data_loader._load_chunk_from_source(  # pystyle: disable=protected-access
+      # pystyle: disable=protected-access
+      raw_chunk = self.data_loader._load_chunk_from_source(
           np.array([available_init_time]), adjusted_lead_times
       )
+      # pystyle: enable=protected-access
 
       # Adjust nominal init and lead times to the query values.
       # Doing this by adding/subtracting the offset also works for sparse data
@@ -156,7 +170,7 @@ class ConstantLatencyWrapper(base.DataLoader):
       # adjusted times before and query times after. However, since for sparse
       # data init/lead times are coordinates with dimension index (with
       # possibly missing init/lead times), this isn't trivial.
-      raw_chunk = xarray_tree.map_structure(  # pytype: disable=wrong-arg-types
+      raw_chunk = xarray_tree.map_structure(
           adjust_init_and_lead_times,
           raw_chunk,
       )
@@ -171,15 +185,15 @@ class ConstantLatencyWrapper(base.DataLoader):
 
 
 class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
-  """Shortcut for wrapping a xarray_loaders.XarrayDataLoader data loader in a latency wrapper.
+  """Wraps an XarrayDataLoader (or ConcatDataLoader of XarrayDataLoaders) in a latency wrapper.
 
-  This simply uses the init_time coordinate on the Zarr file to determine the
-  nominal init times.
+  This is a shortcut that uses `nominal_init_times()` on the wrapped loader to
+  determine the nominal init times from the underlying Zarr file(s).
   """
 
   def __init__(
       self,
-      data_loader: xarray_loaders.XarrayDataLoader,
+      data_loader: base.DataLoader,
       latency: np.timedelta64,
       init_time_dim: str = 'init_time',
       concat_dim: str = 'init_time',
@@ -197,9 +211,15 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
   def maybe_set_nominal_init_times(self):
     if self._nominal_init_times_set:
       return
-    assert isinstance(self.data_loader, xarray_loaders.XarrayDataLoader)
-    self.data_loader.maybe_prepare_dataset()
-    self.nominal_init_times = self.data_loader._ds[self._init_time_dim].values  # pylint: disable=protected-access
+    if hasattr(self.data_loader, 'nominal_init_times'):
+      self.nominal_init_times = self.data_loader.nominal_init_times(
+          self._init_time_dim
+      )
+    else:
+      raise ValueError(
+          'data_loader must implement nominal_init_times() returning nominal'
+          ' init times.'
+      )
     self._nominal_init_times_set = True
 
   def _load_chunk_from_source(
@@ -212,7 +232,7 @@ class XarrayConstantLatencyWrapper(ConstantLatencyWrapper):
 
   def get_available_init_time(self, init_time: np.datetime64) -> np.datetime64:
     self.maybe_set_nominal_init_times()
-    return super().get_available_init_time(init_time)
+    return super().get_available_init_time(init_time)  # pyrefly: ignore[bad-return]
 
 
 class MultipleConstantLatencyWrapper(base.DataLoader):
@@ -257,15 +277,22 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
 
   def _get_data_loader(self, init_time):
     lead_time_offsets_and_latencies = []
+    # If there is no available init time, we will assign an infinite lead
+    # time offset and latency. Since there is no actual "inf" timedelta,
+    # we'll just use 1e6 days.
+    inf_time = np.timedelta64(int(1e6), 'D')
     for data_loader in self._data_loaders:
       available_init_time = data_loader.get_available_init_time(init_time)
-      lead_time_offset = init_time - available_init_time
-      # Break ties by picking the data loader with largest latency -- note that
-      # we make latency negative here because we want the smallest
-      # lead_time_offset, but the largest data loader latency.
-      lead_time_offsets_and_latencies.append(
-          (lead_time_offset, -data_loader.latency)
-      )
+      if available_init_time is None:
+        lead_time_offsets_and_latencies.append((inf_time, inf_time))
+      else:
+        lead_time_offset = init_time - available_init_time
+        # Break ties by picking the data loader with largest latency -- note
+        # that we make latency negative here because we want the smallest
+        # lead_time_offset, but the largest data loader latency.
+        lead_time_offsets_and_latencies.append(
+            (lead_time_offset, -data_loader.latency)
+        )
     lead_time_offsets_and_latencies = np.array(
         lead_time_offsets_and_latencies,
         dtype=[
@@ -277,11 +304,15 @@ class MultipleConstantLatencyWrapper(base.DataLoader):
         lead_time_offsets_and_latencies,
         order=('lead_time_offset', 'neg_latency'),
     )
+    if lead_time_offsets_and_latencies[idx[0]][0] == inf_time:
+      raise ValueError(
+          'No available init time found for init time %s.' % init_time
+      )
     most_recent_data_loader = self._data_loaders[idx[0]]
     logging.info(
-        'Init time: %s, data loader latency: %s',
+        'Init time: %s, data loader latency: %s min',
         init_time,
-        most_recent_data_loader.latency,
+        most_recent_data_loader.latency.astype('timedelta64[m]'),
     )
     return most_recent_data_loader
 

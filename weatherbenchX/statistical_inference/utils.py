@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -103,7 +103,7 @@ def apply_to_slices(
     them that combine_by_coords can use to combine them.
   """
 
-  dims = (dim,) if isinstance(dim, str) else tuple(dim)
+  dims = (dim,) if isinstance(dim, str) else tuple(dim)  # pyrefly: ignore[bad-argument-type]
   sizes = {}
   def check_arg_sizes_and_maybe_add_missing_coords(arg):
     for dim in dims:

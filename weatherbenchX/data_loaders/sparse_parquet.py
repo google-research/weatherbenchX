@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,13 +39,13 @@ def get_parquet_files_subset(
     unit = 'h'
   else:
     raise NotImplementedError(f'{partition_by} not implemented.')
-  time_start = np.datetime64(time_start, unit)
-  time_end = np.datetime64(time_end, unit)
+  time_start = np.datetime64(time_start, unit)  # pyrefly: ignore[bad-assignment, no-matching-overload]
+  time_end = np.datetime64(time_end, unit)  # pyrefly: ignore[bad-assignment, no-matching-overload]
   td = np.timedelta64(1, unit)
   times = np.arange(time_start, time_end + td, td)
   files = []
   for time in times:
-    fn = parquet_filename_for_time(path, time, unit)
+    fn = parquet_filename_for_time(path, time, unit)  # pyrefly: ignore[bad-argument-type]
     files.append(fn)
   return files
 
@@ -227,20 +227,20 @@ class SparseObservationsFromParquet(base.DataLoader):
         stop_time = valid_time + lead_time_slice.stop
 
     else:
-      start_time = valid_time + self._tolerance[0]
-      stop_time = valid_time + self._tolerance[1]
+      start_time = valid_time + self._tolerance[0]  # pyrefly: ignore[unsupported-operation]
+      stop_time = valid_time + self._tolerance[1]  # pyrefly: ignore[unsupported-operation]
 
     # Get subset of files since filtering can take a very long time.
     # Also create additional filters to exactly get required times.
     if stop_time is None:
-      file_start_time = start_time - self._file_tolerance
-      file_stop_time = start_time + self._file_tolerance
+      file_start_time = start_time - self._file_tolerance  # pyrefly: ignore[unsupported-operation]
+      file_stop_time = start_time + self._file_tolerance  # pyrefly: ignore[unsupported-operation]
 
       ts = pd.Timestamp(start_time)
       filters = [(self._time_dim, '=', ts)]
 
     else:
-      file_start_time = start_time - self._file_tolerance
+      file_start_time = start_time - self._file_tolerance  # pyrefly: ignore[unsupported-operation]
       file_stop_time = stop_time + self._file_tolerance
 
       ts_start = pd.Timestamp(start_time)
@@ -256,7 +256,7 @@ class SparseObservationsFromParquet(base.DataLoader):
             (self._time_dim, '<', ts_stop),
         ]
     files = get_parquet_files_subset(
-        self._path, file_start_time, file_stop_time, self._partitioned_by
+        self._path, file_start_time, file_stop_time, self._partitioned_by  # pyrefly: ignore[bad-argument-type]
     )
 
     def _read_single_file(fn):
@@ -278,7 +278,7 @@ class SparseObservationsFromParquet(base.DataLoader):
       assert (
           lead_time_slice is None
       ), 'Removing duplicates not compatible with slice lead_time.'
-      df = self._pick_closest_from_duplicates(df, valid_time)
+      df = self._pick_closest_from_duplicates(df, valid_time)  # pyrefly: ignore[bad-argument-type]
 
     if self._rename_variables is not None:
       df = df.rename(columns=self._rename_variables)
@@ -287,7 +287,7 @@ class SparseObservationsFromParquet(base.DataLoader):
 
     return df.loc[
         :,
-        self._variables + self._coordinate_variables,  # pytype: disable=unsupported-operands
+        self._variables + self._coordinate_variables,
     ]
 
   def _load_chunk_from_source(

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -172,7 +172,7 @@ class TimeChunks(Iterable[TimeChunk]):
 
   @property
   def lead_time_chunk_size(self) -> int:
-    return self._lead_time_chunk_size  # pytype: disable=bad-return-type
+    return self._lead_time_chunk_size  # pyrefly: ignore[bad-return]
 
   def __iter__(self) -> Iterator[TimeChunk]:
     return itertools.product(self._init_time_chunks, self._lead_time_chunks)
@@ -197,6 +197,6 @@ class TimeChunks(Iterable[TimeChunk]):
     """
     for index, (init_chunk, lead_chunk) in enumerate(self):
       init_index = self._init_time_chunk_size * (index // self._num_lead_chunks)
-      lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)
+      lead_index = self._lead_time_chunk_size * (index % self._num_lead_chunks)  # pyrefly: ignore[unsupported-operation]
       offsets = TimeChunkOffsets(init_time=init_index, lead_time=lead_index)
       yield offsets, (init_chunk, lead_chunk)

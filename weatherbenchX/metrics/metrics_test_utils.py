@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ class SampleMultivariateMetric(metrics_base.Metric):
   out_name: str
 
   @property
-  def statistics(self) -> Mapping[Hashable, metrics_base.Statistic]:
+  def statistics(self) -> Mapping[Hashable, metrics_base.Statistic]:  # pyrefly: ignore[bad-override]
     return {
         'SampleMultivariateStatistic': SampleMultivariateStatistic(
             var1=self.var1, var2=self.var2, out_name=self.out_name

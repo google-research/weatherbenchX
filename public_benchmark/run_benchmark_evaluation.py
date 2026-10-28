@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -132,33 +132,40 @@ REGIONS = {
 
 
 def main(argv: Sequence[str]) -> None:
-  configs = importlib.import_module(CONFIG.value)
+  configs = importlib.import_module(CONFIG.value)  # pyrefly: ignore[bad-argument-type]
 
   ##############################################################################
   # 1. Get data loaders
   ##############################################################################
   is_probabilistic = False
   prediction_str_name = f'{PREDICTION.value}_{RESOLUTION.value}_{YEAR.value}'
+  deterministic_prediction_configs = getattr(
+      configs, 'deterministic_prediction_configs', {}
+  )
+  probabilistic_prediction_configs = getattr(
+      configs, 'probabilistic_prediction_configs', {}
+  )
+  target_configs = getattr(configs, 'target_configs', {})
+  climatology_configs = getattr(configs, 'climatology_configs', {})
+
   if PREDICTION.value == 'persistence':
-    prediction_config = configs.target_configs[f'era5_{RESOLUTION.value}']
+    prediction_config = target_configs[f'era5_{RESOLUTION.value}']
   elif PREDICTION.value == 'probabilistic_climatology':
-    prediction_config = configs.target_configs[f'era5_{RESOLUTION.value}']
+    prediction_config = target_configs[f'era5_{RESOLUTION.value}']
     is_probabilistic = True
   elif PREDICTION.value == 'climatology':
-    prediction_config = configs.climatology_configs[
+    prediction_config = climatology_configs[
         f'era5_{RESOLUTION.value}_{YEAR.value}'
     ]
-  elif prediction_str_name in configs.deterministic_prediction_configs:
-    prediction_config = configs.deterministic_prediction_configs[
-        prediction_str_name
-    ]
-  else:
-    prediction_config = configs.probabilistic_prediction_configs[
-        prediction_str_name
-    ]
+  elif prediction_str_name in deterministic_prediction_configs:
+    prediction_config = deterministic_prediction_configs[prediction_str_name]
+  elif prediction_str_name in probabilistic_prediction_configs:
+    prediction_config = probabilistic_prediction_configs[prediction_str_name]
     is_probabilistic = True
-  target_config = configs.target_configs[f'{TARGET.value}_{RESOLUTION.value}']
-  climatology_config = configs.climatology_configs[
+  else:
+    raise ValueError(f'Prediction {prediction_str_name} not found in configs.')
+  target_config = target_configs[f'{TARGET.value}_{RESOLUTION.value}']
+  climatology_config = climatology_configs[
       f'era5_{RESOLUTION.value}_{YEAR.value}'
   ]
   variables = np.intersect1d(
@@ -184,10 +191,10 @@ def main(argv: Sequence[str]) -> None:
   elif PREDICTION.value == 'probabilistic_climatology':
     prediction_loader = xarray_loaders.ProbabilisticClimatologyFromXarray
     prediction_loader_kwargs['start_year'] = (
-        1990  #   pytype: disable=unsupported-operands
+        1990
     )
     prediction_loader_kwargs['end_year'] = (
-        2019  #   pytype: disable=unsupported-operands
+        2019
     )
   else:
     prediction_loader = xarray_loaders.PredictionsFromXarray
@@ -228,7 +235,7 @@ def main(argv: Sequence[str]) -> None:
       # Last day is missing for baguan
       init_time_stop = f'{YEAR.value}-12-30T12'
     else:
-      init_time_stop = f'{int(YEAR.value) + 1}-01-01T00'
+      init_time_stop = f'{int(YEAR.value) + 1}-01-01T00'  # pyrefly: ignore[bad-argument-type]
     init_time_str = str(YEAR.value)
   else:
     init_time_start = INIT_TIME_START.value
@@ -267,7 +274,7 @@ def main(argv: Sequence[str]) -> None:
       loader_copy = copy.copy(prediction_loader)
       loader_copy.maybe_prepare_dataset()
       assert loader_copy._ds is not None  # pylint: disable=protected-access
-      lead_times = loader_copy._ds.lead_time.values # pylint: disable=protected-access
+      lead_times = loader_copy._ds.lead_time.values  # pylint: disable=protected-access
   else:
     lead_time_start = LEAD_TIME_START.value
     lead_time_stop = LEAD_TIME_STOP.value
@@ -316,7 +323,7 @@ def main(argv: Sequence[str]) -> None:
     v_names.append('10m_v_component_of_wind')
     vector_names.append('10m_wind')
   if u_names:
-    deterministic_metrics['vector_rmse'] = deterministic.WindVectorRMSE(
+    deterministic_metrics['vector_rmse'] = deterministic.WindVectorRMSE(  # pyrefly: ignore[bad-assignment]
         u_names, v_names, vector_names
     )
 
@@ -325,14 +332,15 @@ def main(argv: Sequence[str]) -> None:
         'total_precipitation_6hr': 0.1,
         'total_precipitation_24hr': 0.25,
     }
-    deterministic_metrics['seeps'] = categorical.SEEPS(
+    deterministic_metrics['seeps'] = categorical.SEEPS(  # pyrefly: ignore[bad-assignment]
         variables=precip_variables,
         climatology=climatology,
         dry_threshold_mm=[seeps_dry_thresholds[v] for v in precip_variables],
     )
 
   probabilistic_metrics = {
-      'crps': probabilistic.CRPSEnsemble(),
+      'crps': probabilistic.CRPSEnsemble(use_sort=True),
+      'spread_skill': probabilistic.SpreadSkillRatio(),
       'unbiased_spread_skill': probabilistic.UnbiasedSpreadSkillRatio(),
       'unbiased_mean_rmse': probabilistic.UnbiasedEnsembleMeanRMSE(),
       'mean_rmse': wrappers.WrappedMetric(
@@ -356,9 +364,9 @@ def main(argv: Sequence[str]) -> None:
   ##############################################################################
   # Load land-sea mask from ERA5
   land_sea_mask = xr.open_zarr(
-      configs.target_configs[f'era5_{RESOLUTION.value}']['path']
+      target_configs[f'era5_{RESOLUTION.value}']['path']
   )['land_sea_mask'].compute()
-  bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]
+  bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]  # pyrefly: ignore[bad-argument-type]
 
   if TEMPORAL.value:
     reduce_dims = ['latitude', 'longitude']
@@ -382,7 +390,7 @@ def main(argv: Sequence[str]) -> None:
   if TEMPORAL.value:
     filename += '_temporal'
   filename += '.nc'
-  out_path = os.path.join(OUTPUT_DIR.value, filename)
+  out_path = os.path.join(OUTPUT_DIR.value, filename)  # pyrefly: ignore[no-matching-overload]
   print(f'Save path: {out_path}')
 
   with beam.Pipeline(runner=RUNNER.value, argv=argv) as root:

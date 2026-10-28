@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -226,6 +226,184 @@ class MetricsTest(parameterized.TestCase):
         [0.0, 0.0, 0.0, 0.0, 0.0],
     ])
     np.testing.assert_allclose(out, correct_result)
+
+    # Test SPF and STF with NaNs, n=1
+    prediction1 = xr.DataArray(
+        [[1, 0, np.nan, 1]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    ).to_dataset()
+    target1 = xr.DataArray(
+        [[0, np.nan, 1, 0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    ).to_dataset()
+    metrics1 = {
+        'fss': spatial.FSS(neighborhood_size_in_pixels=1),
+    }
+    stats1 = metrics_base.compute_unique_statistics_for_all_metrics(
+        metrics1, prediction1, target1
+    )
+    spf_stat = metrics1['fss'].statistics['SquaredPredictionFraction']
+    stf_stat = metrics1['fss'].statistics['SquaredTargetFraction']
+
+    # SPF: no coordinate masks present, so no cross-masking is done
+    # result is identical to original prediction^2
+    np.testing.assert_allclose(
+        stats1[spf_stat.unique_name]['precipitation'].values,
+        [[1.0, 0.0, np.nan, 1.0]],
+    )
+    # STF: no coordinate masks present, so no cross-masking is done
+    # result is identical to original target^2
+    np.testing.assert_allclose(
+        stats1[stf_stat.unique_name]['precipitation'].values,
+        [[0.0, np.nan, 1.0, 0.0]],
+    )
+
+  def test_get_fss_mask(self):
+    pred = xr.DataArray([[1, 2], [3, 4]], dims=['latitude', 'longitude'])
+    pred.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, False], [True, True]],
+    )
+
+    target = xr.DataArray([[5, 6], [7, 8]], dims=['latitude', 'longitude'])
+    target.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, True], [False, True]],
+    )
+
+    # Scenario 1: combine_mask=True and both present
+    mask1 = spatial.get_fss_mask(
+        pred, target, neighborhood_size=1, combine_mask=True
+    )
+    np.testing.assert_equal(mask1.values, [[True, False], [False, True]])
+
+    # Scenario 2: combine_mask=False
+    mask2 = spatial.get_fss_mask(
+        pred, target, neighborhood_size=1, combine_mask=False
+    )
+    np.testing.assert_equal(mask2.values, [[True, True], [False, True]])
+
+    # Scenario 2 fallback: prefer target mask but if only pred, use pred.
+    target_no_mask = target.drop_vars('mask')
+    mask3 = spatial.get_fss_mask(
+        pred, target_no_mask, neighborhood_size=1, combine_mask=False
+    )
+    np.testing.assert_equal(mask3.values, [[True, False], [True, True]])
+
+    # Scenario 3: no masks present -> returns None
+    pred_no_mask = pred.drop_vars('mask')
+    mask4 = spatial.get_fss_mask(
+        pred_no_mask, target_no_mask, neighborhood_size=1, combine_mask=False
+    )
+    self.assertIsNone(mask4)
+
+    # Scenario 4: neighborhood_size=3, all True mask
+    pred_5x5 = xr.DataArray(np.ones((5, 5)), dims=['latitude', 'longitude'])
+    pred_5x5.coords['mask'] = (
+        ('latitude', 'longitude'),
+        np.ones((5, 5), dtype=bool),
+    )
+    target_5x5 = xr.DataArray(np.ones((5, 5)), dims=['latitude', 'longitude'])
+    target_5x5.coords['mask'] = (
+        ('latitude', 'longitude'),
+        np.ones((5, 5), dtype=bool),
+    )
+
+    mask5 = spatial.get_fss_mask(
+        pred_5x5, target_5x5, neighborhood_size=3, combine_mask=False
+    )
+    expected_mask5 = np.zeros((5, 5), dtype=bool)
+    expected_mask5[1:-1, 1:-1] = True
+    np.testing.assert_equal(mask5.values, expected_mask5)
+
+  def test_fss_metrics_mask_propagation(self):
+    pred = xr.DataArray(
+        [[1.0, 2.0], [3.0, 4.0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    )
+    pred.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, False], [True, True]],
+    )
+
+    target = xr.DataArray(
+        [[5.0, 6.0], [7.0, 8.0]],
+        dims=['latitude', 'longitude'],
+        name='precipitation',
+    )
+    target.coords['mask'] = (
+        ('latitude', 'longitude'),
+        [[True, True], [False, True]],
+    )
+
+    # Test with combine_mask=True
+    metric_true = spatial.SquaredPredictionFraction(
+        neighborhood_size_in_pixels=1, combine_mask=True
+    )
+    stats_true = metric_true._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_true.coords)
+    np.testing.assert_equal(
+        stats_true.coords['mask'].values,
+        [[True, False], [False, True]],
+    )
+
+    # Test with combine_mask=False
+    metric_false = spatial.SquaredPredictionFraction(
+        neighborhood_size_in_pixels=1, combine_mask=False
+    )
+    stats_false = metric_false._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_false.coords)
+    np.testing.assert_equal(
+        stats_false.coords['mask'].values,
+        [[True, True], [False, True]],
+    )
+
+    # Test STF with combine_mask=True
+    metric_true_stf = spatial.SquaredTargetFraction(
+        neighborhood_size_in_pixels=1, combine_mask=True
+    )
+    stats_true_stf = metric_true_stf._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_true_stf.coords)
+    np.testing.assert_equal(
+        stats_true_stf.coords['mask'].values,
+        [[True, False], [False, True]],
+    )
+
+    # Test STF with combine_mask=False
+    metric_false_stf = spatial.SquaredTargetFraction(
+        neighborhood_size_in_pixels=1, combine_mask=False
+    )
+    stats_false_stf = metric_false_stf._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_false_stf.coords)
+    np.testing.assert_equal(
+        stats_false_stf.coords['mask'].values,
+        [[True, True], [False, True]],
+    )
+
+    # Test SFE with combine_mask=True
+    metric_true_sfe = spatial.SquaredFractionsError(
+        neighborhood_size_in_pixels=1, combine_mask=True
+    )
+    stats_true_sfe = metric_true_sfe._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_true_sfe.coords)
+    np.testing.assert_equal(
+        stats_true_sfe.coords['mask'].values,
+        [[True, False], [False, True]],
+    )
+
+    # Test SFE with combine_mask=False
+    metric_false_sfe = spatial.SquaredFractionsError(
+        neighborhood_size_in_pixels=1, combine_mask=False
+    )
+    stats_false_sfe = metric_false_sfe._compute_per_variable(pred, target)
+    self.assertIn('mask', stats_false_sfe.coords)
+    np.testing.assert_equal(
+        stats_false_sfe.coords['mask'].values,
+        [[True, True], [False, True]],
+    )
 
   def test_wrapped_metric(self):
     target = (
@@ -572,6 +750,331 @@ class MetricsTest(parameterized.TestCase):
           atol=5 * stderr,
           check_dim_order=False,
       )
+
+  def test_construct_tiles_latitude_removal(self):
+    """Check if the correct rows are removed when constructing tiles."""
+    ds = xr.Dataset(
+        {'x': (['latitude', 'longitude'], np.ones((5, 5)))},
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+    )
+    # Window size 1: reaches 0 lower, 0 upper. No rows removed.
+    out1 = wrappers.construct_tiles(ds, window_size=1)
+    np.testing.assert_array_equal(out1['latitude'].values, [0, 1, 2, 3, 4])
+    self.assertFalse(np.isnan(out1['x'].values).any())
+
+    # Window size 2: reaches 1 lower, 0 upper. Row 0 removed.
+    out2 = wrappers.construct_tiles(ds, window_size=2)
+    np.testing.assert_array_equal(out2['latitude'].values, [1, 2, 3, 4])
+    self.assertFalse(np.isnan(out2['x'].values).any())
+
+    # Window size 3: reaches 1 lower, 1 upper. Rows 0 and 4 removed.
+    out3 = wrappers.construct_tiles(ds, window_size=3)
+    np.testing.assert_array_equal(out3['latitude'].values, [1, 2, 3])
+    self.assertFalse(np.isnan(out3['x'].values).any())
+
+  def test_construct_tiles_wrap_longitude(self):
+    """Check that wrap_longitude=False clips longitude edges."""
+    ds = xr.Dataset(
+        {'x': (['latitude', 'longitude'], np.ones((5, 5)))},
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+    )
+    # With wrap_longitude=True, all longitudes are kept.
+    out_wrap = wrappers.construct_tiles(ds, window_size=3, wrap_longitude=True)
+    np.testing.assert_array_equal(
+        out_wrap['longitude'].values, [0, 1, 2, 3, 4]
+    )
+
+    # With wrap_longitude=False, edge longitudes are also removed.
+    out_no_wrap = wrappers.construct_tiles(
+        ds, window_size=3, wrap_longitude=False
+    )
+    np.testing.assert_array_equal(
+        out_no_wrap['longitude'].values, [1, 2, 3]
+    )
+    # Latitude clipping should be the same in both cases.
+    np.testing.assert_array_equal(
+        out_no_wrap['latitude'].values, out_wrap['latitude'].values
+    )
+
+  def test_tile_wrapper(self):
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['latitude', 'longitude'],
+        coords={'latitude': np.arange(5), 'longitude': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both', window_size=3, wrap_longitude=False
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window',
+    )
+
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'latitude': 3, 'longitude': 3})
+
+  def test_construct_tiles_custom_dims(self):
+    """Check construct_tiles with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+    )
+    out = wrappers.construct_tiles(
+        da, window_size=3, lat_dim='lat', lon_dim='lon', wrap_longitude=False
+    )
+    np.testing.assert_array_equal(out['lat'].values, [1, 2, 3])
+    np.testing.assert_array_equal(out['lon'].values, [1, 2, 3])
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  def test_tile_wrapper_custom_dims(self):
+    """Check Tile wrapper with non-default spatial dimension names."""
+    da = xr.DataArray(
+        np.ones((5, 5)),
+        dims=['lat', 'lon'],
+        coords={'lat': np.arange(5), 'lon': np.arange(5)},
+        name='test_var',
+    )
+    tile = wrappers.Tile(
+        which='both',
+        window_size=3,
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    self.assertEqual(
+        tile.unique_name_suffix,
+        'tiled_window_size_3_wrap_False_dim_window_lat_lat_lon_lon',
+    )
+    out = tile.transform_fn(da)
+    self.assertEqual(out.sizes, {'window': 9, 'lat': 3, 'lon': 3})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='tiled_energy_score',
+          metric_cls=probabilistic.TiledEnergyScore,
+      ),
+      dict(
+          testcase_name='tiled_variogram_score',
+          metric_cls=probabilistic.TiledVariogramScore,
+      ),
+  )
+  def test_tiled_metrics_custom_dims(self, metric_cls):
+    """Check tiled metrics with non-default spatial dimension names."""
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=43,
+    ).rename({'latitude': 'lat', 'longitude': 'lon'})
+
+    metric = metric_cls(
+        window_size=3,
+        ensemble_dim='realization',
+        wrap_longitude=False,
+        lat_dim='lat',
+        lon_dim='lon',
+    )
+    results = compute_all_metrics(
+        {'score': metric}, predictions, targets, reduce_dims=['time']
+    )
+    self.assertIn('score.2m_temperature', results)
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lat'],
+        len(predictions['lat']) - 2,
+    )
+    self.assertEqual(
+        results['score.2m_temperature'].sizes['lon'],
+        len(predictions['lon']) - 2,
+    )
+    self.assertFalse(np.isnan(results['score.2m_temperature'].values).any())
+
+  def test_energy_score(self):
+    ensemble_size = 4
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=42,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=ensemble_size,
+        seed=43,
+    )
+    metrics = {
+        'es': probabilistic.EnergyScore(
+            dim='longitude', ensemble_dim='realization', fair=True
+        )
+    }
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time', 'latitude']
+    )
+    for v in ['2m_temperature', 'geopotential']:
+      self.assertIn(f'es.{v}', results)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([2.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[2.0, 4.0], [2.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=0.0,
+          expected_spread=0.0,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Targets: [0.0]. Predictions: [[3.0], [5.0]] with ensemble size M=2.
+          # Skill: mean(|3 - 0|, |5 - 0|) = 4.0.
+          # Spread (fair=True): 2 * |3 - 5| / (2 * 1) = 2.0.
+          # Total EnergyScore: 4.0 - 0.5 * 2.0 = 3.0.
+          targets={'x': xr.DataArray(np.array([0.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[3.0], [5.0]]), dims=['sample', 'dim']
+              )
+          },
+          expected_skill=4.0,
+          expected_spread=2.0,
+          expected_score=3.0,
+      ),
+  )
+  def test_energy_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      expected_skill: float,
+      expected_spread: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of EnergyScore skill and spread."""
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+    skill = skill_stat.compute(predictions, targets)['x']
+    spread = spread_stat.compute(predictions, targets)['x']
+    es = skill - 0.5 * spread
+    self.assertAlmostEqual(float(skill.values), expected_skill)
+    self.assertAlmostEqual(float(spread.values), expected_spread)
+    self.assertAlmostEqual(float(es.values), expected_score)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='perfect_prediction',
+          targets={'x': xr.DataArray(np.array([1.0, 4.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[1.0, 4.0], [1.0, 4.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=0.5,
+          expected_score=0.0,
+      ),
+      dict(
+          testcase_name='known_analytical_values',
+          # Known analytical values with p=1.0:
+          # Targets: [0.0, 1.0]. |y_0 - y_1| = 1.0.
+          # Predictions: M=2, x^(1)=[0.0, 4.0], x^(2)=[0.0, 9.0].
+          # Prediction mean diff: (4.0 + 9.0) / 2 = 6.5.
+          # Targets term: [[0, 1], [1, 0]].
+          # Predictions term: [[0, 6.5], [6.5, 0]].
+          # Difference: [[0, -5.5], [-5.5, 0]].
+          # Sum of squared diffs: (-5.5)^2 + (-5.5)^2 = 30.25 + 30.25 = 60.5.
+          targets={'x': xr.DataArray(np.array([0.0, 1.0]), dims=['dim'])},
+          predictions={
+              'x': xr.DataArray(
+                  np.array([[0.0, 4.0], [0.0, 9.0]]), dims=['sample', 'dim']
+              )
+          },
+          p=1.0,
+          expected_score=60.5,
+      ),
+  )
+  def test_variogram_score_numerical_values(
+      self,
+      targets,
+      predictions,
+      p: float,
+      expected_score: float,
+  ):
+    """Verifies numerical correctness of VariogramScore."""
+    vs = probabilistic.VariogramScore(dim='dim', ensemble_dim='sample', p=p)
+    res = vs.compute(predictions, targets)['x']
+    self.assertAlmostEqual(float(res.values), expected_score)
+
+  def test_energy_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[3.0], [5.0]])
+    targets = jnp.array([0.0])
+
+    skill_stat = probabilistic.EnergyScoreSkill(
+        dim='dim', ensemble_dim='sample'
+    )
+    spread_stat = probabilistic.EnergyScoreSpread(
+        dim='dim', ensemble_dim='sample', fair=True
+    )
+
+    @jax.jit
+    def compute_skill(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return skill_stat._compute_per_variable(p_da, t_da).data
+
+    @jax.jit
+    def compute_spread(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return spread_stat._compute_per_variable(p_da, t_da).data
+
+    res_skill = compute_skill(predictions, targets)
+    res_spread = compute_spread(predictions, targets)
+    self.assertAlmostEqual(float(res_skill), 4.0)
+    self.assertAlmostEqual(float(res_spread), 2.0)
+
+  def test_variogram_score_jit(self):
+    try:
+      import jax  # pylint: disable=g-import-not-at-top
+      import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      return
+
+    predictions = jnp.array([[0.0, 4.0], [0.0, 9.0]])
+    targets = jnp.array([0.0, 1.0])
+
+    vs_stat = probabilistic.VariogramScore(
+        dim='dim', ensemble_dim='sample', p=1.0
+    )
+
+    @jax.jit
+    def compute_vs(p, t):
+      p_da = xr.DataArray(p, dims=['sample', 'dim'])
+      t_da = xr.DataArray(t, dims=['dim'])
+      return vs_stat._compute_per_variable(p_da, t_da).data
+
+    res_vs = compute_vs(predictions, targets)
+    self.assertAlmostEqual(float(res_vs), 60.5)
 
   def test_direct_rps(self):
     # CDFs
@@ -1202,6 +1705,133 @@ class MetricsTest(parameterized.TestCase):
     values = values.copy(data=jax.numpy.array(values.data))
     result = probabilistic._select_optimal_thresholds(values, thresholds)
     xr.testing.assert_allclose(result.as_numpy(), expected_result)
+
+  def _check_tiled_nan_propagation(
+      self, metric: metrics_base.PerVariableMetric, metric_name: str
+  ) -> None:
+    targets = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        seed=0,
+    )
+    predictions = test_utils.mock_prediction_data(
+        time_start='2020-01-01T00',
+        time_stop='2020-01-03T00',
+        random=True,
+        ensemble_size=4,
+        seed=1,
+    )
+
+    # Introduce a NaN into the predictions.
+    predictions = predictions.copy(deep=True)
+    nan_lat = predictions.latitude[3].values
+    nan_lon = predictions.longitude[3].values
+    predictions['2m_temperature'].loc[
+        {'realization': 0, 'latitude': nan_lat, 'longitude': nan_lon}
+    ] = np.nan
+
+    metrics = {
+        metric_name: metric
+    }
+
+    results = compute_all_metrics(
+        metrics, predictions, targets, reduce_dims=['time']
+    )
+    self.assertLen(
+        results['latitude'], len(predictions['latitude']) - 2
+    )
+    is_nan = np.isnan(results[f'{metric_name}.2m_temperature'])
+
+    expected_nan = xr.full_like(is_nan, False, dtype=bool)
+
+    # Any tiled patch that overlaps (3, 3) will become NaN. With window_size=3,
+    # these are indices [2, 3, 4].
+    lats_affected = predictions.latitude[2:5].values
+    lons_affected = predictions.longitude[2:5].values
+    expected_nan.loc[
+        {'latitude': lats_affected, 'longitude': lons_affected}
+    ] = True
+
+    xr.testing.assert_equal(is_nan, expected_nan)
+
+  def test_tiled_variogram_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledVariogramScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_vs',
+    )
+
+  def test_tiled_energy_score_nan_propagation(self):
+    self._check_tiled_nan_propagation(
+        probabilistic.TiledEnergyScore(
+            window_size=3, ensemble_dim='realization'
+        ),
+        'tiled_es',
+    )
+
+  def test_quantile_score(self):
+    target = xr.DataArray(
+        [1.0, 0.0, 3.0], dims='x', coords={'mask': ('x', [1, 1, 0])}
+    )
+    pred = xr.DataArray([0.0, 1.0, 3.0], dims='x')
+    pred = xr.concat([pred, pred], dim='quantile').assign_coords(
+        quantile=[0.9, 0.1]
+    )
+
+    # Under-prediction costs tau, over-prediction costs (1 - tau), times 2,
+    # with tau taken from the prediction's quantile coordinate.
+    res = probabilistic.QuantileScore()._compute_per_variable(pred, target)
+    np.testing.assert_allclose(res['quantile'].values, [0.9, 0.1])
+    np.testing.assert_allclose(
+        res.transpose('quantile', 'x').values,
+        [[1.8, 0.2, 0.0], [0.2, 1.8, 0.0]],
+    )
+    np.testing.assert_array_equal(res.mask.values, [1, 1, 0])
+
+  def test_quantile_score_skips_variables_without_quantile_dim(self):
+    x = xr.DataArray([0.0], dims='x')
+    q = x.expand_dims(quantile=[0.5])
+    res = probabilistic.QuantileScore().compute(
+        {'a': x, 'b': q}, {'a': x, 'b': x}
+    )
+    self.assertEqual(list(res), ['b'])
+
+  def test_quantile_score_median_equals_absolute_error(self):
+    target = test_utils.mock_target_data(random=True, seed=0)['2m_temperature']
+    pred = test_utils.mock_target_data(random=True, seed=1)['2m_temperature']
+    xr.testing.assert_allclose(
+        probabilistic.QuantileScore()
+        ._compute_per_variable(pred.expand_dims(quantile=[0.5]), target)
+        .squeeze('quantile', drop=True),
+        deterministic.AbsoluteError()._compute_per_variable(pred, target),
+    )
+
+  def test_quantile_score_invalid_inputs(self):
+    x = xr.DataArray([0.0], dims='x')
+    qs = probabilistic.QuantileScore()
+    for levels in ([0.0], [1.0], [0.5, np.nan]):
+      with self.assertRaises(ValueError):
+        qs._compute_per_variable(x.expand_dims(quantile=levels), x)
+    with self.assertRaisesRegex(ValueError, 'coordinate'):
+      qs._compute_per_variable(x.expand_dims('quantile'), x)
+    with self.assertRaises(ValueError):
+      q = x.expand_dims(quantile=[0.5])
+      qs._compute_per_variable(q, q)
+
+  def test_ensemble_quantile_score(self):
+    ens_pred = xr.Dataset(
+        {'t': (('realization', 'x'), [[0.0], [1.0], [2.0], [3.0]])}
+    )
+    target = xr.Dataset({'t': ('x', [0.0])})
+    eqs = probabilistic.EnsembleQuantileScore(
+        quantiles=[0.25, 0.75], ensemble_dim='realization'
+    )
+    # Linearly interpolated ensemble quantiles are 0.75 and 2.25, so
+    # 2 * 0.75 * 0.75 = 1.125 and 2 * 2.25 * 0.25 = 1.125.
+    res = eqs.compute(ens_pred, target)['t']
+    np.testing.assert_allclose(res.values, [[1.125, 1.125]])
 
 
 if __name__ == '__main__':

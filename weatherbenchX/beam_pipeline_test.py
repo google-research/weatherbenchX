@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
+import os
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import apache_beam as beam
@@ -20,6 +24,7 @@ import numpy as np
 import pandas as pd
 from weatherbenchX import aggregation
 from weatherbenchX import beam_pipeline
+from weatherbenchX import beam_utils
 from weatherbenchX import binning
 from weatherbenchX import interpolations
 from weatherbenchX import test_utils
@@ -166,6 +171,120 @@ class BeamPipelineTest(parameterized.TestCase):
             aggregation_state_results.sum_weights,
         ),
     )
+
+  def test_pipeline_multiple_aggregators(self):
+    """Test pipeline with multiple aggregators configured."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+
+    # We will test two aggregators reducing over different sets of dimensions.
+    aggregator_init_time_latitude_longitude = aggregation.Aggregator(
+        reduce_dims=['init_time', 'latitude', 'longitude']
+    )
+    aggregator_init_time = aggregation.Aggregator(reduce_dims=['init_time'])
+
+    aggregators = {
+        'init_time,latitude,longitude': aggregator_init_time_latitude_longitude,
+        'init_time': aggregator_init_time,
+    }
+
+    # Compute expected results directly
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+
+    expected_metrics_init_time_latitude_longitude = (
+        aggregator_init_time_latitude_longitude.aggregate_statistics(statistics)
+        .metric_values(all_metrics)
+        .compute()
+    )
+    expected_metrics_init_time = (
+        aggregator_init_time.aggregate_statistics(statistics)
+        .metric_values(all_metrics)
+        .compute()
+    )
+
+    # Define output paths as a single string (auto-format)
+    metrics_path = self.create_tempfile('metrics.nc').full_path
+
+    # We will also test dict out_path mapping
+    aggregation_state_paths = {
+        'init_time,latitude,longitude': self.create_tempfile(
+            'agg_state_init_time,latitude,longitude.nc'
+        ).full_path,
+        'init_time': self.create_tempfile('agg_state_init_time.nc').full_path,
+    }
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregators,
+          out_path=metrics_path,
+          aggregation_state_out_path=aggregation_state_paths,
+      )
+
+    # Verify auto-formatted metrics output paths
+    base, ext = os.path.splitext(metrics_path)
+    metrics_init_time_latitude_longitude_path = (
+        f'{base}_init_time,latitude,longitude{ext}'
+    )
+    metrics_init_time_path = f'{base}_init_time{ext}'
+
+    metrics_init_time_latitude_longitude_results = xr.open_dataset(
+        metrics_init_time_latitude_longitude_path
+    ).compute()
+    metrics_init_time_results = xr.open_dataset(
+        metrics_init_time_path
+    ).compute()
+
+    xr.testing.assert_allclose(
+        expected_metrics_init_time_latitude_longitude,
+        metrics_init_time_latitude_longitude_results,
+        atol=1e-5,
+    )
+    xr.testing.assert_allclose(
+        expected_metrics_init_time, metrics_init_time_results, atol=1e-5
+    )
+
+    # Verify explicit mapping aggregation state output paths
+    for name, path in aggregation_state_paths.items():
+      agg_state_results = aggregation.AggregationState.from_dataset(
+          xr.open_dataset(path).compute()
+      )
+      expected_agg_state = aggregators[name].aggregate_statistics(statistics)
+      xarray_tree.map_structure(
+          lambda x, y: xr.testing.assert_allclose(x, y, atol=1e-5),
+          (
+              expected_agg_state.sum_weighted_statistics,
+              expected_agg_state.sum_weights,
+          ),
+          (
+              agg_state_results.sum_weighted_statistics,
+              agg_state_results.sum_weights,
+          ),
+      )
 
   def test_unaggregated_pipeline(self):
     """Test equivalence of unaggregated pipeline results."""
@@ -585,8 +704,461 @@ class BeamPipelineTest(parameterized.TestCase):
           )
       )
 
-  # TODO(matthjw): Add a test where statistics are not defined for all
-  # variables.
+  def test_define_unreduced_pipeline(self):
+    """Test define_pipeline outputs valid unaggregated AggregationState Zarr store."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregator = aggregation.Aggregator(reduce_dims=[])
+
+    # Compute expected aggregation state directly
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_agg_state = aggregator.aggregate_statistics(statistics)
+
+    results_path = self.create_tempdir('unaggregated_agg_state.zarr').full_path
+    custom_attrs = {'custom_attr': 'test_val'}
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregator,
+          aggregation_state_out_path=results_path,
+          attrs=custom_attrs,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertEqual(dict(pipeline_ds.attrs), custom_attrs)
+    pipeline_agg_state = aggregation.AggregationState.from_dataset(pipeline_ds)
+
+    def _transpose_to_leading_time_dims(agg_state):
+      def _tr(da):
+        dim_order = [d for d in ('init_time', 'lead_time') if d in da.dims] + [
+            d for d in da.dims if d not in ('init_time', 'lead_time')
+        ]
+        return da.transpose(*dim_order)
+
+      return aggregation.AggregationState(
+          sum_weighted_statistics=xarray_tree.map_structure(
+              _tr, agg_state.sum_weighted_statistics
+          ),
+          sum_weights=xarray_tree.map_structure(_tr, agg_state.sum_weights),
+      )
+
+    # The pipeline outputs the aggregation state with init_time and lead_time
+    # dimensions transposed to the first two dimensions. Apply the same to the
+    # directly computed aggregation state for comparison.
+    direct_agg_state = _transpose_to_leading_time_dims(direct_agg_state)
+
+    xarray_tree.map_structure(
+        lambda x, y: xr.testing.assert_allclose(
+            x, y.transpose(*x.dims), atol=1e-5
+        ),
+        (
+            direct_agg_state.sum_weighted_statistics,
+            direct_agg_state.sum_weights,
+        ),
+        (
+            pipeline_agg_state.sum_weighted_statistics,
+            pipeline_agg_state.sum_weights,
+        ),
+    )
+
+  @parameterized.parameters(
+      {
+          'reduce_dims': ['init_time', 'latitude', 'longitude'],
+          'lead_time_chunk_size': 1,
+      },
+      {'reduce_dims': ['init_time'], 'lead_time_chunk_size': 1},
+      {'reduce_dims': ['init_time'], 'lead_time_chunk_size': None},
+  )
+  def test_define_pipeline_chunk_metrics_by_lead_time(
+      self, reduce_dims, lead_time_chunk_size
+  ):
+    """Test define_pipeline with chunk_metrics_by_lead_time=True matches direct metrics."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=lead_time_chunk_size,
+    )
+
+    # We'll check that this additional coordinate of lead time is dropped.
+    # This happens because the template is constructed from a single lead time
+    # chunk, so it doesn't contain these coords, and attempting to write them
+    # to zarr would result in a ValueError if it isn't dropped.
+    preds_with_aux_coord = self.predictions.assign_coords(
+        lead_time_secs=(
+            'prediction_timedelta',
+            self.predictions.prediction_timedelta.dt.total_seconds().values,
+        )
+    )
+    pred_loader = xarray_loaders.PredictionsFromXarray(ds=preds_with_aux_coord)
+    target_loader = xarray_loaders.TargetsFromXarray(self.targets_path)
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregator = aggregation.Aggregator(reduce_dims=reduce_dims)
+
+    # Compute results directly:
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        pred_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_aggregation_state = aggregator.aggregate_statistics(statistics)
+    direct_metrics = direct_aggregation_state.metric_values(
+        all_metrics
+    ).compute()
+
+    results_path = self.create_tempdir('streamed_metrics.zarr').full_path
+    custom_attrs = {'custom_attr': 'test_val'}
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          pred_loader,
+          target_loader,
+          all_metrics,
+          aggregator,
+          out_path=results_path,
+          chunk_metrics_by_lead_time=True,
+          attrs=custom_attrs,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+    self.assertEqual(dict(pipeline_ds.attrs), custom_attrs)
+    self.assertNotIn('lead_time_secs', pipeline_ds.coords)
+    direct_metrics = direct_metrics.drop_vars('lead_time_secs')
+
+    for var in direct_metrics.data_vars:
+      xr.testing.assert_allclose(
+          direct_metrics[var],
+          pipeline_ds[var].transpose(*direct_metrics[var].dims),
+          atol=1e-5,
+      )
+
+  def test_define_pipeline_chunk_metrics_by_lead_time_multiple_aggregators(
+      self,
+  ):
+    """Test define_pipeline with chunk_metrics_by_lead_time=True and multiple aggregators."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    pred_loader = xarray_loaders.PredictionsFromXarray(self.predictions_path)
+    target_loader = xarray_loaders.TargetsFromXarray(self.targets_path)
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregators = {
+        'spatial': aggregation.Aggregator(reduce_dims=['init_time']),
+        'global': aggregation.Aggregator(
+            reduce_dims=['init_time', 'latitude', 'longitude']
+        ),
+    }
+
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        pred_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+
+    base_dir = self.create_tempdir('multi_agg_metrics').full_path
+    out_paths = {
+        'spatial': f'{base_dir}/spatial.zarr',
+        'global': f'{base_dir}/global.zarr',
+    }
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          pred_loader,
+          target_loader,
+          all_metrics,
+          aggregators,
+          out_path=out_paths,
+          chunk_metrics_by_lead_time=True,
+      )
+
+    for agg_name, agg in aggregators.items():
+      direct_metrics = (
+          agg.aggregate_statistics(statistics)
+          .metric_values(all_metrics)
+          .compute()
+      )
+      pipeline_ds = xr.open_zarr(out_paths[agg_name]).compute()
+      for var in direct_metrics.data_vars:
+        xr.testing.assert_allclose(
+            direct_metrics[var],
+            pipeline_ds[var].transpose(*direct_metrics[var].dims),
+            atol=1e-5,
+        )
+
+  def test_define_pipeline_unreduced_agg_state_with_spatial_coarsening(
+      self,
+  ):
+    """Test define_pipeline with spatial coarsening on Aggregator."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    target_spatial_resolution = 20.0
+    aggregator = aggregation.Aggregator(
+        reduce_dims=[], target_spatial_resolution=target_spatial_resolution
+    )
+
+    # Compute expected aggregation state directly (which applies spatial
+    # coarsening)
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+    direct_agg_state = aggregator.aggregate_statistics(statistics)
+    direct_ds = direct_agg_state.to_dataset()
+    # The pipeline outputs the aggregation state with init_time and lead_time
+    # dimensions transposed to the first two dimensions. Apply the same to the
+    # directly computed aggregation state for comparison.
+    direct_ds = direct_ds.transpose('init_time', 'lead_time', ...)
+
+    results_path = self.create_tempdir('coarsened_agg_state.zarr').full_path
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregator,
+          aggregation_state_out_path=results_path,
+      )
+
+    pipeline_ds = xr.open_zarr(results_path).compute()
+
+    # Verify spatial dimensions have been coarsened to target_spatial_resolution
+    # (native 10.0 deg -> 20.0 deg yields window size 2).
+    orig_lat_size = self.predictions.sizes['latitude']
+    orig_lon_size = self.predictions.sizes['longitude']
+    expected_lat_size = orig_lat_size // 2
+    expected_lon_size = orig_lon_size // 2
+    self.assertEqual(pipeline_ds.sizes['latitude'], expected_lat_size)
+    self.assertEqual(pipeline_ds.sizes['longitude'], expected_lon_size)
+
+    xr.testing.assert_allclose(pipeline_ds, direct_ds)
+
+  def test_define_unreduced_pipeline_multiple_aggregators(
+      self,
+  ):
+    """Test define_pipeline outputs valid unaggregated AggregationState Zarrs for multiple aggregators."""
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+
+    target_loader = xarray_loaders.TargetsFromXarray(
+        path=self.targets_path,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+    )
+
+    all_metrics = {'rmse': deterministic.RMSE(), 'mse': deterministic.MSE()}
+    aggregators = {
+        'unreduced': aggregation.Aggregator(reduce_dims=[]),
+        'coarsened': aggregation.Aggregator(
+            reduce_dims=[], target_spatial_resolution=20.0
+        ),
+    }
+
+    # Compute expected aggregation state directly for each aggregator.
+    statistics = metrics_base.compute_unique_statistics_for_all_metrics(
+        all_metrics,
+        prediction_loader.load_chunk(init_times, lead_times),
+        target_loader.load_chunk(init_times, lead_times),
+    )
+
+    base_dir = self.create_tempdir('multi_agg_unreduced').full_path
+    out_paths = {
+        'unreduced': f'{base_dir}/unreduced.zarr',
+        'coarsened': f'{base_dir}/coarsened.zarr',
+    }
+
+    with test_pipeline.TestPipeline() as root:
+      beam_pipeline.define_pipeline(
+          root,
+          times,
+          prediction_loader,
+          target_loader,
+          all_metrics,
+          aggregators,
+          aggregation_state_out_path=out_paths,
+      )
+
+    for agg_name, agg in aggregators.items():
+      direct_ds = (
+          agg.aggregate_statistics(statistics)
+          .to_dataset()
+          .transpose('init_time', 'lead_time', ...)
+      )
+      pipeline_ds = xr.open_zarr(out_paths[agg_name]).compute()
+      xr.testing.assert_allclose(pipeline_ds, direct_ds)
+
+  def test_atomic_write_dir_success(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'test_dir')
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      self.assertTrue(tmp_dir.startswith(os.path.dirname(target_dir)))
+      self.assertFalse(os.path.exists(target_dir))
+      with open(os.path.join(tmp_dir, 'sample.txt'), 'w') as f:
+        f.write('hello world')
+      self.assertTrue(os.path.exists(os.path.join(tmp_dir, 'sample.txt')))
+
+    self.assertTrue(os.path.exists(target_dir))
+    with open(os.path.join(target_dir, 'sample.txt'), 'r') as f:
+      self.assertEqual(f.read(), 'hello world')
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_failure_cleans_up(self):
+    """Tests that a mid-write failure cleans up temporary data and re-raises."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'fail_dir')
+    tmp_path_holder = []
+
+    def _write_and_fail():
+      with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+        tmp_path_holder.append(tmp_dir)
+        with open(os.path.join(tmp_dir, 'partial.txt'), 'w') as f:
+          f.write('partial data')
+        raise RuntimeError('Worker crashed')
+
+    self.assertRaises(RuntimeError, _write_and_fail)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+    self.assertFalse(os.path.exists(target_dir))
+
+  def test_atomic_write_dir_target_already_exists_abandons_temporary(self):
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    with open(os.path.join(target_dir, 'original.txt'), 'w') as f:
+      f.write('original content')
+
+    with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+      with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+        f.write('redundant worker output')
+
+    # The existing target directory should be preserved intact
+    self.assertTrue(os.path.exists(os.path.join(target_dir, 'original.txt')))
+    self.assertFalse(os.path.exists(os.path.join(target_dir, 'new.txt')))
+    self.assertFalse(os.path.exists(tmp_dir))
+
+  def test_atomic_write_dir_non_exists_error_reraises_even_if_target_exists(
+      self,
+  ):
+    """Confirms running out of space is re-raised even if target exists."""
+    target_dir = os.path.join(self.create_tempdir().full_path, 'existing_dir')
+    os.makedirs(target_dir)
+    tmp_path_holder = []
+
+    fs, _ = beam_utils.fsspec.core.url_to_fs(target_dir)
+
+    def _run_with_disk_full():
+      with mock.patch.object(
+          fs,
+          'mv',
+          side_effect=OSError(errno.ENOSPC, 'No space left on device'),
+      ):
+        with beam_utils.atomic_write_dir(target_dir) as tmp_dir:
+          tmp_path_holder.append(tmp_dir)
+          with open(os.path.join(tmp_dir, 'new.txt'), 'w') as f:
+            f.write('partial data')
+
+    with self.assertRaises(OSError) as cm:
+      _run_with_disk_full()
+    self.assertEqual(cm.exception.errno, errno.ENOSPC)
+    self.assertFalse(os.path.exists(tmp_path_holder[0]))
+
+  def test_write_dataset_zarr(self):
+    ds = xr.Dataset(
+        {'var1': (('x', 'y'), np.arange(6, dtype=np.float32).reshape(2, 3))},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    zarr_path = os.path.join(self.create_tempdir().full_path, 'output.zarr')
+    beam_pipeline.write_dataset(ds, zarr_path, zarr_chunks={'x': 1, 'y': 2})
+
+    self.assertTrue(os.path.exists(zarr_path))
+    loaded = xr.open_zarr(zarr_path).compute()
+    self.assertNotIn('some_attr', loaded.attrs)
+    xr.testing.assert_allclose(loaded, ds.drop_attrs())
+
+  @parameterized.parameters('nc', 'zarr')
+  def test_write_dataset_attrs(self, ext):
+    da = xr.DataArray(
+        np.arange(6, dtype=np.float32).reshape(2, 3),
+        dims=('x', 'y'),
+        attrs={'var_attr': 'should_be_dropped'},
+    )
+    ds = xr.Dataset(
+        {'var1': da},
+        coords={'x': [0, 1], 'y': [10, 20, 30]},
+        attrs={'some_attr': 'should_be_dropped'},
+    )
+    out_path = os.path.join(self.create_tempdir().full_path, f'output.{ext}')
+    custom_attrs = {'xid': 12345, 'wid': 1, 'model_slug': 'fgn_test'}
+    beam_pipeline.write_dataset(ds, out_path, attrs=custom_attrs)
+
+    loaded = (
+        xr.open_zarr(out_path).compute()
+        if ext == 'zarr'
+        else xr.open_dataset(out_path).compute()
+    )
+    self.assertNotIn('some_attr', loaded.attrs)
+    self.assertNotIn('var_attr', loaded['var1'].attrs)
+    self.assertEqual(dict(loaded.attrs), custom_attrs)
 
 
 if __name__ == '__main__':

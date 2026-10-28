@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -65,6 +65,7 @@ class XarrayDataLoader(base.DataLoader):
       automatically_convert_lat_lon_to_latitude_longitude: bool = True,
       rename_variables: Optional[Mapping[str, str]] = None,
       preprocessing_fn: Optional[Callable[[xr.Dataset], xr.Dataset]] = None,
+      ignore_missing_variables: bool = False,
       **kwargs,
   ):
     """Init.
@@ -91,6 +92,9 @@ class XarrayDataLoader(base.DataLoader):
       rename_variables: (Optional) Dictionary of variables to rename.
       preprocessing_fn: (Optional) A function that is applied to the dataset
         right after it is opened.
+      ignore_missing_variables: (Optional) If False (default), raise KeyError
+        when any requested variable is missing from the dataset. If True, log a
+        warning and continue with available variables.
       **kwargs: Keyword arguments to pass to base.DataLoader.
     """
     if path is not None and ds is not None:
@@ -109,6 +113,7 @@ class XarrayDataLoader(base.DataLoader):
     )
     self._rename_variables = rename_variables
     self._preprocessing_fn = preprocessing_fn
+    self._ignore_missing_variables = ignore_missing_variables
 
     self._preprocessed = False
     super().__init__(**kwargs)
@@ -127,18 +132,46 @@ class XarrayDataLoader(base.DataLoader):
         self._ds = xr.open_dataset(self._path)
 
     if self._preprocessing_fn is not None:
-      self._ds = self._preprocessing_fn(self._ds)
+      self._ds = self._preprocessing_fn(self._ds)  # pyrefly: ignore[bad-argument-type]
     self._ds = _rename_dataset(
-        self._ds,
+        self._ds,  # pyrefly: ignore[bad-argument-type]
         self._rename_dimensions,
         self._rename_variables,
         self._automatically_convert_lat_lon_to_latitude_longitude,
     )
     if self._variables is not None:
-      self._ds = self._ds[list(self._variables)]
+      requested = list(self._variables)
+      available = [v for v in requested if v in self._ds]
+      missing = [v for v in requested if v not in self._ds]
+      if missing:
+        if not self._ignore_missing_variables:
+          raise KeyError(
+              f'Dataset at {self._path} is missing requested variables'
+              f' {missing}. Available: {available}. Set'
+              ' ignore_missing_variables=True to skip missing variables.'
+          )
+        logging.warning(
+            'Dataset at %s is missing requested variables %s. Continuing with'
+            ' available: %s',
+            self._path,
+            missing,
+            available,
+        )
+      if not available:
+        raise KeyError(
+            f'None of the requested variables {requested} were found in dataset'
+            f' at {self._path}.'
+        )
+      self._ds = self._ds[available]
     if self._sel_kwargs is not None:
       self._ds = self._ds.sel(**self._sel_kwargs)
     self._preprocessed = True
+
+  def nominal_init_times(self, init_time_dim: str = 'init_time') -> np.ndarray:
+    """Returns the nominal initialization times from the underlying dataset."""
+    self.maybe_prepare_dataset()
+    assert self._ds is not None
+    return self._ds[init_time_dim].values
 
   def _load_chunk_from_source(
       self,
@@ -308,10 +341,10 @@ class ClimatologyFromXarray(XarrayDataLoader):
       )
     # No lead time slice, in this case treat the init times as valid times.
     else:
-      init_times = xr.DataArray(init_times, coords={'init_time': init_times})
+      init_times = xr.DataArray(init_times, coords={'init_time': init_times})  # pyrefly: ignore[bad-assignment]
       sel_kwargs = {}
       for coord in self._climatology_time_coords:
-        sel_kwargs[coord] = getattr(init_times.dt, coord)
+        sel_kwargs[coord] = getattr(init_times.dt, coord)  # pyrefly: ignore[missing-attribute]
     chunk = self._ds.sel(sel_kwargs)
     return chunk
 
@@ -382,15 +415,15 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
       raise ValueError(
           'Exact lead times must be specified for persistence data loader.'
       )
-    init_times = xr.DataArray(
+    init_times = xr.DataArray(  # pyrefly: ignore[bad-assignment]
         init_times, dims=['init_time'], coords={'init_time': init_times}
     )
-    lead_times = xr.DataArray(
+    lead_times = xr.DataArray(  # pyrefly: ignore[bad-assignment]
         lead_times, dims=['lead_time'], coords={'lead_time': lead_times}
     )
     valid_times = init_times + lead_times
-    doy = valid_times.dt.dayofyear
-    hod = valid_times.dt.hour
+    doy = valid_times.dt.dayofyear  # pyrefly: ignore[missing-attribute]
+    hod = valid_times.dt.hour  # pyrefly: ignore[missing-attribute]
     cat_times = []
     for year in range(self._start_year, self._end_year + 1):
       cat_times.append(
@@ -408,3 +441,18 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
     )
     chunk = self._ds.sel(valid_time=cat_times)
     return chunk
+
+
+class ConstantLoader(base.DataLoader):
+  """Loader class that returns a constant dataset."""
+
+  def __init__(self, constant_ds: xr.Dataset):
+    super().__init__()
+    self._constant_ds = constant_ds
+
+  def _load_chunk_from_source(
+      self,
+      init_times: np.ndarray,
+      lead_times: Optional[Union[np.ndarray, slice]] = None,
+  ) -> Mapping[Hashable, xr.DataArray]:
+    return self._constant_ds

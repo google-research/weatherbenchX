@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -109,7 +109,7 @@ class ExpMeanPrediction(metrics_base.PerVariableMetric):
 
   def _values_from_mean_statistics_per_variable(
       self, statistic_values: Mapping[str, xr.DataArray]) -> xr.DataArray:
-    return np.exp(statistic_values["mean_prediction"])
+    return np.exp(statistic_values["mean_prediction"])  # pyrefly: ignore[bad-return]
 
 
 def metrics_and_agg_state_for_exp_of_mean(data: xr.DataArray) -> tuple[

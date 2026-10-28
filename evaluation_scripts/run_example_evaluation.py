@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -176,7 +176,7 @@ def main(argv: Sequence[str]) -> None:
       'global': ((-90, 90), (0, 360)),
       'northern-hemisphere': ((20, 90), (0, 360)),
   }
-  bin_by = [binning.Regions(regions)]
+  bin_by = [binning.Regions(regions)]  # pyrefly: ignore[bad-argument-type]
 
   aggregation_method = aggregation.Aggregator(
       reduce_dims=REDUCE_DIMS.value,

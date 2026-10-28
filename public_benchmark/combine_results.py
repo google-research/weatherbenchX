@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -79,6 +79,18 @@ DETERMINISTIC_MODELS = {
     "gencast_operational_100m_uv_single_member_vs_hres_t0": (
         "GenCast (oper.) (1st member) vs Analysis"
     ),
+    "fgn_operational_mean_vs_era5": (
+        "FGN (oper.) (mean) vs ERA5"
+    ),
+    "fgn_operational_single_member_vs_era5": (
+        "FGN (oper.) (1st member) vs ERA5"
+    ),
+    "fgn_operational_mean_vs_hres_t0": (
+        "FGN (oper.) (mean) vs Analysis"
+    ),
+    "fgn_operational_single_member_vs_hres_t0": (
+        "FGN (oper.) (1st member) vs Analysis"
+    ),
     "neuralgcm_hres_vs_era5": "NeuralGCM 0.7 vs ERA5",
     "neuralgcm_ens_mean_vs_era5": "NeuralGCM ENS (mean) vs ERA5",
     "neuralgcm_ens_single_member_vs_era5": "NeuralGCM ENS (1st member) vs ERA5",
@@ -100,6 +112,8 @@ PROBABILISTIC_MODELS = {
     "gencast_vs_era5": "GenCast vs ERA5",
     "gencast_operational_100m_uv_vs_era5": "GenCast (oper.) vs ERA5",
     "gencast_operational_100m_uv_vs_hres_t0": "GenCast (oper.) vs Analysis",
+    "fgn_operational_vs_era5": "FGN (oper.) vs ERA5",
+    "fgn_operational_vs_hres_t0": "FGN (oper.) vs Analysis",
     "arches_weather_gen_vs_era5": "ArchesWeatherGen vs ERA5",
 }
 REGION_NAMES = {
@@ -178,8 +192,16 @@ UNITS = {
     "850hPa Wind Speed": "m/s",
 }
 
-YEARS = [2018, 2020, 2022]
-RESOLUTIONS = ["64x32", "240x121", "1440x721"]
+YEARS = [
+    2018,
+    2020,
+    2022
+]
+RESOLUTIONS = [
+    "64x32",
+    "240x121",
+    "1440x721",
+]
 
 
 def open_nc(filename: str, **kwargs) -> xr.Dataset:
@@ -199,7 +221,7 @@ def _rename_region(region):
 def process_results(model, year, resolution):
   """Process a single results file."""
 
-  fn = path.join(INPUT_DIR.value, f"{model}_{resolution}_{year}.nc")
+  fn = path.join(INPUT_DIR.value, f"{model}_{resolution}_{year}.nc")  # pyrefly: ignore[no-matching-overload]
   try:
     ds = open_nc(fn)
   except Exception:  # pylint: disable=broad-exception-caught
@@ -273,9 +295,9 @@ def main(_):
       "lead_time": -1,
   })
   if MODE.value == "deterministic":
-    results_fn = path.join(OUTPUT_DIR.value, "deterministic.zarr")
+    results_fn = path.join(OUTPUT_DIR.value, "deterministic.zarr")  # pyrefly: ignore[no-matching-overload]
   else:
-    results_fn = path.join(OUTPUT_DIR.value, "probabilistic.zarr")
+    results_fn = path.join(OUTPUT_DIR.value, "probabilistic.zarr")  # pyrefly: ignore[no-matching-overload]
   print(results_fn)
   results.to_zarr(results_fn)
 

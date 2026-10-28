@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ def map_structure(func: Callable[..., Any], *structures: Any) -> Any:
     ):
       data_arrays = [v.rename(k) for k, v in data.items() if v is not None]
       try:
-        return xarray.merge(data_arrays, join='exact')
+        return xarray.merge(data_arrays, join='exact', compat='override')
       except ValueError:  # Exact join not possible.
         pass
     return data

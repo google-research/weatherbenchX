@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -135,6 +135,54 @@ class XarrayLoadersTest(absltest.TestCase):
         {'number', 'init_time', 'lead_time', 'latitude', 'longitude'},
     )
     self.assertLen(chunk.number, 5)
+
+  def test_constant_loader(self):
+    constant_ds = xr.Dataset(
+        {
+            '2m_temperature': (('quantile',), [0.2, 0.4]),
+        },
+        coords={'quantile': [1, 2]},
+    )
+    loader = xarray_loaders.ConstantLoader(constant_ds=constant_ds)
+    init_times = np.arange(
+        '2020-01-01T00',
+        '2020-01-02T00',
+        np.timedelta64(24, 'h'),
+        dtype='datetime64[ns]',
+    )
+    lead_times = np.arange(0, 3, 1, dtype='timedelta64[D]')
+    chunk = loader.load_chunk(init_times, lead_times)
+    xr.testing.assert_equal(chunk, constant_ds)
+
+  def test_ignore_missing_variables(self):
+    target = test_utils.mock_target_data(
+        time_start='2020-01-01T00', time_stop='2020-01-10T00'
+    )
+    # Target only has geopotential and 2m_temperature by default
+    variables = ['2m_temperature', 'non_existent_variable']
+
+    # Default should raise KeyError
+    with self.assertRaises(KeyError):
+      loader = xarray_loaders.TargetsFromXarray(
+          ds=target, variables=variables, ignore_missing_variables=False
+      )
+      loader.maybe_prepare_dataset()
+
+    # With ignore_missing_variables=True, should succeed and load only available
+    loader = xarray_loaders.TargetsFromXarray(
+        ds=target, variables=variables, ignore_missing_variables=True
+    )
+    loader.maybe_prepare_dataset()
+    init_times = np.arange(
+        '2020-01-01T00',
+        '2020-01-02T00',
+        np.timedelta64(24, 'h'),
+        dtype='datetime64[ns]',
+    )
+    lead_times = np.arange(0, 3, 1, dtype='timedelta64[D]')
+    chunk = loader.load_chunk(init_times, lead_times)
+    self.assertIn('2m_temperature', chunk)
+    self.assertNotIn('non_existent_variable', chunk)
 
 
 if __name__ == '__main__':

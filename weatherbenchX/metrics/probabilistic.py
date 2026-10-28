@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 """Implementation of probabilistic metrics and assiciated statistics."""
 
 from collections.abc import Hashable, Sequence
-from typing import Mapping, Tuple
+from typing import Iterable, Mapping, Tuple
 import numpy as np
 import scipy.stats
 from weatherbenchX import xarray_tree
@@ -140,7 +140,7 @@ class CRPSSkill(base.PerVariableStatistic):
       pseudo_ensemble_dim = f'{self._ensemble_dim}_PSEUDO_FOR_TARGETS'
       reduce_dims += [pseudo_ensemble_dim]
       targets = targets.rename({self._ensemble_dim: pseudo_ensemble_dim})
-    return np.abs(predictions - targets).mean(
+    return xu.abs(predictions - targets).mean(
         reduce_dims, skipna=self._skipna_ensemble
     )
 
@@ -159,7 +159,7 @@ def _rankdata(x: np.ndarray, axis: int) -> np.ndarray:
 
 
 def _rank_da(da: xr.DataArray, dim: str) -> np.ndarray:
-  return da.copy(data=_rankdata(da.values, axis=da.dims.index(dim)))
+  return da.copy(data=_rankdata(da.values, axis=da.dims.index(dim)))  # pyrefly: ignore[bad-return]
 
 
 class CRPSSpread(base.PerVariableStatistic):
@@ -232,7 +232,7 @@ class CRPSSpread(base.PerVariableStatistic):
       return (
           2
           * (
-              ((2 * rank - n_ensemble - 1) * da).mean(
+              ((2 * rank - n_ensemble - 1) * da).mean(  # pyrefly: ignore[no-matching-overload]
                   self._ensemble_dim, skipna=False
               )
           )
@@ -475,6 +475,140 @@ class EnsembleRankedProbabilityScore(base.PerVariableStatistic):
 
     # RPS is the sum of squared errors over the bin dimension.
     return cdf_mse.sum(self._bin_dim, skipna=self._skipna_ensemble)
+
+
+class EnergyScoreSkill(base.PerVariableStatistic):
+  """The skill measure associated with EnergyScore, E||X - Y||.
+
+  Given a ground truth random variable Y and a prediction random variable X,
+  this computes the expected Euclidean distance between X and Y along the
+  specified dimensions.
+  """
+
+  def __init__(self, dim: str, ensemble_dim: str = 'sample'):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+
+  @property
+  def unique_name(self):
+    return (
+        f'EnergyScore_Skill_dim={self._dim}_ensemble_dim={self._ensemble_dim}'
+    )
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    # Use native operators (** 2, ** 0.5) instead of np.square / np.sqrt
+    # so that xarray DataArrays wrapping JAX tracers trace cleanly into
+    # jax.lax primitives under jax.jit without triggering NumPy array
+    # conversion errors.
+    return (
+        ((predictions - targets) ** 2).sum(dim=self._dim, skipna=False) ** 0.5
+    ).mean(dim=self._ensemble_dim)
+
+
+class EnergyScoreSpread(base.PerVariableStatistic):
+  """The spread component of the Energy Score."""
+
+  def __init__(
+      self,
+      dim: str | Iterable[str],
+      ensemble_dim: str = 'sample',
+      fair: bool = True,
+  ):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+
+  @property
+  def unique_name(self):
+    return (
+        f'EnergyScore_Spread_dim={self._dim}_'
+        f'ensemble_dim={self._ensemble_dim}_'
+        f'fair={self._fair}'
+    )
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    predictions_prime = predictions.rename(
+        {self._ensemble_dim: self._ensemble_dim + '_prime'}
+    )
+
+    ensemble_size = predictions.sizes[self._ensemble_dim]
+    divider = (
+        ensemble_size * ensemble_size
+        if not self._fair
+        else ensemble_size * (ensemble_size - 1)
+    )
+
+    # Use native operators (** 2, ** 0.5) instead of np.square / np.sqrt
+    # so that xarray DataArrays wrapping JAX tracers trace cleanly into
+    # jax.lax primitives under jax.jit without triggering NumPy array
+    # conversion errors.
+    return (
+        (
+            ((predictions - predictions_prime) ** 2).sum(
+                dim=self._dim,  # pyrefly: ignore[bad-argument-type]
+                skipna=False,
+            )
+            ** 0.5
+        ).sum(
+            dim=[self._ensemble_dim, self._ensemble_dim + '_prime'],
+            skipna=False,
+        )
+    ) / divider
+
+
+class VariogramScore(base.PerVariableStatistic):
+  r"""The Variogram Score.
+
+  Proposed in [Scheuerer, Hamill 2015] “Variogram-Based Proper Scoring Rules for
+  Probabilistic Forecasts of Multivariate Quantities.” It is sensitive to
+  misrepresentations of the correlation structures across `dim`. Note that it is
+  insensitive to the skill, i.e. a biased forecast could still score well on
+  that metric if its correlation structures are correct.
+
+  This metric loses signal when computed over quantities that are uncorrelated,
+  e.g. gridpoints that are very distant. This is typically addressed by
+  assigning lower weights to dimension pairs that are expected to be less
+  correlated during computation. No such weighting is performed here, this is
+  left as the users responsibility.
+
+  Computed as:
+
+    VS = \\sum_{i,j} (|y_i - y_j|^p - 
+      \\frac{1}{M} \\sum_{m=1}^M |x_i^{(m)} - _j^{(m)}|^p)^2
+
+  where y is the target, x^{(m)} is the m-th ensemble member, and the sum
+  over i and j runs over the specified dimension.
+  """
+
+  def __init__(self, dim: str, ensemble_dim: str, p: float = 0.5):
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._p = p
+
+  @property
+  def unique_name(self):
+    return f'VariogramScore_dim={self._dim}_ensemble_dim={self._ensemble_dim}'
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray:
+    targets_prime = targets.rename({self._dim: self._dim + '_prime'})
+    predictions_prime = predictions.rename({self._dim: self._dim + '_prime'})
+
+    # Use abs() and ** 2 instead of np.abs / np.square for JAX JIT
+    # compatibility.
+    targets_term = abs(targets_prime - targets) ** self._p
+    predictions_term = (abs(predictions_prime - predictions) ** self._p).mean(
+        dim=self._ensemble_dim, skipna=False
+    )
+
+    return ((targets_term - predictions_term) ** 2).sum(
+        dim=[self._dim, self._dim + '_prime'], skipna=False
+    )
 
 
 ### Metrics
@@ -1033,11 +1167,11 @@ class RelativeEconomicValue(base.Metric):
 
     self._thresholds = probability_thresholds
     if self._thresholds is None:
-      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size
+      self._thresholds = (np.arange(ensemble_size) + 0.5) / ensemble_size  # pyrefly: ignore[no-matching-overload]
       if statistic_suffix is None:
         statistic_suffix = 'all_thresholds_for_ensemble_size'
-    if not np.all(self._thresholds >= 0.0) or not np.all(
-        self._thresholds <= 1.0
+    if not np.all(self._thresholds >= 0.0) or not np.all(  # pyrefly: ignore[unsupported-operation]
+        self._thresholds <= 1.0  # pyrefly: ignore[unsupported-operation]
     ):
       raise ValueError(
           f'Probability thresholds must be in [0, 1], got {self._thresholds=}.'
@@ -1068,7 +1202,7 @@ class RelativeEconomicValue(base.Metric):
   def statistics(self) -> Mapping[str, base.Statistic]:
     binarize = wrappers.ContinuousToBinary(
         which='predictions',
-        threshold_value=self._thresholds,
+        threshold_value=self._thresholds,  # pyrefly: ignore[bad-argument-type]
         threshold_dim='threshold',
         unique_name_suffix=self._unique_name_suffix,
     )
@@ -1126,7 +1260,7 @@ class RelativeEconomicValue(base.Metric):
           s: statistic_values[s][var_name] for s in self.statistics
       }
       values[var_name] = self._values_from_mean_statistics_per_variable(
-          stats_per_variable, var_name
+          stats_per_variable, var_name  # pyrefly: ignore[bad-argument-type]
       )
     return values
 
@@ -1218,3 +1352,274 @@ class RankHistogram(base.PerVariableStatistic):
 
     # Transform to floating point for the subsequent aggregation.
     return (ranks == categories).astype(np.float32)
+
+
+class EnergyScore(base.PerVariableMetric):
+  """Energy score for an ensemble prediction along one dimension.
+
+  Given ground truth random vector Y, and two iid predictions X, X', the
+  Energy Score is defined as
+    ES = E‖X - Y‖ - 0.5 * E‖X - X'‖
+  where `E` is mathematical expectation, and ‖⋅‖ is the L2 norm. ES has a
+  unique minimum when X is distributed the same as Y.
+
+  If fair=True, the value is unbiased and estimates the ES as it would be given
+  a very large ensemble size.
+
+  NaN values propagate through and result in NaN in the corresponding output
+  position.
+
+  References:
+  [Gneiting & Raftery, 2012], Strictly Proper Scoring Rules, Prediction, and
+    Estimation
+  """
+
+  def __init__(
+      self,
+      dim: str | Iterable[str],
+      ensemble_dim: str = ENSEMBLE_DIM,
+      fair: bool = True,
+  ):
+    """Init.
+
+    Args:
+      dim: Name of the dimension(s) over which to compute the Euclidean norm.
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      fair: If True, use the fair estimate of ES. If False, use the
+        conventional estimate. Default: True.
+    """
+    self._dim = dim
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    return {
+        'EnergyScoreSkill': EnergyScoreSkill(
+            dim=self._dim,  # pyrefly: ignore[bad-argument-type]
+            ensemble_dim=self._ensemble_dim,
+        ),
+        'EnergyScoreSpread': EnergyScoreSpread(
+            dim=self._dim,
+            ensemble_dim=self._ensemble_dim,
+            fair=self._fair,
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['EnergyScoreSkill']
+        - 0.5 * statistic_values['EnergyScoreSpread']
+    )
+
+
+class TiledEnergyScore(base.PerVariableMetric):
+  """Compute the Energy Score over small patches on the grid.
+
+  Being a windowed metric, it removes rows at the top and bottom of the grid
+  where full windows could not be computed.
+  """
+
+  _WINDOW_DIM = 'window'
+
+  def __init__(
+      self,
+      window_size: int = 3,
+      ensemble_dim: str = ENSEMBLE_DIM,
+      fair: bool = True,
+      wrap_longitude: bool = True,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
+  ):
+    # TODO(landryd, srasp): Support passing a list of window_sizes, producing
+    # metrics with an additional 'window_size' dimension.
+    # TODO(landryd, srasp): Allow passing a stride argument to limit the
+    # computational cost of the metric.
+    self._window_size = window_size
+    self._ensemble_dim = ensemble_dim
+    self._fair = fair
+    self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    skill = EnergyScoreSkill(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim
+    )
+    spread = EnergyScoreSpread(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim, fair=self._fair
+    )
+
+    transform_fn_wrapped = wrappers.Tile(
+        which='both',
+        window_size=self._window_size,
+        window_dim=self._WINDOW_DIM,
+        wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
+    )
+
+    return {
+        'TiledEnergyScore_Skill': wrappers.WrappedStatistic(
+            skill, transform_fn_wrapped
+        ),
+        'TiledEnergyScore_Spread': wrappers.WrappedStatistic(
+            spread, transform_fn_wrapped
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return (
+        statistic_values['TiledEnergyScore_Skill']
+        - 0.5 * statistic_values['TiledEnergyScore_Spread']
+    )
+
+
+class TiledVariogramScore(base.PerVariableMetric):
+  """Compute the Variogram Score over small patches of the grid.
+
+  Computing it on small patches circumvents issues related to computing 
+  this metric on uncorrelated quantities.
+
+  Being a windowed metric, it removes rows at the top and bottom of the grid
+  where full windows could not be computed.
+  """
+  _WINDOW_DIM = 'window'
+
+  def __init__(
+      self,
+      window_size: int = 3,
+      ensemble_dim: str = ENSEMBLE_DIM,
+      p: float = 0.5,
+      wrap_longitude: bool = True,
+      lat_dim: str = 'latitude',
+      lon_dim: str = 'longitude',
+  ):
+    # TODO(landryd, srasp): Support passing a list of window_sizes, producing
+    # metrics with an additional 'window_size' dimension.
+    # TODO(landryd, srasp): Allow passing a stride argument to limit the
+    # computational cost of the metric.
+    self._window_size = window_size
+    self._ensemble_dim = ensemble_dim
+    self._p = p
+    self._wrap_longitude = wrap_longitude
+    self._lat_dim = lat_dim
+    self._lon_dim = lon_dim
+
+  @property
+  def statistics(self) -> Mapping[str, base.Statistic]:
+    variogram_score = VariogramScore(
+        dim=self._WINDOW_DIM, ensemble_dim=self._ensemble_dim, p=self._p
+    )
+
+    transform_fn_wrapped = wrappers.Tile(
+        which='both',
+        window_size=self._window_size,
+        window_dim=self._WINDOW_DIM,
+        wrap_longitude=self._wrap_longitude,
+        lat_dim=self._lat_dim,
+        lon_dim=self._lon_dim,
+    )
+
+    return {
+        'TiledVariogramScore': wrappers.WrappedStatistic(
+            variogram_score, transform_fn_wrapped
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: Mapping[str, xr.DataArray],
+  ) -> xr.DataArray:
+    """Computes metrics from aggregated statistics."""
+    return statistic_values['TiledVariogramScore']
+
+
+class QuantileScore(base.PerVariableStatistic):
+  """Quantile score for quantile forecasts, 2 (Y - Q) (tau - 1[Y < Q]).
+
+  This is twice the standard pinball loss, so that tau=0.5 equals the absolute
+  error and integrating over tau in (0, 1) recovers the CRPS.
+
+  Quantile levels tau are read from the `quantile_dim` coordinate of the
+  predictions. Variables whose predictions lack `quantile_dim` are skipped.
+  """
+
+  def __init__(self, quantile_dim: str = 'quantile'):
+    """Init.
+
+    Args:
+      quantile_dim: Name of the quantile dimension and coordinate. Default:
+        'quantile'.
+    """
+    self._quantile_dim = quantile_dim
+
+  @property
+  def unique_name(self) -> str:
+    return f'QuantileScore_{self._quantile_dim}'
+
+  def _compute_per_variable(
+      self, predictions: xr.DataArray, targets: xr.DataArray
+  ) -> xr.DataArray | None:
+    if self._quantile_dim not in predictions.dims:
+      return None
+    if self._quantile_dim in targets.dims:
+      raise ValueError(
+          f"targets must not contain quantile dimension '{self._quantile_dim}'."
+      )
+    if self._quantile_dim not in predictions.coords:
+      raise ValueError(
+          f"predictions must have a '{self._quantile_dim}' coordinate with the"
+          ' quantile levels.'
+      )
+    tau = predictions.coords[self._quantile_dim].astype(predictions.dtype)
+    if np.any(np.isnan(tau)) or np.any((tau <= 0) | (tau >= 1)):
+      raise ValueError(
+          f'quantile levels must be strictly in (0, 1), got {tau.values}'
+      )
+
+    dtype = np.result_type(predictions.dtype, targets.dtype)
+    diff = targets - predictions
+    score = 2 * diff * (tau - (diff < 0).astype(dtype))
+    if 'mask' in targets.coords:
+      score = score.assign_coords(mask=targets.coords['mask'])
+    return score
+
+
+class EnsembleQuantileScore(wrappers.WrappedStatistic):
+  """Computes the Quantile Score from ensemble forecasts."""
+
+  def __init__(
+      self,
+      quantiles: float | Sequence[float],
+      quantile_dim: str = 'quantile',
+      ensemble_dim: str = ENSEMBLE_DIM,
+      skipna_ensemble: bool = False,
+  ):
+    """Init.
+
+    Args:
+      quantiles: Quantile or sequence of quantiles strictly in (0, 1).
+      quantile_dim: Name of the quantile dimension. Default: 'quantile'.
+      ensemble_dim: Name of the ensemble dimension. Default: 'number'.
+      skipna_ensemble: If True, skip NaNs in ensemble quantiles. Default: False.
+    """
+    super().__init__(
+        statistic=QuantileScore(quantile_dim=quantile_dim),
+        transform=wrappers.EnsembleQuantiles(
+            which='predictions',
+            quantiles=quantiles,
+            quantile_dim=quantile_dim,
+            ensemble_dim=ensemble_dim,
+            skipna=skipna_ensemble,
+        ),
+    )

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,5 +58,5 @@ setuptools.setup(
     },
     url="https://github.com/google-research/weatherbenchX",
     packages=setuptools.find_packages(),
-    python_requires=">=3,<3.12",  # Because pyarrow won't compile with >3.11
+    python_requires=">=3",
 )

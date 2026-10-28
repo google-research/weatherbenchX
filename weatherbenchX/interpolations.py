@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -106,10 +106,10 @@ def interpolate_to_coords(
     interp_kwargs = None
 
   out = da.interp(
-      **dim_args,
-      method=method,
+      **dim_args,  # pyrefly: ignore[bad-argument-type]
+      method=method,  # pyrefly: ignore[bad-argument-type]
       kwargs=interp_kwargs,
-  )  # pytype: disable=wrong-arg-types
+  )
   return out
 
 
@@ -250,10 +250,10 @@ class InterpolateToReferenceCoords(Interpolation):
     self._clip_reference_coords = clip_reference_coords
     self._extrapolate_out_of_bounds = extrapolate_out_of_bounds
 
-  def interpolate_data_array(
+  def interpolate_data_array(  # pyrefly: ignore[bad-override]
       self,
       da: xr.DataArray,
-      reference: xr.DataArray,  # pytype: disable=signature-mismatch
+      reference: xr.DataArray,
   ) -> xr.DataArray:
 
     if self._wrap_longitude:
@@ -283,7 +283,7 @@ class InterpolateToReferenceCoords(Interpolation):
 
     da_like_reference = interpolate_to_coords(
         da,
-        dim_args,
+        dim_args,  # pyrefly: ignore[bad-argument-type]
         self._method,
         self._extrapolate_out_of_bounds,
     )
@@ -304,6 +304,12 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
   the reference dataset. Requires passing a DataArray with the grid elevation
   corresponding to the dataset to be interpolated. Variables must be named
   '2m_temperature' and '10m_wind_speed'. Other variables will be left unchanged.
+
+  Note:
+    The same interpolation is applied to the grid_elevation as to the data,
+    so in the case of linear interpolation, the elevation difference will also
+    be based on the grid elevation linearly interpolated to the reference
+    coordinates.
   """
 
   def __init__(
@@ -345,13 +351,35 @@ class GridToSparseWithAltitudeAdjustment(InterpolateToReferenceCoords):
   def interpolate_data_array(
       self,
       da: xr.DataArray,
-      reference: xr.DataArray,  # pytype: disable=signature-mismatch
+      reference: xr.DataArray,
   ) -> xr.DataArray:
     if da.name in ['2m_temperature', '10m_wind_speed']:
-      da.coords['grid_elevation'] = self._grid_elevation.compute()
+      # Sometimes coordinates (e.g. latitude ordering North-South vs South-North)
+      # don't match exactly, so we assert they cover the same coordinates and
+      # reindex to match da.
+      grid_elevation = self._grid_elevation.compute()
+      xr.testing.assert_allclose(
+          grid_elevation.latitude.sortby('latitude'),
+          da.latitude.sortby('latitude'),
+      )
+      xr.testing.assert_allclose(
+          grid_elevation.longitude.sortby('longitude'),
+          da.longitude.sortby('longitude'),
+      )
+      if (
+          not grid_elevation.latitude.equals(da.latitude)
+          or not grid_elevation.longitude.equals(da.longitude)
+      ):
+        grid_elevation = grid_elevation.reindex(
+            latitude=da.latitude, longitude=da.longitude
+        )
+      da.coords['grid_elevation'] = grid_elevation
 
     da_like_reference = super().interpolate_data_array(da, reference)
-    if da.name in ['2m_temperature', '10m_wind_speed']:
+    if (
+        da.name in ['2m_temperature', '10m_wind_speed']
+        and da_like_reference.size > 0
+    ):
       # Positive if station is higher than grid.
       sparse_higher_than_grid_m = (
           da_like_reference['elevation'] - da_like_reference['grid_elevation']
@@ -432,7 +460,7 @@ class NeighborhoodThresholdProbabilities(Interpolation):
             self._neighborhood_sizes, dims=['smoothing_neighborhood']
         ),
     )
-    return out
+    return out  # pyrefly: ignore[bad-return]
 
 
 class Subsample(Interpolation):
@@ -468,4 +496,4 @@ class Subsample(Interpolation):
         for dim in self._dims
         if dim in da.dims
     }
-    return da.isel(**isel_kwargs)
+    return da.isel(**isel_kwargs)  # pyrefly: ignore[bad-argument-type]
