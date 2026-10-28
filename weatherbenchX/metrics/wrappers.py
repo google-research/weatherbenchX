@@ -38,7 +38,7 @@ wrappers.WrappedMetric(
 
 import abc
 from collections.abc import Sequence
-from typing import Any, Callable, Hashable, Iterable, Mapping, Union
+from typing import Any, Callable, Hashable, Iterable, Literal, Mapping, Union
 
 import numpy as np
 from weatherbenchX import xarray_tree
@@ -520,6 +520,68 @@ class BinProbabilitiesToMedian(InputTransform):
     # Propagate NaNs of the input (e.g. masked points).
     median = median.where(~xu.isnan(da).any(bin_dim))
     return median.astype(da.dtype)
+
+
+class CategoricalToOneHot(InputTransform):
+  """Converts integer class indices `0..K-1` into a one-hot DataArray.
+
+  Assigns `class_names` as the coordinate along `class_dim` to match the
+  predictions' class probability dimension. NaN inputs are NaN across all
+  classes. Inputs are compared for exact equality with the class indices, so
+  values outside `0..K-1` and non-integer values do not match any class; how
+  they are handled is controlled by `out_of_range`.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      class_dim: str,
+      class_names: Sequence[str],
+      out_of_range: Literal['nan', 'zero'] = 'nan',
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      class_dim: Name of the new dimension holding the one-hot class indicators.
+      class_names: Ordered class names corresponding to integer indices
+        `0..len(class_names) - 1`.
+      out_of_range: How to handle values that do not match any class index
+        (values outside `0..K-1` or non-integer values). 'nan' (default) sets
+        them to NaN across all classes, treating them like missing values.
+        'zero' sets them to zero across all classes, i.e. a negative for every
+        class, e.g. when such values deliberately encode "none of the classes".
+    """
+    super().__init__(which)
+    if out_of_range not in ('nan', 'zero'):
+      raise ValueError(
+          f"out_of_range must be 'nan' or 'zero', got {out_of_range!r}."
+      )
+    self._class_dim = class_dim
+    self._class_names = tuple(class_names)
+    self._out_of_range = out_of_range
+
+  @property
+  def unique_name_suffix(self) -> str:
+    classes = ','.join(self._class_names)
+    return (
+        f'CategoricalToOneHot_{self._class_dim}_{classes}'
+        f'_out_of_range_{self._out_of_range}'
+    )
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    indices = xr.DataArray(
+        np.arange(len(self._class_names), dtype=da.dtype),
+        dims=[self._class_dim],
+        coords={self._class_dim: list(self._class_names)},
+    )
+    matches = da == indices
+    one_hot = matches.astype(np.float32)
+    if self._out_of_range == 'nan':
+      # NaN inputs never match a class, so this also masks NaNs.
+      return one_hot.where(matches.any(self._class_dim))
+    return one_hot.where(~xu.isnan(da))
 
 
 def select_bin_thresholds_by_time_from_chunk(

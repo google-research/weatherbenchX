@@ -826,6 +826,63 @@ class BinProbabilitiesTransformsTest(parameterized.TestCase):
           self._bin_probabilities([[0.2, 0.2, 0.2, 0.2, 0.2]])
       )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='nan',
+          out_of_range='nan',
+          expected_out_of_range=[np.nan, np.nan, np.nan],
+      ),
+      dict(
+          testcase_name='zero',
+          out_of_range='zero',
+          expected_out_of_range=[0.0, 0.0, 0.0],
+      ),
+  )
+  def test_categorical_to_one_hot(self, out_of_range, expected_out_of_range):
+    # Values 3.0, -1.0 and 0.5 do not match any of the 3 class indices.
+    da = xr.DataArray(
+        np.array([0.0, 1.0, 2.0, np.nan, 3.0, -1.0, 0.5], dtype=np.float32),
+        dims=['x'],
+    )
+    transform = wrappers.CategoricalToOneHot(
+        which='targets',
+        class_dim='class',
+        class_names=('a', 'b', 'c'),
+        out_of_range=out_of_range,
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x', 'class'))
+    self.assertEqual(out.dtype, np.float32)
+    np.testing.assert_array_equal(
+        out.coords['class'].values, ['a', 'b', 'c']
+    )
+    expected = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [np.nan, np.nan, np.nan],
+            expected_out_of_range,
+            expected_out_of_range,
+            expected_out_of_range,
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(out.values, expected, equal_nan=True)
+    self.assertEqual(
+        transform.unique_name_suffix,
+        f'CategoricalToOneHot_class_a,b,c_out_of_range_{out_of_range}',
+    )
+
+  def test_categorical_to_one_hot_invalid_out_of_range(self):
+    with self.assertRaisesRegex(ValueError, 'out_of_range'):
+      wrappers.CategoricalToOneHot(
+          which='targets',
+          class_dim='class',
+          class_names=('a', 'b', 'c'),
+          out_of_range='raise',
+      )
+
 
 if __name__ == '__main__':
   absltest.main()
