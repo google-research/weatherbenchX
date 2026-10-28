@@ -522,6 +522,48 @@ class BinProbabilitiesToMedian(InputTransform):
     return median.astype(da.dtype)
 
 
+class CategoricalToOneHot(InputTransform):
+  """Converts integer class indices `0..K-1` into a one-hot DataArray.
+
+  Preserves NaNs across all classes where the input is NaN, and assigns
+  `class_names` as the coordinate along `class_dim` to match the predictions'
+  class probability dimension.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      class_dim: str,
+      class_names: Sequence[str],
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      class_dim: Name of the new dimension holding the one-hot class indicators.
+      class_names: Ordered class names corresponding to integer indices
+        `0..len(class_names) - 1`.
+    """
+    super().__init__(which)
+    self._class_dim = class_dim
+    self._class_names = tuple(class_names)
+
+  @property
+  def unique_name_suffix(self) -> str:
+    classes = ','.join(self._class_names)
+    return f'CategoricalToOneHot_{self._class_dim}_{classes}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    indices = xr.DataArray(
+        np.arange(len(self._class_names), dtype=da.dtype),
+        dims=[self._class_dim],
+        coords={self._class_dim: list(self._class_names)},
+    )
+    one_hot = (da == indices).astype(np.float32)
+    return one_hot.where(~xu.isnan(da))
+
+
 def select_bin_thresholds_by_time_from_chunk(
     bin_thresholds: xr.DataArray,
     chunk: xr.DataArray,
