@@ -122,6 +122,9 @@ COLORS = {
     "Baguan vs ERA5": husl[6],
     "WeatherMesh4 vs ERA5": husl[7],
     "Tianji vs ERA5": orange,
+    "Astra vs ERA5": husl[10],
+    "Astra (mean) vs ERA5": husl[10],
+    "Astra (1st member) vs ERA5": husl[10],
 }
 
 SYMBOLS = {
@@ -174,4 +177,7 @@ SYMBOLS = {
     "FGN (oper.) vs Analysis": "circle",
     "FGN (oper.) (mean) vs Analysis": "circle",
     "FGN (oper.) (1st member) vs Analysis": "triangle-down",
+    "Astra vs ERA5": "circle",
+    "Astra (mean) vs ERA5": "circle",
+    "Astra (1st member) vs ERA5": "triangle-down",
 }

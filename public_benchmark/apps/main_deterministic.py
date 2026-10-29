@@ -15,7 +15,7 @@ from dash_app import make_app
 import xarray as xr
 import sys
 
-ds = xr.open_zarr('gs://wb2-app-data/v6/deterministic.zarr')
+ds = xr.open_zarr('gs://wb2-app-data/v7/deterministic.zarr')
 app = make_app(ds, 'deterministic')
 server = app.server
 

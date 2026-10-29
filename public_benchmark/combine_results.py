@@ -103,6 +103,9 @@ DETERMINISTIC_MODELS = {
     "aurora_vs_hres_t0": "Aurora (oper.) vs Analysis",
     "baguan_vs_era5": "Baguan vs ERA5",
     "weathermesh4_vs_era5": "WeatherMesh4 vs ERA5",
+    "arcana_vs_era5": "Tianji vs ERA5",
+    "astra_mean_vs_era5": "Astra (mean) vs ERA5",
+    "astra_single_member_vs_era5": "Astra (1st member) vs ERA5",
 }
 PROBABILISTIC_MODELS = {
     "ens_vs_hres_t0": "IFS ENS vs Analysis",
@@ -115,6 +118,7 @@ PROBABILISTIC_MODELS = {
     "fgn_operational_vs_era5": "FGN (oper.) vs ERA5",
     "fgn_operational_vs_hres_t0": "FGN (oper.) vs Analysis",
     "arches_weather_gen_vs_era5": "ArchesWeatherGen vs ERA5",
+    "astra_vs_era5": "Astra vs ERA5",
 }
 REGION_NAMES = {
     "global": "Global",
