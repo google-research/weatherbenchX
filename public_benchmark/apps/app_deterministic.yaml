@@ -1,5 +1,5 @@
 service: deterministic
-runtime: python39
+runtime: python313
 instance_class: F4
 
 automatic_scaling:
