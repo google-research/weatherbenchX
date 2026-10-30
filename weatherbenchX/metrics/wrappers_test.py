@@ -826,6 +826,37 @@ class BinProbabilitiesTransformsTest(parameterized.TestCase):
           self._bin_probabilities([[0.2, 0.2, 0.2, 0.2, 0.2]])
       )
 
+  def test_categorical_to_one_hot(self):
+    da = xr.DataArray(
+        np.array([0.0, 1.0, 2.0, np.nan], dtype=np.float32),
+        dims=['x'],
+    )
+    transform = wrappers.CategoricalToOneHot(
+        which='targets',
+        class_dim='class',
+        class_names=('a', 'b', 'c'),
+    )
+    out = transform.transform_fn(da)
+    self.assertEqual(out.dims, ('x', 'class'))
+    self.assertEqual(out.dtype, np.float32)
+    np.testing.assert_array_equal(
+        out.coords['class'].values, ['a', 'b', 'c']
+    )
+    expected = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [np.nan, np.nan, np.nan],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(out.values, expected, equal_nan=True)
+    self.assertEqual(
+        transform.unique_name_suffix,
+        'CategoricalToOneHot_class_a,b,c',
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
