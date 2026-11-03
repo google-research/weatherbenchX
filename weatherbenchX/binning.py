@@ -307,7 +307,7 @@ def vectorized_coord_mask(
   if add_global_bin:
     mask = (
         xr.ones_like(coord.astype(bool))
-        .drop(coord_name)  # Drop the coordinate  # pyrefly: ignore[bad-argument-type]
+        .drop_vars(coord_name)  # Drop the coordinate
         .expand_dims(bin_dim_name)  # Add as a dimension
     )
     mask.coords[bin_dim_name] = ['global']
@@ -601,7 +601,7 @@ class ByCoordBins(Binning):
           statistic.coords[self.dim_name] >= start,
           statistic.coords[self.dim_name] < stop,
       )
-      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
+      mask = mask.drop_vars([self.dim_name]).expand_dims(self.dim_name, axis=0)
       coord_val = str(start) if self.add_global_bin else start
       mask.coords[self.dim_name] = np.array([coord_val])
       mask.assign_coords({
@@ -614,7 +614,7 @@ class ByCoordBins(Binning):
 
     if self.add_global_bin:
       mask = xr.full_like(statistic.coords[self.dim_name], True, dtype=bool)
-      mask = mask.drop([self.dim_name]).expand_dims(self.dim_name, axis=0)
+      mask = mask.drop_vars([self.dim_name]).expand_dims(self.dim_name, axis=0)
       mask.coords[self.dim_name] = ['global']
       masks.append(mask)
 
@@ -622,7 +622,7 @@ class ByCoordBins(Binning):
       dtype = statistic[self.dim_name].dtype
       masks = (
           xr.ones_like(statistic)
-          .drop(self.dim_name)  # pyrefly: ignore[bad-argument-type]
+          .drop_vars(self.dim_name)
           .expand_dims(
               {
                   self.dim_name: (
