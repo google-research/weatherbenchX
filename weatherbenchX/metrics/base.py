@@ -115,6 +115,19 @@ class Statistic(Metric):
   typically be the time dimensions (if chunking is done in time) and/or the
   spatial/observation dimensions (if these are needed for binning or weighting).
   Other dimensions can be reduced.
+
+  A note on mask propagation:
+
+  Predictions and targets received by the `compute` method may have a special
+  boolean 'mask' coordinate indicating which locations are valid, along some
+  subset of their dimensions. This coordinate will be consistent between
+  predictions and targets if present at all. Where present, it is the
+  responsibility of the statistic to ensure that this mask is propagated
+  correctly onto its return value, as it will be used during aggregation of the
+  statistic. In many simple cases xarray's automatic coordinate propagation will
+  be sufficient, but if your computation involves interactions between multiple
+  values that may be masked differently, then you may need to manually compute
+  an appropriate mask coordinate for the output.
   """
 
   @property
@@ -249,12 +262,152 @@ class PerVariableMetric(Metric):
 NoOpMetric = lambda statistic: statistic
 
 
+def update_masks_for_targets_and_predictions(
+    predictions: Mapping[Hashable, xr.DataArray],
+    targets: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = False,
+) -> tuple[Mapping[Hashable, xr.DataArray], Mapping[Hashable, xr.DataArray]]:
+  """Aligns prediction and target masks so they are consistent.
+
+  It is strongly recommended to use allow_prediction_mask=False. To encourage
+  comparability across different predictions, the same mask should be used
+  across different predictions when evaluating against a given set of targets.
+
+  Assumes that all target dimensions are present in the corresponding
+  prediction. If neither prediction nor target has a mask, we do not introduce
+  one. If only target has a mask, we assign it directly to prediction without
+  broadcasting to extra prediction dimensions (so reductions over extra
+  prediction dimensions, such as ensemble members, preserve the mask). If
+  prediction has a mask, we intersect any target mask with a logical AND and
+  reduce extra prediction dimensions not in target using .any().
+
+  Args:
+    predictions: Mapping from variable name to prediction DataArray.
+    targets: Mapping from variable name to target DataArray.
+    allow_prediction_mask: If True, allow the predictions to contain a mask
+      coordinate. If False, only allow the targets to contain a mask
+      coordinate.
+
+  Returns:
+    A tuple of (prediction, target).
+
+  Raises:
+    ValueError: If target has dimensions not in prediction when aligning masks,
+      or if a prediction has a 'mask' coordinate and allow_prediction_mask is
+      False.
+  """
+
+  def _align_masks_for_target_and_prediction(
+      prediction: xr.DataArray,
+      target: xr.DataArray,
+  ) -> tuple[xr.DataArray, xr.DataArray]:
+    prediction_has_mask = 'mask' in prediction.coords
+    target_has_mask = 'mask' in target.coords
+    if not prediction_has_mask and not target_has_mask:
+      return prediction, target
+
+    if target_has_mask:
+      if prediction_has_mask:
+        prediction_mask_dims = prediction['mask'].dims
+      else:
+        prediction_mask_dims = prediction.dims
+      extra_target_dims = tuple(
+          d for d in target['mask'].dims if d not in prediction_mask_dims
+      )
+      if extra_target_dims:
+        if prediction_has_mask:
+          expected_dims_label = 'prediction mask dims'
+        else:
+          expected_dims_label = 'prediction dims'
+        raise ValueError(
+            f'target mask dims must be a subset of {expected_dims_label}. '
+            f'for variable {prediction.name!r}, got extra target dims '
+            f'{extra_target_dims} not in {prediction_mask_dims=}.'
+        )
+
+    if prediction_has_mask and not allow_prediction_mask:
+      raise ValueError(
+          f'prediction {prediction.name!r} has a "mask" coordinate, '
+          f'but {allow_prediction_mask=}.'
+      )
+
+    def _reduce_extra_prediction_dims(mask: xr.DataArray) -> xr.DataArray:
+      extra_dims = tuple(d for d in mask.dims if d not in target.dims)
+      if extra_dims:
+        reduced = mask.all(dim=extra_dims, keep_attrs=True)
+        if not reduced.variable.broadcast_equals(mask.variable):
+          raise ValueError(
+              'prediction mask must be constant along its extra dimensions.'
+          )
+        return reduced
+      return mask
+
+    if target_has_mask and not prediction_has_mask:
+      prediction_mask = target['mask']
+      target_mask = target['mask']
+    elif prediction_has_mask and not target_has_mask:
+      prediction_mask = prediction['mask']
+      target_mask = _reduce_extra_prediction_dims(prediction_mask)
+    else:
+      prediction_mask = prediction['mask']
+      target_mask = target['mask']
+      mask_attrs = prediction_mask.attrs | target_mask.attrs
+      prediction_mask = (prediction_mask & target_mask).assign_attrs(mask_attrs)
+      target_mask = _reduce_extra_prediction_dims(prediction_mask)
+
+    return (
+        prediction.assign_coords(
+            xr.Coordinates(coords={'mask': prediction_mask}, indexes={})
+        ),
+        target.assign_coords(
+            xr.Coordinates(coords={'mask': target_mask}, indexes={})
+        ),
+    )
+
+  predictions = dict(predictions)
+  targets = dict(targets)
+  for k in predictions.keys() & targets.keys():
+    predictions[k], targets[k] = _align_masks_for_target_and_prediction(
+        predictions[k], targets[k]
+    )
+  return predictions, targets
+
+
 def generate_unique_statistics_for_all_metrics(
     metrics: Mapping[str, Metric],
     predictions: Mapping[Hashable, xr.DataArray],
     targets: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = False,
 ) -> Iterator[tuple[str, Mapping[Hashable, xr.DataArray]]]:
-  """Like compute_unique_statistics_for_all_metrics, but yields k/v pairs."""
+  """Like compute_unique_statistics_for_all_metrics, but yields k/v pairs.
+
+  It is highly recommended to use allow_prediction_mask=False. This is because
+  in order to ensure comparability across different predictions, the same mask
+  should be used across different predictions when evaluating against a given
+  set of targets.
+
+  Note on masking: This function ensures that the masks of the targets the
+  predictions are consistent (if present) before passing them to the statistics.
+  By consistent, we mean we use the same mask for both predictions and targets.
+  If only one of the predictions or targets has a mask, we add a mask to the
+  other. It is the responsibility of the statistics user to ensure the masks are
+  correctly handled downstream.
+
+  Args:
+    metrics: Dictionary of metrics instances.
+    predictions: Xarray Dataset or dictionary of DataArrays.
+    targets: Xarray Dataset or dictionary of DataArrays.
+    allow_prediction_mask: If True, allow the predictions to contain a mask
+      coordinate, and update the mask for *both* the predictions and targets,
+      to be the logical AND of the two. If False, only allow the targets to
+      contain a mask coordinate.
+
+  Yields:
+    Pairs of statistic name and statistic values.
+  """
+  predictions, targets = update_masks_for_targets_and_predictions(
+      predictions, targets, allow_prediction_mask,
+  )
   unique_statistics = {}
   for m in metrics.values():
     for _, stat in m.statistics.items():
@@ -273,6 +426,7 @@ def compute_unique_statistics_for_all_metrics(
     metrics: Mapping[str, Metric],
     predictions: Mapping[Hashable, xr.DataArray],
     targets: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = False,
 ) -> Mapping[str, Mapping[Hashable, xr.DataArray]]:
   """Computes unique statistics for all metrics.
 
@@ -280,6 +434,10 @@ def compute_unique_statistics_for_all_metrics(
     metrics: Dictionary of metrics instances.
     predictions: Xarray Dataset or dictionary of DataArrays.
     targets: Xarray Dataset or dictionary of DataArrays.
+    allow_prediction_mask: If True, allow the predictions to contain a mask
+      coordinate, and update the mask for *both* the predictions and targets,
+      to be the logical AND of the two. If False, only allow the targets to
+      contain a mask coordinate.
 
   Returns:
     statistic_values: Unique statistics computed for each input element. If
@@ -288,7 +446,7 @@ def compute_unique_statistics_for_all_metrics(
       statistic_name to variable to statistic DataArrays.
   """
   return {k: stat for k, stat in generate_unique_statistics_for_all_metrics(
-      metrics, predictions, targets)}
+      metrics, predictions, targets, allow_prediction_mask)}
 
 
 def compute_metric_from_statistics(
