@@ -1160,6 +1160,75 @@ class BeamPipelineTest(parameterized.TestCase):
     self.assertNotIn('var_attr', loaded['var1'].attrs)
     self.assertEqual(dict(loaded.attrs), custom_attrs)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='standard',
+          chunk_metrics_by_lead_time=False,
+          agg_state_zarr=False,
+      ),
+      dict(
+          testcase_name='agg_state_zarr',
+          chunk_metrics_by_lead_time=False,
+          agg_state_zarr=True,
+      ),
+      dict(
+          testcase_name='chunk_metrics_by_lead_time',
+          chunk_metrics_by_lead_time=True,
+          agg_state_zarr=False,
+      ),
+  )
+  def test_pipeline_allow_prediction_mask(
+      self, chunk_metrics_by_lead_time, agg_state_zarr
+  ):
+    init_times = self.predictions.time.values
+    lead_times = self.predictions.prediction_timedelta.values
+    times = time_chunks.TimeChunks(
+        init_times,
+        lead_times,
+        init_time_chunk_size=1,
+        lead_time_chunk_size=1,
+    )
+    prediction_loader = xarray_loaders.PredictionsFromXarray(
+        path=self.predictions_path,
+        add_nan_mask=True,
+    )
+    target_loader = xarray_loaders.TargetsFromXarray(path=self.targets_path)
+    all_metrics = {'rmse': deterministic.RMSE()}
+    aggregator = aggregation.Aggregator(
+        reduce_dims=['init_time', 'latitude', 'longitude'],
+        masked=True,
+    )
+
+    def _run(allow_prediction_mask: bool):
+      if chunk_metrics_by_lead_time:
+        out_path = os.path.join(self.create_tempdir().full_path, 'metrics.zarr')
+      else:
+        out_path = self.create_tempfile('metrics.nc').full_path
+      if agg_state_zarr:
+        agg_state_path = os.path.join(
+            self.create_tempdir().full_path, 'agg_state.zarr'
+        )
+      else:
+        agg_state_path = None
+      with test_pipeline.TestPipeline() as root:
+        beam_pipeline.define_pipeline(
+            root,
+            times,
+            prediction_loader,
+            target_loader,
+            all_metrics,
+            aggregator,
+            out_path=out_path,
+            aggregation_state_out_path=agg_state_path,
+            chunk_metrics_by_lead_time=chunk_metrics_by_lead_time,
+            allow_prediction_mask=allow_prediction_mask,
+        )
+
+    with self.assertRaisesRegex(ValueError, 'allow_prediction_mask=False'):
+      _run(allow_prediction_mask=False)
+
+    _run(allow_prediction_mask=True)
+
 
 if __name__ == '__main__':
   absltest.main()

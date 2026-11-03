@@ -357,6 +357,27 @@ class GridToSparseWithAltitudeAdjustmentTest(absltest.TestCase):
     expected_temp = 280.0 - 0.65
     np.testing.assert_allclose(result.values, [expected_temp], rtol=1e-4)
 
+  def test_broadcast_to_reference(self):
+    da = xr.DataArray(0.0)
+    reference = xr.DataArray(
+        np.ones((2, 3)),
+        dims=('time', 'x'),
+        coords={
+            'time': [0, 1],
+            'x': [10, 20, 30],
+            'mask': (('time', 'x'), np.array([[True, False, True]] * 2)),
+        },
+    )
+    interpolator = interpolations.BroadcastToReference()
+    result = interpolator.interpolate_data_array(da, reference)
+    self.assertEqual(result.dims, ('time', 'x'))
+    self.assertEqual(result.shape, (2, 3))
+    np.testing.assert_array_equal(result.values, np.zeros((2, 3)))
+    self.assertNotIn('mask', result.coords)
+
+    with self.assertRaisesRegex(ValueError, 'reference must be provided'):
+      interpolator.interpolate_data_array(da, None)
+
 
 if __name__ == '__main__':
   absltest.main()
