@@ -125,6 +125,9 @@ COLORS = {
     "Astra vs ERA5": husl[10],
     "Astra (mean) vs ERA5": husl[10],
     "Astra (1st member) vs ERA5": husl[10],
+    "Sonny-ENS vs ERA5": husl[11],
+    "Sonny-ENS (mean) vs ERA5": husl[11],
+    "Sonny-ENS (1st member) vs ERA5": husl[11],
 }
 
 SYMBOLS = {
@@ -180,4 +183,7 @@ SYMBOLS = {
     "Astra vs ERA5": "circle",
     "Astra (mean) vs ERA5": "circle",
     "Astra (1st member) vs ERA5": "triangle-down",
+    "Sonny-ENS vs ERA5": "circle",
+    "Sonny-ENS (mean) vs ERA5": "circle",
+    "Sonny-ENS (1st member) vs ERA5": "triangle-down",
 }

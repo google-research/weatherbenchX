@@ -106,6 +106,8 @@ DETERMINISTIC_MODELS = {
     "arcana_vs_era5": "Tianji vs ERA5",
     "astra_mean_vs_era5": "Astra (mean) vs ERA5",
     "astra_single_member_vs_era5": "Astra (1st member) vs ERA5",
+    "sonny_ens_mean_vs_era5": "Sonny-ENS (mean) vs ERA5",
+    "sonny_ens_single_member_vs_era5": "Sonny-ENS (1st member) vs ERA5",
 }
 PROBABILISTIC_MODELS = {
     "ens_vs_hres_t0": "IFS ENS vs Analysis",
@@ -119,6 +121,7 @@ PROBABILISTIC_MODELS = {
     "fgn_operational_vs_hres_t0": "FGN (oper.) vs Analysis",
     "arches_weather_gen_vs_era5": "ArchesWeatherGen vs ERA5",
     "astra_vs_era5": "Astra vs ERA5",
+    "sonny_ens_vs_era5": "Sonny-ENS vs ERA5",
 }
 REGION_NAMES = {
     "global": "Global",
@@ -232,9 +235,11 @@ def process_results(model, year, resolution):
     print(fn, "does not exist.")
     return
 
-  # GraphCast models retain a random lead_time_secs coordinate that we drop.
-  if hasattr(ds, "lead_time_secs"):
-    ds = ds.drop_vars("lead_time_secs")
+  # Drop scalar coordinates retained from model metadata or single-member
+  # slicing (e.g. 0-indexed vs 1-indexed ensemble member numbers).
+  for extra_coord in ("lead_time_secs", "number", "realization", "sample"):
+    if hasattr(ds, extra_coord):
+      ds = ds.drop_vars(extra_coord)
 
   if "vector_rmse.wind" in ds:
     ds = ds.rename({"vector_rmse.wind": "rmse.wind_vector"})
