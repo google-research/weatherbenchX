@@ -157,7 +157,28 @@ class EnsembleMean(InputTransform):
   def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
     if self._ensemble_dim not in da.dims and self._skip_if_ensemble_dim_missing:
       return da
-    return da.mean(self._ensemble_dim, skipna=self._skipna)
+
+    result = da.mean(self._ensemble_dim, skipna=self._skipna)
+
+    # xarray discards coordinates that depend on a reduced dimension. In
+    # particular, this would remove the NaN mask added by PredictionsFromXarray
+    # and prevent Aggregator(masked=True) from honoring missing observations.
+    # Match the reduction's skipna semantics: an average is valid only if all
+    # members are valid without skipna, or at least one is valid with skipna.
+    if 'mask' in da.coords and self._ensemble_dim in da['mask'].dims:
+      mask = da['mask']
+      # With skipna=None, xarray skips missing values for floating arrays.
+      skipna = self._skipna
+      if skipna is None:
+        skipna = np.issubdtype(da.dtype, np.floating)
+      reduced_mask = (
+          mask.any(self._ensemble_dim)
+          if skipna
+          else mask.all(self._ensemble_dim)
+      )
+      result = result.assign_coords(mask=reduced_mask)
+
+    return result
 
 
 class EnsembleMedian(InputTransform):
