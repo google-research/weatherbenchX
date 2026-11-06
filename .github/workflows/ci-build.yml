@@ -43,4 +43,4 @@ jobs:
         pip install -e .[tests]
     - name: Run unit tests
       run: |
-        pytest weatherbenchX public_benchmark/run_benchmark_evaluation_test.py
+        pytest weatherbenchX
