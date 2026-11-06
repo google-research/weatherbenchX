@@ -48,7 +48,8 @@ class EnsembleAveragedStatistic(base.Statistic):
 
   @property
   def unique_name(self) -> str:
-    return self._wrapped_statistic.unique_name + '_each_' + self._ensemble_dim
+    name = self._wrapped_statistic.unique_name + '_each_' + self._ensemble_dim
+    return name + ('_skipna_ensemble_True' if self._skipna_ensemble else '')
 
   def compute(
       self,
@@ -124,7 +125,8 @@ class CRPSSkill(base.PerVariableStatistic):
 
   @property
   def unique_name(self) -> str:
-    return f'CRPSSkill_{self._ensemble_dim}'
+    name = f'CRPSSkill_{self._ensemble_dim}'
+    return name + ('_skipna_ensemble_True' if self._skipna_ensemble else '')
 
   def _compute_per_variable(
       self,
@@ -189,7 +191,8 @@ class CRPSSpread(base.PerVariableStatistic):
   @property
   def unique_name(self) -> str:
     fair_str = 'fair' if self._fair else 'unfair'
-    return f'CRPSSpread_{self._ensemble_dim}_{fair_str}_{self._which}'
+    name = f'CRPSSpread_{self._ensemble_dim}_{fair_str}_{self._which}'
+    return name + ('_skipna_ensemble_True' if self._skipna_ensemble else '')
 
   def _compute_per_variable(
       self,
