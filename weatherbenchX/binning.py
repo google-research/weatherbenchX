@@ -18,6 +18,8 @@ from typing import Any, Hashable, Mapping, Optional, Sequence, Tuple, Union
 import numpy as np
 import xarray as xr
 
+_SECONDS_PER_DAY = 24 * 60 * 60
+
 
 class Binning(abc.ABC):
   """Binning base class."""
@@ -565,6 +567,50 @@ class ByTimeUnitFromSeconds(Binning):
     )
     masks = masks.assign_coords({bin_dim_name: bins})
     return masks
+
+
+class ByInitHourFromSeconds(ByTimeUnitFromSeconds):
+  """Bins by forecast initialization hour of day (UTC).
+
+  Similar to `ByTimeUnit(unit='hour', time_dim='init_time')`, but computes the
+  initialization time as valid time minus lead time, from coordinates in
+  seconds. Like `ByTimeUnitFromSeconds`, this can be wrapped in jax.jit.
+
+  This is useful when the data has no initialization time coordinate (e.g. in
+  online evaluation, where only valid and lead times are available), since
+  `ByTimeUnitFromSeconds` can only bin an existing coordinate.
+  """
+
+  def __init__(
+      self,
+      valid_time_dim: str,
+      lead_time_dim: str,
+      bins: Sequence[int] | None = None,
+  ):
+    """Init.
+
+    Args:
+      valid_time_dim: Coordinate with valid times in seconds since epoch.
+      lead_time_dim: Coordinate with lead times in seconds.
+      bins: Initialization hours to bin by. Default: one bin per hour, 0
+        through 23.
+
+    Raises:
+      ValueError: If any bin is outside 0 through 23.
+    """
+    if bins is not None and any(not 0 <= b <= 23 for b in bins):
+      raise ValueError(f'Initialization hour bins must be in [0, 23]: {bins}')
+    super().__init__(unit='hour', time_dim='init_time', bins=bins)
+    self.valid_time_dim = valid_time_dim
+    self.lead_time_dim = lead_time_dim
+
+  def create_bin_mask(
+      self,
+      statistic: xr.DataArray,
+  ) -> xr.DataArray:
+    init_secs = statistic[self.valid_time_dim] - statistic[self.lead_time_dim]
+    statistic = statistic.assign_coords(init_time=init_secs % _SECONDS_PER_DAY)
+    return super().create_bin_mask(statistic)
 
 
 class ByCoordBins(Binning):
