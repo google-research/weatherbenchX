@@ -97,7 +97,7 @@ def binarize_thresholds(
         {coord: x[coord] for coord in sel_coords}
     )
   exceeded = (x >= threshold) if include_equal else (x > threshold)
-  return exceeded.where(~xu.isnan(x) & ~xu.isnan(threshold)).astype(np.float32)
+  return exceeded.where(~xu.isnan(x) & ~xu.isnan(threshold), np.float32(np.nan))
 
 
 # Transforms
@@ -577,11 +577,10 @@ class CategoricalToOneHot(InputTransform):
         coords={self._class_dim: list(self._class_names)},
     )
     matches = da == indices
-    one_hot = matches.astype(np.float32)
     if self._out_of_range == 'nan':
       # NaN inputs never match a class, so this also masks NaNs.
-      return one_hot.where(matches.any(self._class_dim))
-    return one_hot.where(~xu.isnan(da))
+      return matches.where(matches.any(self._class_dim), np.float32(np.nan))
+    return matches.where(~xu.isnan(da), np.float32(np.nan))
 
 
 def select_bin_thresholds_by_time_from_chunk(

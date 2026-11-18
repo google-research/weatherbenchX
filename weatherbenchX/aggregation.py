@@ -377,6 +377,9 @@ class Aggregator:
 
   def aggregate_stat_var(self, stat: xr.DataArray) -> AggregationState | None:
     """Aggregate one statistic DataArray for one variable."""
+    # Match `stat`'s numeric dtype for the fill value so `.where(mask, zero)`
+    # does not upcast float32 arrays to float64 under NumPy 1.x promotion rules.
+    zero = stat.dtype.type(0) if stat.dtype.kind in ('f', 'i', 'u', 'c') else 0
     if self.masked and hasattr(stat, 'mask'):
       mask = stat.mask
       if self.skipna:
@@ -386,21 +389,26 @@ class Aggregator:
       # be ignored in mean_statistics(). this is equivalent to multiplying by
       # the mask, but avoids NaN * 0 -> NaN in cases where there are NaNs in
       # masked positions. Only for variables with a mask attribute.
-      stat = stat.where(mask, 0)
+      stat = stat.where(mask, zero)
 
       # We need to broadcast the mask to the same shape as the stat, so that
       # reductions over it behave the same as reductions over the full stat.
       mask = mask.broadcast_like(stat)
     elif self.skipna:
       mask = ~stat.isnull()
-      stat = stat.where(mask, 0)
+      stat = stat.where(mask, zero)
     else:
       mask = xr.ones_like(stat)
 
     assert mask.sizes == stat.sizes
 
+    stat_dtype = stat.dtype
     sum_weighted_statistics = self.aggregation_fn(stat)
-    sum_weights = self.aggregation_fn(mask.astype(stat.dtype))
+    # Release any masked copy of `stat` before casting `mask` to `stat_dtype`
+    # so the two full-sized arrays do not overlap in memory.
+    del stat
+    weights_mask = mask if mask.dtype == stat_dtype else mask.astype(stat_dtype)
+    sum_weights = self.aggregation_fn(weights_mask)
     if sum_weighted_statistics is None or sum_weights is None:
       return None
 

@@ -284,6 +284,9 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
                 aggregator_name=agg_name,
             )
             yield aggregation_key, aggregation_state.sum_weights
+        # Release the previous statistic's arrays before computing the next one.
+        stats = None
+        stat = None
       except StopIteration:
         break
 

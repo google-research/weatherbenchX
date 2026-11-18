@@ -34,11 +34,8 @@ class TruePositives(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-
-    return (
-        (predictions.astype(bool) * targets.astype(bool))
-        .where(~xu.isnan(predictions * targets))
-        .astype(np.float32)
+    return ((predictions != 0) & (targets != 0)).where(
+        ~xu.isnan(predictions) & ~xu.isnan(targets), np.float32(np.nan)
     )
 
 
@@ -54,11 +51,8 @@ class TrueNegatives(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-
-    return (
-        (~predictions.astype(bool) * ~targets.astype(bool))
-        .where(~xu.isnan(predictions * targets))
-        .astype(np.float32)
+    return ((predictions == 0) & (targets == 0)).where(
+        ~xu.isnan(predictions) & ~xu.isnan(targets), np.float32(np.nan)
     )
 
 
@@ -74,11 +68,8 @@ class FalsePositives(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-
-    return (
-        (predictions.astype(bool) * ~targets.astype(bool))
-        .where(~xu.isnan(predictions * targets))
-        .astype(np.float32)
+    return ((predictions != 0) & (targets == 0)).where(
+        ~xu.isnan(predictions) & ~xu.isnan(targets), np.float32(np.nan)
     )
 
 
@@ -94,10 +85,8 @@ class FalseNegatives(base.PerVariableStatistic):
       predictions: xr.DataArray,
       targets: xr.DataArray,
   ) -> xr.DataArray:
-    return (
-        (~predictions.astype(bool) * targets.astype(bool))
-        .where(~xu.isnan(predictions * targets))
-        .astype(np.float32)
+    return ((predictions == 0) & (targets != 0)).where(
+        ~xu.isnan(predictions) & ~xu.isnan(targets), np.float32(np.nan)
     )
 
 

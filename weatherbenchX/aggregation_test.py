@@ -359,6 +359,33 @@ class AggregationTest(absltest.TestCase):
          roundtripped.sum_weights),
     )
 
+  def test_float32_dtype_preserved(self):
+    predictions, targets = self._get_test_data()
+    predictions = predictions.astype('float32')
+    targets = targets.where(targets.latitude > 0).astype('float32')
+    targets = data_loaders_base.add_nan_mask_to_data(targets)
+    all_metrics = {'rmse': deterministic.RMSE()}
+
+    for kwargs in (
+        {'reduce_dims': ['init_time', 'latitude', 'longitude']},
+        {'reduce_dims': ['init_time', 'latitude', 'longitude'], 'skipna': True},
+        {'reduce_dims': ['init_time', 'latitude', 'longitude'], 'masked': True},
+        {
+            'reduce_dims': ['init_time', 'latitude', 'longitude'],
+            'masked': True,
+            'skipna': True,
+        },
+    ):
+      agg_state = self._aggregate(all_metrics, predictions, targets, kwargs)
+      for var in ('2m_temperature', 'geopotential'):
+        self.assertEqual(
+            agg_state.sum_weighted_statistics['SquaredError'][var].dtype,
+            'float32',
+        )
+        self.assertEqual(
+            agg_state.sum_weights['SquaredError'][var].dtype, 'float32'
+        )
+
 
 if __name__ == '__main__':
   absltest.main()
