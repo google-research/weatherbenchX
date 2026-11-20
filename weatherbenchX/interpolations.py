@@ -276,7 +276,7 @@ class InterpolateToReferenceCoords(Interpolation):
     if reference.size == 0:
       # Need to make sure to retain any dimensions that are not being
       # interpolated.
-      da_dims_to_retain = set(da.dims) - set(dims)
+      da_dims_to_retain = set(da.dims) - set(dims) - set(reference.dims)
       return reference.copy().expand_dims({d: da[d] for d in da_dims_to_retain})
 
     dim_args = {dim: reference[dim] for dim in dims}
