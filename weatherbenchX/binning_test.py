@@ -182,6 +182,68 @@ class BinningTest(parameterized.TestCase):
         mask[f'prediction_timedelta_sec_{unit}'].values, expected_bins
     )
 
+  def test_by_init_hour_from_seconds_binning(self):
+    # Example 0 is initialized at 01 UTC on day 0, example 1 at 19 UTC on day 1
+    # (so its valid times cross midnight).
+    lead_secs = np.array([0, 6, 12]) * 3600
+    init_secs = np.array([1, 24 + 19]) * 3600
+    statistic = xr.DataArray(
+        np.zeros((2, 3)),
+        dims=['batch', 'time'],
+        coords={
+            'valid_sec': (
+                ['batch', 'time'],
+                init_secs[:, None] + lead_secs[None, :],
+            ),
+            'lead_sec': ('time', lead_secs),
+        },
+    )
+    bins = binning.ByInitHourFromSeconds(
+        'valid_sec', 'lead_sec', bins=[1, 7, 19]
+    )
+    mask = bins.create_bin_mask(statistic)
+    np.testing.assert_array_equal(mask.init_time_hour, [1, 7, 19])
+    np.testing.assert_array_equal(
+        mask.transpose('init_time_hour', 'batch', 'time'),
+        [
+            [[True] * 3, [False] * 3],
+            [[False] * 3, [False] * 3],
+            [[False] * 3, [True] * 3],
+        ],
+    )
+
+  def test_by_init_hour_from_seconds_default_bins(self):
+    # Example 0 is initialized at 01 UTC, example 1 at 19 UTC on the next day.
+    lead_secs = np.array([0, 6]) * 3600
+    init_secs = np.array([1, 24 + 19]) * 3600
+    statistic = xr.DataArray(
+        np.zeros((2, 2)),
+        dims=['batch', 'time'],
+        coords={
+            'valid_sec': (
+                ['batch', 'time'],
+                init_secs[:, None] + lead_secs[None, :],
+            ),
+            'lead_sec': ('time', lead_secs),
+        },
+    )
+    mask = binning.ByInitHourFromSeconds(
+        'valid_sec', 'lead_sec'
+    ).create_bin_mask(statistic)
+    np.testing.assert_array_equal(mask.init_time_hour, np.arange(24))
+    # Each example lands only in the bin for its own initialization hour.
+    expected = np.zeros((24, 2, 2), dtype=bool)
+    expected[1, 0] = True
+    expected[19, 1] = True
+    np.testing.assert_array_equal(
+        mask.transpose('init_time_hour', 'batch', 'time'), expected
+    )
+
+  @parameterized.parameters(([-10, 200],), ([-1],), ([24],))
+  def test_by_init_hour_from_seconds_rejects_out_of_range_bins(self, bins):
+    with self.assertRaises(ValueError):
+      binning.ByInitHourFromSeconds('valid_sec', 'lead_sec', bins=bins)
+
   def test_by_coord_bins(self):
     target_path = resources.files('weatherbenchX').joinpath(
         'test_data/metar-timeNominal-by-month'
