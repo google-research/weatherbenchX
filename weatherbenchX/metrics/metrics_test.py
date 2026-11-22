@@ -14,6 +14,7 @@
 """Unit tests for metrics."""
 
 import itertools
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
@@ -1832,6 +1833,120 @@ class MetricsTest(parameterized.TestCase):
     # 2 * 0.75 * 0.75 = 1.125 and 2 * 2.25 * 0.25 = 1.125.
     res = eqs.compute(ens_pred, target)['t']
     np.testing.assert_allclose(res.values, [[1.125, 1.125]])
+
+
+class ProbabilisticStatisticIdentityTest(parameterized.TestCase):
+  """Joint evaluation preserves each statistic's missing-member policy."""
+
+  def _statistic(self, kind, skipna):
+    if kind == 'skill':
+      return probabilistic.CRPSSkill(skipna_ensemble=skipna)
+    if kind.startswith('spread'):
+      return probabilistic.CRPSSpread(
+          skipna_ensemble=skipna,
+          fair=kind != 'spread_unfair',
+          which='targets' if kind == 'spread_targets' else 'predictions',
+      )
+    return probabilistic.EnsembleAveragedStatistic(
+        deterministic.SquaredError(), ensemble_dim='number', skipna_ensemble=skipna
+    )
+
+  @parameterized.parameters(
+      'skill', 'spread', 'spread_unfair', 'spread_targets', 'averaged'
+  )
+  def test_different_policies_are_order_independent_and_not_deduplicated(self, kind):
+    data = xr.DataArray(
+        [[1.0, 3.0, np.nan], [2.0, 4.0, 8.0]],
+        dims=['time', 'number'],
+        coords={'time': [10, 20]},
+    )
+    predictions = {'x': data}
+    targets = {
+        'x': data + 1
+        if kind == 'spread_targets'
+        else xr.DataArray([0.0, 1.0], dims=['time'], coords={'time': [10, 20]})
+    }
+    before = data.copy(deep=True)
+    strict, skip = self._statistic(kind, False), self._statistic(kind, True)
+    self.assertNotEqual(strict.unique_name, skip.unique_name)
+    expected = {
+        'strict': strict.compute(predictions, targets)['x'],
+        'skip': skip.compute(predictions, targets)['x'],
+    }
+    self.assertTrue(np.isnan(expected['strict'][0]))
+    self.assertTrue(np.isfinite(expected['skip'][0]))
+    for items in (
+        (('strict', strict), ('skip', skip)),
+        (('skip', skip), ('strict', strict)),
+    ):
+      metrics = dict(items)
+      stats = metrics_base.compute_unique_statistics_for_all_metrics(
+          metrics, predictions, targets
+      )
+      self.assertLen(stats, 2)
+      for name, metric in items:
+        actual = metrics_base.compute_metric_from_statistics(metric, stats)['x']
+        xr.testing.assert_identical(actual, expected[name])
+    xr.testing.assert_identical(data, before)
+
+  @parameterized.parameters('skill', 'spread', 'averaged')
+  def test_identical_policies_still_share_one_computation(self, kind):
+    predictions = {'x': xr.DataArray([[1.0, 3.0, 5.0]], dims=['time', 'number'])}
+    targets = {'x': xr.DataArray([0.0], dims=['time'])}
+    for skipna in (False, True):
+      with self.subTest(skipna=skipna):
+        first, second = self._statistic(kind, skipna), self._statistic(kind, skipna)
+        with mock.patch.object(second, 'compute', wraps=second.compute) as compute:
+          stats = metrics_base.compute_unique_statistics_for_all_metrics(
+              {'a': first, 'b': second}, predictions, targets
+          )
+          self.assertLen(stats, 1)
+          compute.assert_called_once()
+        xr.testing.assert_equal(
+            metrics_base.compute_metric_from_statistics(first, stats)['x'],
+            metrics_base.compute_metric_from_statistics(second, stats)['x'],
+        )
+
+  def test_default_identifiers_remain_compatible(self):
+    self.assertEqual(self._statistic('skill', False).unique_name, 'CRPSSkill_number')
+    self.assertEqual(
+        self._statistic('spread', False).unique_name,
+        'CRPSSpread_number_fair_predictions',
+    )
+    self.assertEqual(
+        self._statistic('averaged', False).unique_name, 'SquaredError_each_number'
+    )
+
+  @parameterized.parameters(False, True)
+  def test_crps_and_averaged_metrics_remain_distinct_through_aggregation(self, reverse):
+    predictions = {
+        'x': xr.DataArray(
+            [[1.0, 3.0, np.nan], [2.0, 4.0, 8.0]], dims=['time', 'number']
+        )
+    }
+    targets = {'x': xr.DataArray([0.0, 1.0], dims=['time'])}
+    metrics = {
+        'strict_crps': probabilistic.CRPSEnsemble(skipna_ensemble=False),
+        'skip_crps': probabilistic.CRPSEnsemble(skipna_ensemble=True),
+        'strict_mse': probabilistic.EnsembleAveragedMetric(
+            deterministic.MSE(), skipna_ensemble=False
+        ),
+        'skip_mse': probabilistic.EnsembleAveragedMetric(
+            deterministic.MSE(), skipna_ensemble=True
+        ),
+    }
+    if reverse:
+      metrics = dict(reversed(list(metrics.items())))
+    joint = compute_all_metrics(metrics, predictions, targets, reduce_dims=['time'])
+    for name, metric in metrics.items():
+      individual = compute_all_metrics(
+          {name: metric}, predictions, targets, reduce_dims=['time']
+      )
+      xr.testing.assert_equal(joint[name + '.x'], individual[name + '.x'])
+    self.assertTrue(np.isnan(joint['strict_crps.x']))
+    self.assertTrue(np.isnan(joint['strict_mse.x']))
+    self.assertAlmostEqual(float(joint['skip_crps.x']), 4.0 / 3.0)
+    self.assertAlmostEqual(float(joint['skip_mse.x']), 37.0 / 3.0)
 
 
 if __name__ == '__main__':
