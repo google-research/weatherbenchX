@@ -883,6 +883,22 @@ class BinProbabilitiesTransformsTest(parameterized.TestCase):
           out_of_range='raise',
       )
 
+  def test_argmax_one_hot(self):
+    da = xr.DataArray(
+        np.array(
+            [[0.1, 0.7, 0.2], [0.0, 0.0, 0.0], [np.nan, 0.5, 0.5]],
+            dtype=np.float32,
+        ),
+        dims=('x', 'class'),
+        coords={'class': ['a', 'b', 'c']},
+    )
+    transform = wrappers.ArgmaxOneHot(which='predictions', dim='class')
+    out = transform.transform_fn(da)
+    self.assertEqual(transform.unique_name_suffix, 'ArgmaxOneHot_class')
+    np.testing.assert_allclose(out.isel(x=0).values, [0.0, 1.0, 0.0])
+    np.testing.assert_allclose(out.isel(x=1).values, [0.0, 0.0, 0.0])
+    self.assertTrue(np.isnan(out.isel(x=2).values).all())
+
 
 if __name__ == '__main__':
   absltest.main()
