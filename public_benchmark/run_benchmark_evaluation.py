@@ -392,6 +392,11 @@ def main(argv: Sequence[str]) -> None:
   out_path = os.path.join(OUTPUT_DIR.value, filename)  # pyrefly: ignore[no-matching-overload]
   print(f'Save path: {out_path}')
 
+  # Allow prediction masks for benchmark models (e.g. Keisler) that set
+  # add_nan_mask=True on their prediction loader.
+  allow_prediction_mask = prediction_config.get('data_loader_kwargs', {}).get(
+      'add_nan_mask', False
+  )
   with beam.Pipeline(runner=RUNNER.value, argv=argv) as root:
     beam_pipeline.define_pipeline(
         root,
@@ -401,6 +406,7 @@ def main(argv: Sequence[str]) -> None:
         all_metrics,
         aggregation_method,
         out_path=out_path,
+        allow_prediction_mask=allow_prediction_mask,
     )
 
 

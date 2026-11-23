@@ -279,14 +279,10 @@ class SEEPS(base.Statistic):
     result = result.where(mask, np.nan)
 
     # Add NaN mask. If mask coordinate already exists, combine them.
-    if hasattr(predictions, 'mask'):
-      if hasattr(targets, 'mask'):
-        raise ValueError(
-            'Both predictions and targets have masks. This should not happen.'
-        )
-      mask = mask & predictions.mask
-    elif hasattr(targets, 'mask'):
-      mask = mask & targets.mask
+    if 'mask' in predictions.coords:
+      mask = mask & predictions.coords['mask']
+    if 'mask' in targets.coords:
+      mask = mask & targets.coords['mask']
 
     result.coords['mask'] = mask
 
