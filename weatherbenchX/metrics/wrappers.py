@@ -1336,6 +1336,52 @@ class Tile(InputTransform):
     )
 
 
+class ArgmaxOneHot(InputTransform):
+  """Converts class probabilities along `dim` to a float32 one-hot argmax.
+
+  Selects the index of the maximum value along `dim` (breaking ties in favor of
+  the first maximum, matching `xarray.DataArray.argmax`) and encodes it as a
+  `float32` one-hot array with the same coordinates as the input. Slices whose
+  maximum value is `<= 0` (e.g., all-zero probabilities representing "no class")
+  are encoded as all zeros rather than selecting index 0. Slices containing any
+  NaN along `dim` are set to NaN across all classes.
+  """
+
+  def __init__(
+      self,
+      which: str,
+      dim: str,
+  ):
+    """Init.
+
+    Args:
+      which: Which input to apply the wrapper to. Must be one of 'predictions',
+        'targets', or 'both'.
+      dim: Name of the class dimension along which to take the argmax.
+    """
+    super().__init__(which)
+    self._dim = dim
+
+  @property
+  def unique_name_suffix(self) -> str:
+    return f'ArgmaxOneHot_{self._dim}'
+
+  def transform_fn(self, da: xr.DataArray) -> xr.DataArray:
+    valid = da.notnull().all(dim=self._dim)
+    # Fill NaNs with -1 so argmax succeeds; zero out all-0 slices (max <= 0),
+    # then restore NaNs on invalid slices.
+    filled = da.fillna(-1.0)
+    max_idx = filled.argmax(dim=self._dim)
+    idx = xr.DataArray(
+        np.arange(da.sizes[self._dim]),
+        dims=[self._dim],
+        coords={self._dim: da.coords[self._dim]},
+    )
+    one_hot = (idx == max_idx).astype(np.float32)
+    has_pos = filled.max(dim=self._dim) > 0.0
+    return one_hot.where(has_pos, np.float32(0.0)).where(valid)
+
+
 class WrappedStatistic(base.Statistic):
   """Wraps a statistic with an input transform.
 
