@@ -392,6 +392,28 @@ class BinningTest(parameterized.TestCase):
     self.assertIn('global', mask[binning_obj.bin_dim_name].values)
     self.assertTrue(mask.sel(**{binning_obj.bin_dim_name: 'global'}).all())
 
+  def test_by_coord_bins_with_bin_dim_name(self):
+    lead_times = np.arange(0, 72, 6, dtype='timedelta64[h]').astype(
+        'timedelta64[ns]'
+    )
+    statistic = xr.DataArray(
+        np.ones(len(lead_times)),
+        dims=['lead_time'],
+        coords={'lead_time': lead_times},
+    )
+    bin_edges = np.array([24, 48, 72], dtype='timedelta64[h]').astype(
+        'timedelta64[ns]'
+    )
+    binning_obj = binning.ByCoordBins(
+        'lead_time', bin_edges, bin_dim_name='lead_time_bins'
+    )
+    mask = binning_obj.create_bin_mask(statistic)
+
+    self.assertEqual(binning_obj.bin_dim_name, 'lead_time_bins')
+    self.assertEqual(mask.dims, ('lead_time_bins', 'lead_time'))
+    np.testing.assert_array_equal(mask['lead_time_bins'].values, bin_edges[:-1])
+    np.testing.assert_array_equal(mask.sum('lead_time').values, [4, 4])
+
 
 if __name__ == '__main__':
   absltest.main()
