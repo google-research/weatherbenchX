@@ -575,6 +575,7 @@ class ByCoordBins(Binning):
       dim_name: str,
       bin_edges: np.ndarray,
       add_global_bin: bool = False,
+      bin_dim_name: Optional[str] = None,
   ):
     """Init.
 
@@ -583,8 +584,12 @@ class ByCoordBins(Binning):
       bin_edges: Bin edges to bin by.
       add_global_bin: If True, add a global bin containing all data. Default:
         False.
+      bin_dim_name: Name of dimension to use for bins in the output. Default:
+        `dim_name`.
     """
-    super().__init__(dim_name)
+    if bin_dim_name is None:
+      bin_dim_name = dim_name
+    super().__init__(bin_dim_name)
     self.dim_name = dim_name
     self.bin_edges = bin_edges
     self.add_global_bin = add_global_bin
@@ -601,21 +606,25 @@ class ByCoordBins(Binning):
           statistic.coords[self.dim_name] >= start,
           statistic.coords[self.dim_name] < stop,
       )
-      mask = mask.drop_vars([self.dim_name]).expand_dims(self.dim_name, axis=0)
+      mask = mask.drop_vars([self.dim_name]).expand_dims(
+          self.bin_dim_name, axis=0
+      )
       coord_val = str(start) if self.add_global_bin else start
-      mask.coords[self.dim_name] = np.array([coord_val])
+      mask.coords[self.bin_dim_name] = np.array([coord_val])
       mask.assign_coords({
-          self.dim_name
-          + '_left_edge': xr.DataArray([start], dims=[self.dim_name]),
-          self.dim_name
-          + '_right_edge': xr.DataArray([stop], dims=[self.dim_name]),
+          self.bin_dim_name
+          + '_left_edge': xr.DataArray([start], dims=[self.bin_dim_name]),
+          self.bin_dim_name
+          + '_right_edge': xr.DataArray([stop], dims=[self.bin_dim_name]),
       })
       masks.append(mask)
 
     if self.add_global_bin:
       mask = xr.full_like(statistic.coords[self.dim_name], True, dtype=bool)
-      mask = mask.drop_vars([self.dim_name]).expand_dims(self.dim_name, axis=0)
-      mask.coords[self.dim_name] = ['global']
+      mask = mask.drop_vars([self.dim_name]).expand_dims(
+          self.bin_dim_name, axis=0
+      )
+      mask.coords[self.bin_dim_name] = ['global']
       masks.append(mask)
 
     if not masks:  # Catch possibility of empty input arrays.
@@ -625,8 +634,8 @@ class ByCoordBins(Binning):
           .drop_vars(self.dim_name)
           .expand_dims(
               {
-                  self.dim_name: (
-                      xr.DataArray([], dims=[self.dim_name]).astype(dtype)
+                  self.bin_dim_name: (
+                      xr.DataArray([], dims=[self.bin_dim_name]).astype(dtype)
                   )
               },
               axis=0,
@@ -634,7 +643,7 @@ class ByCoordBins(Binning):
       )
       return masks
     else:
-      return xr.concat(masks, self.dim_name)  # pyrefly: ignore[bad-return]
+      return xr.concat(masks, self.bin_dim_name)  # pyrefly: ignore[bad-return]
 
 
 class BySets(Binning):
