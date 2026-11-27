@@ -24,7 +24,7 @@ from weatherbenchX.metrics import base as metrics_base
 import xarray as xr
 
 
-def combining_sum(data_arrays: Sequence[xr.DataArray]) -> xr.DataArray:
+def combining_sum(data_arrays: Iterable[xr.DataArray]) -> xr.DataArray:
   """Sum of DataArrays, with zero-filled outer join for non-aligned coordinates.
 
   Outer join means that no coordinates will be dropped during the sum, like they
@@ -45,17 +45,20 @@ def combining_sum(data_arrays: Sequence[xr.DataArray]) -> xr.DataArray:
   this, an example of this is in beam_pipeline.py.
 
   Args:
-    data_arrays: Sequence of DataArrays to sum.
+    data_arrays: Iterable of DataArrays to sum.
 
   Returns:
     The results as a DataArray.
   """
-  if not data_arrays:
+  it = iter(data_arrays)
+  result = next(it, None)
+  if result is None:
     return sum([])  # pyrefly: ignore[bad-return]
 
-  result = data_arrays[0]
-  for da in data_arrays[1:]:
-    aligned_result, aligned_da = xr.align(result, da, join='outer', fill_value=0)
+  for da in it:
+    aligned_result, aligned_da = xr.align(
+        result, da, join='outer', fill_value=0, copy=False
+    )
     result = aligned_result + aligned_da
   return result
 

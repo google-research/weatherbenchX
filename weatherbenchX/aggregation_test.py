@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+import numpy as np
 from weatherbenchX import aggregation
 from weatherbenchX import binning
 from weatherbenchX import test_utils
@@ -385,6 +386,49 @@ class AggregationTest(absltest.TestCase):
         self.assertEqual(
             agg_state.sum_weights['SquaredError'][var].dtype, 'float32'
         )
+
+  def test_combining_sum_empty(self):
+    self.assertEqual(aggregation.combining_sum([]), 0)
+    self.assertEqual(aggregation.combining_sum(iter([])), 0)
+
+  def test_combining_sum_single(self):
+    a = xr.DataArray(
+        np.array([1.0, 2.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    xr.testing.assert_identical(aggregation.combining_sum(iter([a])), a)
+
+  def test_combining_sum_aligned_coords_from_iterator(self):
+    a = xr.DataArray(
+        np.array([1.0, 2.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    b = xr.DataArray(
+        np.array([3.0, 4.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    a_orig, b_orig = a.copy(deep=True), b.copy(deep=True)
+
+    actual = aggregation.combining_sum(iter([a, b]))
+    expected = xr.DataArray(
+        np.array([4.0, 6.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    xr.testing.assert_identical(actual, expected)
+    xr.testing.assert_identical(a, a_orig)
+    xr.testing.assert_identical(b, b_orig)
+
+  def test_combining_sum_unaligned_coords_zero_fills(self):
+    a = xr.DataArray(
+        np.array([1.0, 2.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    b = xr.DataArray(
+        np.array([3.0, 4.0], dtype=np.float32), dims=['x'], coords={'x': [1, 2]}
+    )
+
+    actual = aggregation.combining_sum(iter([a, b]))
+    expected = xr.DataArray(
+        np.array([1.0, 5.0, 4.0], dtype=np.float32),
+        dims=['x'],
+        coords={'x': [0, 1, 2]},
+    )
+    xr.testing.assert_identical(actual, expected)
 
 
 if __name__ == '__main__':

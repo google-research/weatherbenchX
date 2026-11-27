@@ -1161,5 +1161,49 @@ class BeamPipelineTest(parameterized.TestCase):
     self.assertEqual(dict(loaded.attrs), custom_attrs)
 
 
+class CombiningSumTest(absltest.TestCase):
+
+  def test_merge_empty_or_all_none_returns_none(self):
+    combine_fn = beam_utils.CombiningSum()
+    self.assertIsNone(combine_fn.merge_accumulators(iter([])))
+    self.assertIsNone(combine_fn.merge_accumulators(iter([None, None])))
+
+  def test_merge_single_accumulator(self):
+    combine_fn = beam_utils.CombiningSum()
+    a = xr.DataArray(
+        np.array([1.0, 2.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    merged = combine_fn.merge_accumulators(iter([None, a, None]))
+    self.assertIsNotNone(merged)
+    xr.testing.assert_identical(merged, a)
+
+  def test_add_input_and_merge_do_not_mutate_inputs(self):
+    combine_fn = beam_utils.CombiningSum()
+    a = xr.DataArray(
+        np.array([1.0, 2.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    b = xr.DataArray(
+        np.array([3.0, 4.0], dtype=np.float32), dims=['x'], coords={'x': [0, 1]}
+    )
+    a_orig, b_orig = a.copy(deep=True), b.copy(deep=True)
+
+    acc = combine_fn.create_accumulator()
+    acc = combine_fn.add_input(acc, a)
+    acc = combine_fn.add_input(acc, b)
+    merged = combine_fn.merge_accumulators(iter([None, a, b, acc, None]))
+    output = combine_fn.extract_output(merged)
+
+    xr.testing.assert_identical(
+        output,
+        xr.DataArray(
+            np.array([8.0, 12.0], dtype=np.float32),
+            dims=['x'],
+            coords={'x': [0, 1]},
+        ),
+    )
+    xr.testing.assert_identical(a, a_orig)
+    xr.testing.assert_identical(b, b_orig)
+
+
 if __name__ == '__main__':
   absltest.main()

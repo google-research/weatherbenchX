@@ -43,9 +43,10 @@ class CombiningSum(beam.transforms.CombineFn):
       return aggregation.combining_sum([accumulator, element])
 
   def merge_accumulators(
-      self, accumulators: Iterable[_Accumulator]) -> _Accumulator:
-    accumulators = [a for a in accumulators if a is not None]
-    return aggregation.combining_sum(accumulators) if accumulators else None  # pyrefly: ignore[bad-argument-type]
+      self, accumulators: Iterable[_Accumulator]
+  ) -> _Accumulator:
+    result = aggregation.combining_sum(a for a in accumulators if a is not None)
+    return result if isinstance(result, xr.DataArray) else None
 
   def extract_output(self, accumulator: _Accumulator) -> _Accumulator:
     return accumulator
