@@ -189,8 +189,10 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
       self,
       metrics: Mapping[str, metrics_base.Metric],
       aggregator: aggregation.Aggregator | Mapping[str, aggregation.Aggregator],
+      allow_prediction_mask: bool = False,
   ):
     self.metrics = metrics
+    self.allow_prediction_mask = allow_prediction_mask
     if isinstance(aggregator, aggregation.Aggregator):
       self._aggregators = {None: aggregator}
     else:
@@ -226,7 +228,10 @@ class ComputeStatisticsAggregateAndPrepareForCombine(beam.DoFn):
     # We use a generator below and yield one at a time, to avoid holding all
     # unaggregated statistics in memory all at once in case of large statistics.
     stats_iter = metrics_base.generate_unique_statistics_for_all_metrics(
-        self.metrics, predictions_chunk, targets_chunk
+        self.metrics,
+        predictions_chunk,
+        targets_chunk,
+        allow_prediction_mask=self.allow_prediction_mask,
     )
 
     while True:
@@ -577,6 +582,7 @@ def _get_template_metrics_dataset(
     aggregator: aggregation.Aggregator,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    allow_prediction_mask: bool = False,
 ) -> xr.Dataset:
   """Computes metrics for first chunk to create a template dataset."""
   logging.info('Building metrics template with data from first chunk')
@@ -592,7 +598,11 @@ def _get_template_metrics_dataset(
       ignore_missing_variables=ignore_missing_variables,
   )
   agg_state = _compute_aggregation_state(
-      metrics, aggregator, predictions_chunk, targets_chunk
+      metrics,
+      aggregator,
+      predictions_chunk,
+      targets_chunk,
+      allow_prediction_mask=allow_prediction_mask,
   )
   first_metrics = agg_state.metric_values(metrics)
   template = _expand_template_time_dimensions(first_metrics, times)
@@ -634,6 +644,7 @@ class WriteMetricsChunksToZarr(beam.PTransform):
       ignore_missing_variables: bool = False,
       zarr_chunks: Mapping[str, int] | None = None,
       attrs: Mapping[str, Any] | None = None,
+      allow_prediction_mask: bool = False,
   ):
     super().__init__()
     self.out_path = out_path
@@ -646,6 +657,7 @@ class WriteMetricsChunksToZarr(beam.PTransform):
     self.ignore_missing_variables = ignore_missing_variables
     self.zarr_chunks = zarr_chunks
     self.attrs = attrs
+    self.allow_prediction_mask = allow_prediction_mask
 
   def expand(
       self,
@@ -701,6 +713,7 @@ class WriteMetricsChunksToZarr(beam.PTransform):
           agg,
           setup_fn=self.setup_fn,
           ignore_missing_variables=self.ignore_missing_variables,
+          allow_prediction_mask=self.allow_prediction_mask,
       )
 
       if self.attrs:
@@ -794,6 +807,7 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
       ignore_missing_variables: bool = False,
       zarr_chunks: Mapping[str, int] | None = None,
       attrs: Mapping[str, Any] | None = None,
+      allow_prediction_mask: bool = False,
   ):
     super().__init__()
     self.aggregation_state_out_path = aggregation_state_out_path
@@ -806,6 +820,7 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
     self.ignore_missing_variables = ignore_missing_variables
     self.zarr_chunks = zarr_chunks
     self.attrs = attrs
+    self.allow_prediction_mask = allow_prediction_mask
 
   def expand(
       self,
@@ -870,6 +885,7 @@ class WriteAggregationStateChunksToZarr(beam.PTransform):
           agg,
           setup_fn=self.setup_fn,
           ignore_missing_variables=self.ignore_missing_variables,
+          allow_prediction_mask=self.allow_prediction_mask,
       )
 
       if self.attrs:
@@ -938,6 +954,7 @@ def define_pipeline(
     ignore_missing_variables: bool = False,
     chunk_metrics_by_lead_time: bool = False,
     attrs: Mapping[str, Any] | None = None,
+    allow_prediction_mask: bool = False,
 ):
   """Defines a beam pipeline for calculating aggregated metrics.
 
@@ -1004,7 +1021,11 @@ def define_pipeline(
       # DataArrays for each statistic, variable, type (sum_weights or
       # sum_weighted_statistics) and chunk offset.
       | beam.ParDo(
-          ComputeStatisticsAggregateAndPrepareForCombine(metrics, aggregator)
+          ComputeStatisticsAggregateAndPrepareForCombine(
+              metrics,
+              aggregator,
+              allow_prediction_mask=allow_prediction_mask,
+          )
       )
       # Sum up the statistic DataArrays over dimensions of the TimeChunks that
       # we are reducing over, typically just init_time but can also be
@@ -1034,6 +1055,7 @@ def define_pipeline(
             ignore_missing_variables=ignore_missing_variables,
             zarr_chunks=zarr_chunks,
             attrs=attrs,
+            allow_prediction_mask=allow_prediction_mask,
         )
     )
 
@@ -1086,6 +1108,7 @@ def define_pipeline(
                 ignore_missing_variables=ignore_missing_variables,
                 zarr_chunks=zarr_chunks,
                 attrs=attrs,
+                allow_prediction_mask=allow_prediction_mask,
             )
         )
 
@@ -1118,15 +1141,19 @@ class ComputeAndFormatStatistics(beam.DoFn):
       self,
       metrics: Mapping[str, metrics_base.Metric],
       times: time_chunks.TimeChunks,
+      allow_prediction_mask: bool = False,
   ):
     """Init.
 
     Args:
       metrics: A dictionary of metrics to compute statistics for.
       times: TimeChunks instance providing chunk key logic.
+      allow_prediction_mask: If True, allow predictions to contain a 'mask'
+        coordinate.
     """
     self.metrics = metrics
     self.times = times
+    self.allow_prediction_mask = allow_prediction_mask
 
   def process(
       self,
@@ -1142,7 +1169,10 @@ class ComputeAndFormatStatistics(beam.DoFn):
     time_chunk_offsets, (predictions_chunk, targets_chunk) = element
 
     statistics_dict = metrics_base.compute_unique_statistics_for_all_metrics(
-        self.metrics, predictions_chunk, targets_chunk
+        self.metrics,
+        predictions_chunk,
+        targets_chunk,
+        allow_prediction_mask=self.allow_prediction_mask,
     )
 
     for stat_name, var_dict in statistics_dict.items():
@@ -1170,6 +1200,7 @@ def _get_template_dataset(
     times: time_chunks.TimeChunks,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    allow_prediction_mask: bool = False,
 ) -> xr.Dataset:
   """Computes statistics for the first chunk to create a template dataset."""
   logging.info('Building template with data from first chunk')
@@ -1182,7 +1213,10 @@ def _get_template_dataset(
       ignore_missing_variables=ignore_missing_variables,
   )
   statistics_dict = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, predictions_chunk, targets_chunk
+      metrics,
+      predictions_chunk,
+      targets_chunk,
+      allow_prediction_mask=allow_prediction_mask,
   )
   first_chunk = xr.Dataset()
   for stat_name, var_dict in statistics_dict.items():
@@ -1240,6 +1274,7 @@ def define_unaggregated_pipeline(
     zarr_chunks: Mapping[str, int] | None = None,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    allow_prediction_mask: bool = False,
 ):
   """Defines a Beam pipeline that calculates statistics without aggregation.
 
@@ -1269,6 +1304,7 @@ def define_unaggregated_pipeline(
       times,
       setup_fn=setup_fn,
       ignore_missing_variables=ignore_missing_variables,
+      allow_prediction_mask=allow_prediction_mask,
   )
   dim_sizes = typing.cast(Mapping[str, int], template.sizes)
 
@@ -1301,7 +1337,11 @@ def define_unaggregated_pipeline(
           )
       )
       | 'ComputeAndFormatStatistics'
-      >> beam.ParDo(ComputeAndFormatStatistics(metrics, times))
+      >> beam.ParDo(
+          ComputeAndFormatStatistics(
+              metrics, times, allow_prediction_mask=allow_prediction_mask
+          )
+      )
       | 'Rechunk'
       >> xbeam.Rechunk(
           dim_sizes,
@@ -1349,10 +1389,14 @@ def _compute_aggregation_state(
     aggregator: aggregation.Aggregator,
     predictions_chunk: Mapping[Hashable, xr.DataArray],
     targets_chunk: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = False,
 ) -> aggregation.AggregationState:
   """Computes AggregationState for a single chunk."""
   statistics = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, predictions_chunk, targets_chunk
+      metrics,
+      predictions_chunk,
+      targets_chunk,
+      allow_prediction_mask=allow_prediction_mask,
   )
   return aggregator.aggregate_statistics(statistics)
 
@@ -1362,10 +1406,15 @@ def _compute_aggregation_state_dataset(
     aggregator: aggregation.Aggregator,
     predictions_chunk: Mapping[Hashable, xr.DataArray],
     targets_chunk: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = False,
 ) -> xr.Dataset:
   """Computes the AggregationState dataset for a single chunk."""
   aggregation_state = _compute_aggregation_state(
-      metrics, aggregator, predictions_chunk, targets_chunk
+      metrics,
+      aggregator,
+      predictions_chunk,
+      targets_chunk,
+      allow_prediction_mask=allow_prediction_mask,
   )
   return aggregation_state.to_dataset()
 
@@ -1378,6 +1427,7 @@ def _get_template_aggregation_state_dataset(
     aggregator: aggregation.Aggregator,
     setup_fn: Optional[Callable[[], None]] = None,
     ignore_missing_variables: bool = False,
+    allow_prediction_mask: bool = False,
 ) -> xr.Dataset:
   """Computes AggregationState dataset for the first chunk to create a template dataset."""
   logging.info('Building AggregationState template with data from first chunk.')
@@ -1393,6 +1443,7 @@ def _get_template_aggregation_state_dataset(
       aggregator,
       predictions_chunk,
       targets_chunk,
+      allow_prediction_mask=allow_prediction_mask,
   )
   template = _expand_template_time_dimensions(first_chunk, times)
   template = _transpose_time_dims_first(template)

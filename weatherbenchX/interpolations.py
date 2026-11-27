@@ -497,3 +497,16 @@ class Subsample(Interpolation):
         if dim in da.dims
     }
     return da.isel(**isel_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+
+class BroadcastToReference(Interpolation):
+  """Broadcasts data to match the dimensions and coordinates of reference."""
+
+  def interpolate_data_array(
+      self,
+      da: xr.DataArray,
+      reference: Optional[xr.DataArray] = None,
+  ) -> xr.DataArray:
+    if reference is None:
+      raise ValueError('reference must be provided for BroadcastToReference.')
+    return da.broadcast_like(reference)
