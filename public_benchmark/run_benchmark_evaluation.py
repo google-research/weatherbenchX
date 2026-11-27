@@ -361,10 +361,11 @@ def main(argv: Sequence[str]) -> None:
   ##############################################################################
   # 4. Define aggregation method
   ##############################################################################
-  # Load land-sea mask from ERA5
-  land_sea_mask = xr.open_zarr(
+  # Regions expects a boolean mask; use the same threshold as binning.LandSea.
+  land_sea_fraction = xr.open_zarr(
       target_configs[f'era5_{RESOLUTION.value}']['path']
   )['land_sea_mask'].compute()
+  land_sea_mask = land_sea_fraction >= 0.5
   bin_by = [binning.Regions(REGIONS, land_sea_mask=land_sea_mask)]  # pyrefly: ignore[bad-argument-type]
 
   if TEMPORAL.value:
