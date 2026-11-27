@@ -462,6 +462,7 @@ def compute_metric_values_for_single_chunk(
     aggregator: Aggregator,
     predictions: Mapping[Hashable, xr.DataArray],
     targets: Mapping[Hashable, xr.DataArray],
+    allow_prediction_mask: bool = True,
 ) -> xr.Dataset:
   """Convenience function to compute metric results for a given predictions/targets pair.
 
@@ -472,12 +473,17 @@ def compute_metric_values_for_single_chunk(
     aggregator: Aggregator instance.
     predictions: Xarray Dataset or dictionary of DataArrays.
     targets: Xarray Dataset or dictionary of DataArrays.
+    allow_prediction_mask: If True, allow predictions to contain a 'mask'
+      coordinate. If False, only allow targets to contain a 'mask' coordinate.
 
   Returns:
     results: Xarray Dataset of metric values.
   """
   statistics = metrics_base.compute_unique_statistics_for_all_metrics(
-      metrics, predictions, targets
+      metrics,
+      predictions,
+      targets,
+      allow_prediction_mask=allow_prediction_mask,
   )
   aggregation_state = aggregator.aggregate_statistics(statistics)
   results = aggregation_state.metric_values(metrics)
