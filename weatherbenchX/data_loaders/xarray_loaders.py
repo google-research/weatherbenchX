@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 from absl import logging
 import numpy as np
+from weatherbenchX import interpolations
 from weatherbenchX.data_loaders import base
 import xarray as xr
 
@@ -446,8 +447,12 @@ class ProbabilisticClimatologyFromXarray(XarrayDataLoader):
 class ConstantLoader(base.DataLoader):
   """Loader class that returns a constant dataset."""
 
-  def __init__(self, constant_ds: xr.Dataset):
-    super().__init__()
+  def __init__(
+      self,
+      constant_ds: xr.Dataset,
+      interpolation: Optional[interpolations.Interpolation] = None,
+  ):
+    super().__init__(interpolation=interpolation)
     self._constant_ds = constant_ds
 
   def _load_chunk_from_source(
